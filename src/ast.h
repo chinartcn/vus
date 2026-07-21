@@ -44,6 +44,9 @@ typedef enum {
     VUS_AST_PARAM,
     VUS_AST_PARAM_DEFAULT,
     VUS_AST_THROW,
+    VUS_AST_STRUCT_DEF,
+    VUS_AST_STRUCT_INSTANTIATE,
+    VUS_AST_ACCESS,
 } VusAstNodeType;
 
 /* ============ 前向声明 ============ */
@@ -89,6 +92,7 @@ typedef struct {
     int            line;
     int            column;
     char          *name;
+    VusAstList    *type_params; /* 泛型类型参数列表（Param 节点），可为 NULL */
     VusAstList    *params;      /* Param 或 ParamDefault 节点 */
     VusAstList    *body;        /* 语句列表 */
 } VusAstFunctionDef;
@@ -217,6 +221,7 @@ typedef struct {
     int            column;
     char          *func_name;
     VusAstList    *args;
+    VusAstList    *type_args; /* 泛型类型参数列表（Param 节点），可为 NULL */
 } VusAstCall;
 
 /* Identifier — 标识符引用 */
@@ -279,10 +284,40 @@ typedef struct {
     char          *name;
 } VusAstGlobalDecl;
 
+/* ============ 结构体相关节点类型 ============ */
+
+/* StructDef — 结构体定义 */
+typedef struct {
+    VusAstNodeType type;   /* VUS_AST_STRUCT_DEF */
+    int            line;
+    int            column;
+    char          *name;
+    VusAstList    *fields;      /* Param 节点列表 */
+} VusAstStructDef;
+
+/* StructInstantiate — 结构体实例化 */
+typedef struct {
+    VusAstNodeType type;   /* VUS_AST_STRUCT_INSTANTIATE */
+    int            line;
+    int            column;
+    char          *struct_name;
+    VusAstList    *args;        /* 初始化参数 */
+} VusAstStructInst;
+
+/* Access — 成员访问 */
+typedef struct {
+    VusAstNodeType type;   /* VUS_AST_ACCESS */
+    int            line;
+    int            column;
+    VusAstNode    *object;      /* 点号左侧表达式 */
+    char          *member;      /* 成员名 */
+    int            is_optional; /* 0=普通访问, 1=可选链 */
+} VusAstAccess;
+
 /* ============ AST 节点创建函数 ============ */
 
 VusAstProgram    *vus_ast_program_new(VusAstList *stmts);
-VusAstFunctionDef *vus_ast_func_def_new(const char *name, VusAstList *params, VusAstList *body, int line, int col);
+VusAstFunctionDef *vus_ast_func_def_new(const char *name, VusAstList *type_params, VusAstList *params, VusAstList *body, int line, int col);
 VusAstParam      *vus_ast_param_new(const char *name, const char *type_ann, int line, int col);
 VusAstParamDefault *vus_ast_param_default_new(const char *name, const char *type_ann, VusAstNode *default_val, int line, int col);
 VusAstIf         *vus_ast_if_new(VusAstNode *cond, VusAstList *then_body, int line, int col);
@@ -295,7 +330,7 @@ VusAstAssign     *vus_ast_assign_new(const char *target, const char *type_ann, V
 VusAstExprStmt   *vus_ast_expr_stmt_new(VusAstNode *expr, int line, int col);
 VusAstBinaryOp   *vus_ast_binary_new(const char *op, VusAstNode *left, VusAstNode *right, int line, int col);
 VusAstUnaryOp    *vus_ast_unary_new(const char *op, VusAstNode *operand, int line, int col);
-VusAstCall       *vus_ast_call_new(const char *func, VusAstList *args, int line, int col);
+VusAstCall       *vus_ast_call_new(const char *func, VusAstList *args, VusAstList *type_args, int line, int col);
 VusAstIdentifier *vus_ast_ident_new(const char *name, int line, int col);
 VusAstString     *vus_ast_string_new(const char *val, int line, int col);
 VusAstNumber     *vus_ast_number_new(const char *val, int is_float, int line, int col);
@@ -304,6 +339,9 @@ VusAstNull       *vus_ast_null_new(int line, int col);
 VusAstBreak      *vus_ast_break_new(int line, int col);
 VusAstThrow      *vus_ast_throw_new(VusAstNode *val, int line, int col);
 VusAstGlobalDecl *vus_ast_global_new(const char *name, int line, int col);
+VusAstStructDef  *vus_ast_struct_def_new(const char *name, VusAstList *fields, int line, int col);
+VusAstStructInst *vus_ast_struct_inst_new(const char *name, VusAstList *args, int line, int col);
+VusAstAccess     *vus_ast_access_new(VusAstNode *obj, const char *member, int line, int col);
 
 /* 释放整个 AST 树 */
 void vus_ast_node_free(VusAstNode *node);

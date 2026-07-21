@@ -551,6 +551,21 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
     /* 对于函数调用，生成 vus_函数名(args) 形式，参数为 VusString* 数组 */
     char args_buf[4096] = {0};
     size_t pos = 0;
+
+    /* 如果有泛型类型参数，添加注释 */
+    if (call->type_args && call->type_args->count > 0) {
+        pos += snprintf(args_buf + pos, sizeof(args_buf) - pos, "/* <");
+        for (size_t i = 0; i < call->type_args->count; i++) {
+            VusAstNode *pnode = call->type_args->items[i];
+            if (pnode->type == VUS_AST_PARAM) {
+                VusAstParam *tp = (VusAstParam *)pnode;
+                if (i > 0) pos += snprintf(args_buf + pos, sizeof(args_buf) - pos, ", ");
+                pos += snprintf(args_buf + pos, sizeof(args_buf) - pos, "%s", tp->name);
+            }
+        }
+        pos += snprintf(args_buf + pos, sizeof(args_buf) - pos, "> */");
+    }
+
     pos += snprintf(args_buf + pos, sizeof(args_buf) - pos, "({VusString* _vus_args[%zu];_vus_args[0]=NULL;", nargs + 1);
     for (size_t i = 0; i < nargs; i++) {
         pos += snprintf(args_buf + pos, sizeof(args_buf) - pos,

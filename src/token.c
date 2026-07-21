@@ -106,6 +106,9 @@ const char *vus_token_type_name(VusTokenType type)
     case VUS_TOKEN_CN_THROW:     return "抛出";
     case VUS_TOKEN_CN_IN:        return "在";
 
+    case VUS_TOKEN_STRUCT:       return "struct";
+    case VUS_TOKEN_CN_STRUCT:    return "结构";
+
     /* 类型关键字 */
     case VUS_TOKEN_TYPE_INT:     return "整型";
     case VUS_TOKEN_TYPE_FLOAT:   return "浮点型";
@@ -193,6 +196,7 @@ static const KeywordEntry s_keywords[] = {
     {"throw",    5, VUS_TOKEN_THROW},
     {"true",     4, VUS_TOKEN_TRUE},
     {"try",      3, VUS_TOKEN_TRY},
+    {"struct",   6, VUS_TOKEN_STRUCT},
     {"while",    5, VUS_TOKEN_WHILE},
 
     /* 中文别名关键字 */
@@ -223,6 +227,7 @@ static const KeywordEntry s_keywords[] = {
     {"否则",     6, VUS_TOKEN_CN_ELSE},
     {"否则如果", 12, VUS_TOKEN_CN_ELIF},
     {"浮点型",   9, VUS_TOKEN_TYPE_FLOAT},
+    {"结构",     6, VUS_TOKEN_CN_STRUCT},
 };
 
 #define KEYWORD_COUNT (sizeof(s_keywords) / sizeof(s_keywords[0]))

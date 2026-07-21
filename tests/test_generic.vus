@@ -1,0 +1,18 @@
+# 测试：泛型函数定义和调用
+# 验证泛型语法：定义 + 调用
+
+定义 标识<T>(a):
+    返回 a
+
+定义 合并<T, U>(a, b):
+    返回 a + b
+
+# 带泛型参数的函数调用
+x = 标识<int>(42)
+print(x)
+
+y = 标识<string>("hello")
+print(y)
+
+z = 合并<string, string>("a", "b")
+print(z)

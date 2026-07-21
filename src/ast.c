@@ -50,13 +50,14 @@ VusAstProgram *vus_ast_program_new(VusAstList *stmts) {
     return node;
 }
 
-VusAstFunctionDef *vus_ast_func_def_new(const char *name, VusAstList *params, VusAstList *body, int line, int col) {
+VusAstFunctionDef *vus_ast_func_def_new(const char *name, VusAstList *type_params, VusAstList *params, VusAstList *body, int line, int col) {
     VusAstFunctionDef *node = calloc(1, sizeof(VusAstFunctionDef));
     if (!node) return NULL;
     node->type = VUS_AST_FUNCTION_DEF;
     node->line = line;
     node->column = col;
     node->name = name ? strdup(name) : NULL;
+    node->type_params = type_params;
     node->params = params ? params : vus_ast_list_new();
     node->body = body ? body : vus_ast_list_new();
     return node;
@@ -228,7 +229,7 @@ VusAstUnaryOp *vus_ast_unary_new(const char *op, VusAstNode *operand, int line, 
     return node;
 }
 
-VusAstCall *vus_ast_call_new(const char *func, VusAstList *args, int line, int col) {
+VusAstCall *vus_ast_call_new(const char *func, VusAstList *args, VusAstList *type_args, int line, int col) {
     VusAstCall *node = calloc(1, sizeof(VusAstCall));
     if (!node) return NULL;
     node->type = VUS_AST_CALL;
@@ -236,6 +237,7 @@ VusAstCall *vus_ast_call_new(const char *func, VusAstList *args, int line, int c
     node->column = col;
     node->func_name = func ? strdup(func) : NULL;
     node->args = args ? args : vus_ast_list_new();
+    node->type_args = type_args;
     return node;
 }
 
@@ -318,6 +320,40 @@ VusAstGlobalDecl *vus_ast_global_new(const char *name, int line, int col) {
     return node;
 }
 
+VusAstStructDef *vus_ast_struct_def_new(const char *name, VusAstList *fields, int line, int col) {
+    VusAstStructDef *node = calloc(1, sizeof(VusAstStructDef));
+    if (!node) return NULL;
+    node->type = VUS_AST_STRUCT_DEF;
+    node->line = line;
+    node->column = col;
+    node->name = name ? strdup(name) : NULL;
+    node->fields = fields ? fields : vus_ast_list_new();
+    return node;
+}
+
+VusAstStructInst *vus_ast_struct_inst_new(const char *name, VusAstList *args, int line, int col) {
+    VusAstStructInst *node = calloc(1, sizeof(VusAstStructInst));
+    if (!node) return NULL;
+    node->type = VUS_AST_STRUCT_INSTANTIATE;
+    node->line = line;
+    node->column = col;
+    node->struct_name = name ? strdup(name) : NULL;
+    node->args = args ? args : vus_ast_list_new();
+    return node;
+}
+
+VusAstAccess *vus_ast_access_new(VusAstNode *obj, const char *member, int line, int col) {
+    VusAstAccess *node = calloc(1, sizeof(VusAstAccess));
+    if (!node) return NULL;
+    node->type = VUS_AST_ACCESS;
+    node->line = line;
+    node->column = col;
+    node->object = obj;
+    node->member = member ? strdup(member) : NULL;
+    node->is_optional = 0;
+    return node;
+}
+
 /* ============ AST 节点释放 ============ */
 
 void vus_ast_node_free(VusAstNode *node) {
@@ -332,6 +368,7 @@ void vus_ast_node_free(VusAstNode *node) {
     case VUS_AST_FUNCTION_DEF: {
         VusAstFunctionDef *n = (VusAstFunctionDef *)node;
         free(n->name);
+        vus_ast_list_free(n->type_params);
         vus_ast_list_free(n->params);
         vus_ast_list_free(n->body);
         break;
@@ -420,6 +457,7 @@ void vus_ast_node_free(VusAstNode *node) {
         VusAstCall *n = (VusAstCall *)node;
         free(n->func_name);
         vus_ast_list_free(n->args);
+        vus_ast_list_free(n->type_args);
         break;
     }
     case VUS_AST_IDENTIFIER: {
@@ -450,6 +488,24 @@ void vus_ast_node_free(VusAstNode *node) {
     case VUS_AST_GLOBAL_DECL: {
         VusAstGlobalDecl *n = (VusAstGlobalDecl *)node;
         free(n->name);
+        break;
+    }
+    case VUS_AST_STRUCT_DEF: {
+        VusAstStructDef *n = (VusAstStructDef *)node;
+        free(n->name);
+        vus_ast_list_free(n->fields);
+        break;
+    }
+    case VUS_AST_STRUCT_INSTANTIATE: {
+        VusAstStructInst *n = (VusAstStructInst *)node;
+        free(n->struct_name);
+        vus_ast_list_free(n->args);
+        break;
+    }
+    case VUS_AST_ACCESS: {
+        VusAstAccess *n = (VusAstAccess *)node;
+        vus_ast_node_free(n->object);
+        free(n->member);
         break;
     }
     case VUS_AST_IMPORT:

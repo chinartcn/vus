@@ -63,6 +63,7 @@ static VusAstNode *parse_continue_stmt(VusParser *parser);
 static VusAstNode *parse_throw_stmt(VusParser *parser);
 static VusAstNode *parse_global_stmt(VusParser *parser);
 static VusAstNode *parse_assign_or_expr(VusParser *parser);
+static VusAstNode *parse_struct_def(VusParser *parser);
 
 /* 表达式解析 */
 static VusAstNode *parse_expr(VusParser *parser);
@@ -247,6 +248,11 @@ static VusAstNode *parse_statement(VusParser *parser) {
         case VUS_TOKEN_CN_GLOBAL:
             return parse_global_stmt(parser);
 
+        /* ===== 结构体定义 ===== */
+        case VUS_TOKEN_STRUCT:
+        case VUS_TOKEN_CN_STRUCT:
+            return parse_struct_def(parser);
+
         /* ===== 赋值或表达式 ===== */
         default:
             return parse_assign_or_expr(parser);
@@ -275,20 +281,45 @@ static VusAstNode *parse_function_def(VusParser *parser) {
     if (!name_token) return NULL;
     char *name = strndup(name_token->start, name_token->length);
 
+    /* 泛型类型参数 <T> 或 <T, U> */
+    VusAstList *type_params = NULL;
+    if (parser_peek(parser) && parser_peek(parser)->type == VUS_TOKEN_LT) {
+        type_params = vus_ast_list_new();
+        parser_advance(parser); /* skip < */
+        while (1) {
+            VusToken *tp_tok = parser_expect(parser, VUS_TOKEN_IDENTIFIER);
+            if (!tp_tok) { free(name); vus_ast_list_free(type_params); return NULL; }
+            char *tp_name = strndup(tp_tok->start, tp_tok->length);
+            VusAstParam *tp = vus_ast_param_new(tp_name, NULL, tp_tok->line, tp_tok->column);
+            free(tp_name);
+            vus_ast_list_push(type_params, (VusAstNode *)tp);
+
+            if (parser_match(parser, VUS_TOKEN_COMMA)) {
+                continue;
+            } else if (parser_match(parser, VUS_TOKEN_GT)) {
+                break;
+            } else {
+                parser_set_error(parser, "期望 '>' 或 ',' 在泛型参数中（第 %d 行第 %d 列）",
+                                 tp_tok->line, tp_tok->column);
+                free(name); vus_ast_list_free(type_params); return NULL;
+            }
+        }
+    }
+
     /* 参数列表 */
     VusAstList *params = NULL;
     if (parser_match(parser, VUS_TOKEN_LPAREN)) {
         params = parse_params(parser);
-        if (parser->error) { free(name); return NULL; }
+        if (parser->error) { free(name); vus_ast_list_free(type_params); return NULL; }
         parser_expect(parser, VUS_TOKEN_RPAREN);
-        if (parser->error) { free(name); vus_ast_list_free(params); return NULL; }
+        if (parser->error) { free(name); vus_ast_list_free(type_params); vus_ast_list_free(params); return NULL; }
     } else {
         params = vus_ast_list_new();
     }
 
     /* 期望冒号 */
     parser_expect(parser, VUS_TOKEN_COLON);
-    if (parser->error) { free(name); vus_ast_list_free(params); return NULL; }
+    if (parser->error) { free(name); vus_ast_list_free(type_params); vus_ast_list_free(params); return NULL; }
 
     /* 解析函数体 */
     parser_skip_newlines(parser);
@@ -297,15 +328,15 @@ static VusAstNode *parse_function_def(VusParser *parser) {
 
     /* 期望 INDENT，然后解析到 DEDENT */
     VusToken *indent = parser_expect(parser, VUS_TOKEN_INDENT);
-    if (!indent) { free(name); vus_ast_list_free(params); return NULL; }
+    if (!indent) { free(name); vus_ast_list_free(type_params); vus_ast_list_free(params); return NULL; }
 
     body = parse_statements(parser);
-    if (parser->error) { free(name); vus_ast_list_free(params); vus_ast_list_free(body); return NULL; }
+    if (parser->error) { free(name); vus_ast_list_free(type_params); vus_ast_list_free(params); vus_ast_list_free(body); return NULL; }
 
     parser_expect(parser, VUS_TOKEN_DEDENT);
-    if (parser->error) { free(name); vus_ast_list_free(params); vus_ast_list_free(body); return NULL; }
+    if (parser->error) { free(name); vus_ast_list_free(type_params); vus_ast_list_free(params); vus_ast_list_free(body); return NULL; }
 
-    VusAstFunctionDef *node = vus_ast_func_def_new(name, params, body, line, col);
+    VusAstFunctionDef *node = vus_ast_func_def_new(name, type_params, params, body, line, col);
     free(name);
     return (VusAstNode*)node;
 }
@@ -913,6 +944,100 @@ static VusAstNode *parse_global_stmt(VusParser *parser) {
 }
 
 /* ==================================================================
+ * 结构体定义解析
+ * ==================================================================
+ *
+ * 函数风格:
+ *   struct 名称:\n    字段名1: 类型\n    字段名2: 类型
+ *
+ * 中文别名:
+ *   结构 名称:\n    字段名1: 类型\n    字段名2: 类型
+ */
+static VusAstNode *parse_struct_def(VusParser *parser) {
+    int line = parser->tokens[parser->pos].line;
+    int col = parser->tokens[parser->pos].column;
+    parser_advance(parser); /* 跳过 struct/结构 */
+
+    if (parser->pos >= parser->token_count ||
+        parser->tokens[parser->pos].type == VUS_TOKEN_NEWLINE ||
+        parser->tokens[parser->pos].type == VUS_TOKEN_EOF) {
+        parser_set_error(parser, "结构体定义需要名称");
+        return NULL;
+    }
+    VusToken *name_tok = &parser->tokens[parser->pos];
+    if (name_tok->type != VUS_TOKEN_IDENTIFIER) {
+        parser_set_error(parser, "期望结构体名称，但遇到 %s（第 %d 行第 %d 列）",
+                         vus_token_type_name(name_tok->type), name_tok->line, name_tok->column);
+        return NULL;
+    }
+    char name_buf[256];
+    snprintf(name_buf, sizeof(name_buf), "%.*s", (int)name_tok->length, name_tok->start);
+    parser_advance(parser);
+
+    /* 期望换行或冒号 */
+    if (parser->pos < parser->token_count && parser->tokens[parser->pos].type == VUS_TOKEN_COLON) {
+        parser_advance(parser);
+    }
+
+    /* 期望换行 */
+    if (parser->pos < parser->token_count && parser->tokens[parser->pos].type == VUS_TOKEN_NEWLINE) {
+        parser_advance(parser);
+    }
+    /* 期望缩进 */
+    if (parser->pos >= parser->token_count || parser->tokens[parser->pos].type != VUS_TOKEN_INDENT) {
+        parser_set_error(parser, "结构体体需要缩进（第 %d 行第 %d 列）", line, col);
+        return NULL;
+    }
+    parser_advance(parser);
+
+    VusAstList *fields = vus_ast_list_new();
+
+    /* 解析字段（每行一个） */
+    while (parser->pos < parser->token_count) {
+        VusToken *tok = &parser->tokens[parser->pos];
+        if (tok->type == VUS_TOKEN_DEDENT || tok->type == VUS_TOKEN_EOF) break;
+        if (tok->type == VUS_TOKEN_NEWLINE) { parser_advance(parser); continue; }
+
+        /* 字段名 */
+        char field_name[256];
+        snprintf(field_name, sizeof(field_name), "%.*s", (int)tok->length, tok->start);
+        parser_advance(parser);
+
+        /* 可选类型注解 */
+        char *type_ann = NULL;
+        if (parser->pos < parser->token_count && parser->tokens[parser->pos].type == VUS_TOKEN_COLON) {
+            parser_advance(parser);
+            if (parser->pos < parser->token_count && parser->tokens[parser->pos].type == VUS_TOKEN_IDENTIFIER) {
+                char ann_buf[256];
+                snprintf(ann_buf, sizeof(ann_buf), "%.*s",
+                         (int)parser->tokens[parser->pos].length, parser->tokens[parser->pos].start);
+                type_ann = strdup(ann_buf);
+                parser_advance(parser);
+            }
+        }
+
+        VusAstParam *param = vus_ast_param_new(field_name, type_ann, tok->line, tok->column);
+        vus_ast_list_push(fields, (VusAstNode *)param);
+        if (type_ann) free(type_ann);
+
+        /* 跳过该行剩余内容 */
+        while (parser->pos < parser->token_count &&
+               parser->tokens[parser->pos].type != VUS_TOKEN_NEWLINE &&
+               parser->tokens[parser->pos].type != VUS_TOKEN_DEDENT &&
+               parser->tokens[parser->pos].type != VUS_TOKEN_EOF) {
+            parser_advance(parser);
+        }
+    }
+
+    /* 跳过 DEDENT */
+    if (parser->pos < parser->token_count && parser->tokens[parser->pos].type == VUS_TOKEN_DEDENT) {
+        parser_advance(parser);
+    }
+
+    return (VusAstNode *)vus_ast_struct_def_new(name_buf, fields, line, col);
+}
+
+/* ==================================================================
  * 赋值或表达式语句解析
  * ================================================================== */
 static VusAstNode *parse_assign_or_expr(VusParser *parser) {
@@ -1198,18 +1323,99 @@ static VusAstNode *parse_primary(VusParser *parser) {
             int line = token->line;
             int col = token->column;
 
-            /* 函数调用？ */
-            if (parser_peek(parser) && parser_peek(parser)->type == VUS_TOKEN_LPAREN) {
+            VusAstNode *expr = NULL;
+            VusAstList *type_args = NULL;
+
+            /* 检查泛型类型参数 <T, U> */
+            if (parser_peek(parser) && parser_peek(parser)->type == VUS_TOKEN_LT) {
+                /* 尝试解析泛型类型参数，如果后面不是标识符+逗号+>，则回退 */
+                VusParser saved = *parser; /* 保存状态以便回退 */
+                parser_advance(parser); /* skip < */
+                VusAstList *ta = vus_ast_list_new();
+                int valid = 1;
+                while (1) {
+                    VusToken *tp_tok = parser_peek(parser);
+                    if (!tp_tok) { valid = 0; break; }
+                    /* 接受标识符或类型关键字作为类型参数名 */
+                    int is_type = (tp_tok->type == VUS_TOKEN_IDENTIFIER ||
+                                   tp_tok->type == VUS_TOKEN_TYPE_INT ||
+                                   tp_tok->type == VUS_TOKEN_TYPE_STR ||
+                                   tp_tok->type == VUS_TOKEN_TYPE_FLOAT ||
+                                   tp_tok->type == VUS_TOKEN_TYPE_BOOL ||
+                                   tp_tok->type == VUS_TOKEN_TYPE_LIST ||
+                                   tp_tok->type == VUS_TOKEN_TYPE_DICT);
+                    if (!is_type) { valid = 0; break; }
+                    parser_advance(parser);
+                    char *tp_name = strndup(tp_tok->start, tp_tok->length);
+                    VusAstParam *tp = vus_ast_param_new(tp_name, NULL, tp_tok->line, tp_tok->column);
+                    free(tp_name);
+                    vus_ast_list_push(ta, (VusAstNode *)tp);
+
+                    VusToken *next = parser_peek(parser);
+                    if (!next) { valid = 0; break; }
+                    if (next->type == VUS_TOKEN_COMMA) {
+                        parser_advance(parser);
+                        continue;
+                    } else if (next->type == VUS_TOKEN_GT) {
+                        parser_advance(parser);
+                        break;
+                    } else {
+                        valid = 0;
+                        break;
+                    }
+                }
+                if (valid && parser_peek(parser) && parser_peek(parser)->type == VUS_TOKEN_LPAREN) {
+                    /* 确实是泛型函数调用 */
+                    type_args = ta;
+                    VusAstList *args = parse_call_args(parser);
+                    if (!args) { free(name); vus_ast_list_free(type_args); return NULL; }
+                    VusAstCall *node = vus_ast_call_new(name, args, type_args, line, col);
+                    free(name);
+                    expr = (VusAstNode*)node;
+                } else {
+                    /* 不是泛型调用，回退 */
+                    *parser = saved;
+                    vus_ast_list_free(ta);
+                    type_args = NULL;
+                    /* 普通函数调用？ */
+                    if (parser_peek(parser) && parser_peek(parser)->type == VUS_TOKEN_LPAREN) {
+                        VusAstList *args = parse_call_args(parser);
+                        if (!args) { free(name); return NULL; }
+                        VusAstCall *node = vus_ast_call_new(name, args, NULL, line, col);
+                        free(name);
+                        expr = (VusAstNode*)node;
+                    } else {
+                        VusAstIdentifier *node = vus_ast_ident_new(name, line, col);
+                        free(name);
+                        expr = (VusAstNode*)node;
+                    }
+                }
+            } else if (parser_peek(parser) && parser_peek(parser)->type == VUS_TOKEN_LPAREN) {
                 VusAstList *args = parse_call_args(parser);
                 if (!args) { free(name); return NULL; }
-                VusAstCall *node = vus_ast_call_new(name, args, line, col);
+                VusAstCall *node = vus_ast_call_new(name, args, NULL, line, col);
                 free(name);
-                return (VusAstNode*)node;
+                expr = (VusAstNode*)node;
+            } else {
+                VusAstIdentifier *node = vus_ast_ident_new(name, line, col);
+                free(name);
+                expr = (VusAstNode*)node;
             }
 
-            VusAstIdentifier *node = vus_ast_ident_new(name, line, col);
-            free(name);
-            return (VusAstNode*)node;
+            /* 成员访问链（点号） */
+            while (parser_peek(parser) && parser_peek(parser)->type == VUS_TOKEN_DOT) {
+                parser_advance(parser); /* 跳过点号 */
+                if (parser_peek(parser) && parser_peek(parser)->type == VUS_TOKEN_IDENTIFIER) {
+                    VusToken *mtok = parser_peek(parser);
+                    char member[256];
+                    snprintf(member, sizeof(member), "%.*s", (int)mtok->length, mtok->start);
+                    parser_advance(parser);
+                    VusAstAccess *access = vus_ast_access_new(expr, member, line, col);
+                    expr = (VusAstNode*)access;
+                }
+            }
+
+            return expr;
         }
 
         case VUS_TOKEN_NUMBER: {
@@ -1459,6 +1665,13 @@ static void vus_ast_print_node(VusAstNode *node, int indent) {
             VusAstFunctionDef *fd = (VusAstFunctionDef*)node;
             print_indent(indent);
             printf("FunctionDef: %s\n", fd->name);
+            if (fd->type_params && fd->type_params->count > 0) {
+                print_indent(indent + 1);
+                printf("TypeParams:\n");
+                for (size_t i = 0; i < fd->type_params->count; i++) {
+                    vus_ast_print_node(fd->type_params->items[i], indent + 2);
+                }
+            }
             print_indent(indent + 1);
             printf("Params:\n");
             if (fd->params) {
@@ -1728,7 +1941,25 @@ static void vus_ast_print_node(VusAstNode *node, int indent) {
         case VUS_AST_CALL: {
             VusAstCall *c = (VusAstCall*)node;
             print_indent(indent);
-            printf("Call: %s\n", c->func_name);
+            printf("Call: %s", c->func_name);
+            if (c->type_args && c->type_args->count > 0) {
+                printf("<");
+                for (size_t i = 0; i < c->type_args->count; i++) {
+                    VusAstNode *p = c->type_args->items[i];
+                    if (p->type == VUS_AST_PARAM) {
+                        VusAstParam *tp = (VusAstParam *)p;
+                        if (i > 0) printf(", ");
+                        printf("%s", tp->name);
+                    }
+                }
+                printf(">");
+            }
+            printf("\n");
+            if (c->type_args) {
+                for (size_t i = 0; i < c->type_args->count; i++) {
+                    vus_ast_print_node(c->type_args->items[i], indent + 1);
+                }
+            }
             if (c->args) {
                 for (size_t i = 0; i < c->args->count; i++) {
                     vus_ast_print_node(c->args->items[i], indent + 1);
@@ -1811,6 +2042,38 @@ static void vus_ast_print_node(VusAstNode *node, int indent) {
                     vus_ast_print_node(dl->values->items[i], indent + 2);
                 }
             }
+            break;
+        }
+
+        case VUS_AST_STRUCT_DEF: {
+            VusAstStructDef *sd = (VusAstStructDef*)node;
+            print_indent(indent);
+            printf("StructDef: %s\n", sd->name);
+            if (sd->fields) {
+                for (size_t i = 0; i < sd->fields->count; i++) {
+                    vus_ast_print_node(sd->fields->items[i], indent + 1);
+                }
+            }
+            break;
+        }
+
+        case VUS_AST_STRUCT_INSTANTIATE: {
+            VusAstStructInst *si = (VusAstStructInst*)node;
+            print_indent(indent);
+            printf("StructInst: %s\n", si->struct_name);
+            if (si->args) {
+                for (size_t i = 0; i < si->args->count; i++) {
+                    vus_ast_print_node(si->args->items[i], indent + 1);
+                }
+            }
+            break;
+        }
+
+        case VUS_AST_ACCESS: {
+            VusAstAccess *ac = (VusAstAccess*)node;
+            print_indent(indent);
+            printf("Access: %s%s\n", ac->member, ac->is_optional ? " (可选)" : "");
+            vus_ast_print_node(ac->object, indent + 1);
             break;
         }
 

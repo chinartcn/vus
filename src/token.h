@@ -70,6 +70,10 @@ typedef enum {
     VUS_TOKEN_CN_THROW,
     VUS_TOKEN_CN_IN,
 
+    /* 结构体关键字 */
+    VUS_TOKEN_STRUCT,
+    VUS_TOKEN_CN_STRUCT,
+
     /* 类型注解关键字 */
     VUS_TOKEN_TYPE_INT,
     VUS_TOKEN_TYPE_FLOAT,

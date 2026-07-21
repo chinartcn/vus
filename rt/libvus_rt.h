@@ -131,4 +131,20 @@ VusString* vus_to_string(int64_t n);
 // 失败时返回 0.0，*err 置非 0。
 double vus_to_float(VusString* s, int* err);
 
+// ============ 线程支持 ============
+typedef struct VusThread VusThread;
+
+VusThread* vus_thread_create(void* (*func)(void*), void* arg);
+void* vus_thread_join(VusThread* thread);
+void vus_thread_detach(VusThread* thread);
+
+// ============ 异步 / 协程支持 ============
+// 使用 ucontext 实现轻量级协程
+typedef struct VusCoroutine VusCoroutine;
+
+VusCoroutine* vus_coro_create(void (*func)(void*), void* arg);
+void vus_coro_resume(VusCoroutine* coro);
+void vus_coro_yield(void);
+int vus_coro_is_done(VusCoroutine* coro);
+
 #endif // VUS_RT_H
