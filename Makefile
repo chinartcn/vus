@@ -13,7 +13,8 @@ TEST_DIR = tests
 # 源文件
 SRCS     = $(SRC_DIR)/main.c $(SRC_DIR)/token.c $(SRC_DIR)/lexer.c \
            $(SRC_DIR)/parser.c $(SRC_DIR)/generator.c $(SRC_DIR)/config.c \
-           $(SRC_DIR)/ast.c $(SRC_DIR)/vus_abi.c $(SRC_DIR)/vus_plugin.c
+           $(SRC_DIR)/ast.c $(SRC_DIR)/vus_abi.c $(SRC_DIR)/vus_plugin.c \
+           $(SRC_DIR)/vus_lang.c
 OBJS     = $(SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
 RT_SRC   = $(RT_DIR)/libvus_rt.c
 RT_OBJ   = $(BUILD_DIR)/libvus_rt.o
@@ -77,6 +78,13 @@ $(BUILD_DIR)/vus_abi.o: $(SRC_DIR)/vus_abi.c $(ABI_H) $(GEN_H) $(PARSER_H) $(LEX
 $(BUILD_DIR)/vus_plugin.o: $(SRC_DIR)/vus_plugin.c $(PLUGIN_H) $(ABI_H) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c -o $@ $<
 
+# 语言插件系统
+LANG_H   = $(SRC_DIR)/../include/vus/vus_lang.h
+LANG_INT = $(SRC_DIR)/vus_lang.h
+
+$(BUILD_DIR)/vus_lang.o: $(SRC_DIR)/vus_lang.c $(LANG_H) $(LANG_INT) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(SRC_DIR) -c -o $@ $<
+
 # 编译运行时库
 $(RT_OBJ): $(RT_SRC) $(RT_H) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -I$(RT_DIR) -c -o $@ $<
@@ -110,6 +118,8 @@ install: vus
 	install -m 644 scripts/vux_plugin_entry.py /usr/local/share/vus/scripts/
 	install -d /usr/local/share/vus/examples/plugins
 	cp -r examples/plugins/* /usr/local/share/vus/examples/plugins/ 2>/dev/null || true
+	install -d /usr/local/share/vus/include/vus
+	install -m 644 include/vus/vus_lang.h /usr/local/share/vus/include/vus/
 
 uninstall:
 	rm -f /usr/local/bin/vus

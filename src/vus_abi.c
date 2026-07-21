@@ -11,6 +11,7 @@
 #include "parser.h"
 #include "lexer.h"
 #include "config.h"
+#include "vus_lang.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,10 +49,23 @@ static VusResult compile_source(const char *source, size_t source_len,
     VusResult result;
     memset(&result, 0, sizeof(result));
 
+    /* 语言插件预处理：将源码转换为标准 VUS 函数风格 */
+    const char *processed_source = source;
+    size_t processed_len = source_len;
+    char *preprocessed = NULL;
+
+    if (config->language_plugin[0] != '\0') {
+        if (vus_lang_preprocess(config->language_plugin, source, &preprocessed) == 0 && preprocessed) {
+            processed_source = preprocessed;
+            processed_len = strlen(preprocessed);
+        }
+    }
+
     /* 词法分析 */
-    VusLexer *lexer = vus_lexer_new(source, source_len);
+    VusLexer *lexer = vus_lexer_new(processed_source, processed_len);
     if (!lexer) {
         snprintf(result.error_msg, sizeof(result.error_msg), "Failed to create lexer");
+        free(preprocessed);
         return result;
     }
 
@@ -62,6 +76,7 @@ static VusResult compile_source(const char *source, size_t source_len,
                  "Lexer error: %s", vus_lexer_error(lexer));
         vus_lexer_free_tokens(tokens, token_count);
         vus_lexer_free(lexer);
+        free(preprocessed);
         return result;
     }
 
@@ -73,6 +88,7 @@ static VusResult compile_source(const char *source, size_t source_len,
     if (!parser) {
         snprintf(result.error_msg, sizeof(result.error_msg), "Failed to create parser");
         vus_lexer_free_tokens(tokens, token_count);
+        free(preprocessed);
         return result;
     }
 
@@ -82,6 +98,7 @@ static VusResult compile_source(const char *source, size_t source_len,
                  "Parser error: %s", vus_parser_error(parser));
         vus_parser_free(parser);
         vus_lexer_free_tokens(tokens, token_count);
+        free(preprocessed);
         return result;
     }
 
@@ -93,6 +110,7 @@ static VusResult compile_source(const char *source, size_t source_len,
     if (!c_code) {
         snprintf(result.error_msg, sizeof(result.error_msg), "Failed to generate C code");
         vus_ast_node_free((VusAstNode *)program);
+        free(preprocessed);
         return result;
     }
 
@@ -103,6 +121,7 @@ static VusResult compile_source(const char *source, size_t source_len,
                  "Failed to write C file: %s", output_c_path);
         vus_generate_free(c_code);
         vus_ast_node_free((VusAstNode *)program);
+        free(preprocessed);
         return result;
     }
 
@@ -117,6 +136,8 @@ static VusResult compile_source(const char *source, size_t source_len,
 
     vus_generate_free(c_code);
     vus_ast_node_free((VusAstNode *)program);
+
+    free(preprocessed);
     return result;
 }
 

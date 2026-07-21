@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-vux_plugin_manager.py — VUS .vux 插件管理工具
+vux_plugin_manager.py — VUS .vux 功能插件 / .vulage 语言插件 管理工具
 
 用法:
-    python3 vux_plugin_manager.py install <路径或URL>  # 安装 .vux 插件
+    python3 vux_plugin_manager.py install <路径或URL>  # 安装 .vux / .vulage 插件
     python3 vux_plugin_manager.py build [目录]         # 打包为 .vux
     python3 vux_plugin_manager.py info <插件名或路径>   # 查看插件信息
     python3 vux_plugin_manager.py list                 # 列出已安装插件
     python3 vux_plugin_manager.py run <插件名> [输入]   # 运行插件
     python3 vux_plugin_manager.py check-deps [目录]    # 检查依赖
 
-.vux 文件结构:
+.vux 文件结构（功能插件）:
     plugin.vux
     ├── vux.json          # 元数据（必需）
     ├── __init__.py       # 插件入口（必需）
@@ -19,6 +19,17 @@ vux_plugin_manager.py — VUS .vux 插件管理工具
     └── 资源/             # 静态资源（可选）
         ├── 图标.png
         └── 样式.css
+
+.vulage 文件结构（语言插件）:
+    plugin.vulage
+    ├── vux.json          # 元数据（必需）
+    ├── __init__.py       # 预处理入口（必需）
+    ├── plugin.vulage     # 共享库（可选，C 实现）
+    └── 资源/             # 静态资源（可选）
+
+区别:
+    .vux  — 运行时功能插件（TUI、网络、数据库等），在 AST 生成后加载
+    .vulage — 编译前语言插件（语法风格），在词法分析前加载
 """
 
 import argparse
@@ -161,15 +172,45 @@ def install_vux_deps(deps_file):
 
 
 def install_plugin(source):
-    """安装 .vux 插件。
-    
+    """安装插件（.vux 功能插件 或 .vulage 语言插件）。
+
     Args:
-        source: .vux 文件路径、URL 或插件名
+        source: 插件路径、URL 或插件名
     """
     ensure_dirs()
     source = str(source)
 
-    # 判断来源类型
+    # 判断插件类型
+    is_vulage = source.endswith(".vulage") or ".vulage" in source
+
+    if is_vulage:
+        # .vulage 语言插件 —— 目录复制，不解压
+        source_path = Path(source)
+        if not source_path.exists():
+            print(f"错误: 找不到 .vulage 插件: {source}", file=sys.stderr)
+            return False
+
+        # 读取元数据
+        meta_path = source_path / "vux.json"
+        if not meta_path.exists():
+            print("错误: .vulage 插件中缺少 vux.json", file=sys.stderr)
+            return False
+
+        with open(meta_path, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+
+        plugin_name = metadata.get("名称", metadata.get("name", source_path.name))
+        install_dir = PLUGINS_DIR / plugin_name
+
+        if install_dir.exists():
+            shutil.rmtree(install_dir)
+
+        shutil.copytree(source_path, install_dir)
+        print(f"✅ 语言插件 '{plugin_name}' 安装成功 (类型: .vulage)")
+        print(f"   安装到: {install_dir}")
+        return True
+
+    # .vux 功能插件 —— 原有逻辑（URL 下载/注册表查找/zip 解压）
     if source.startswith(("http://", "https://")):
         # 从 URL 下载
         print(f"下载插件: {source}")
@@ -238,7 +279,7 @@ def install_plugin(source):
         py_deps_file = install_dir / "vuxpy依赖.txt"
         install_python_deps(py_deps_file)
 
-        print(f"✅ 插件 '{plugin_name}' 安装成功")
+        print(f"✅ 功能插件 '{plugin_name}' 安装成功 (类型: .vux)")
         return True
 
     except zipfile.BadZipFile:
@@ -368,8 +409,8 @@ def list_plugins():
         return
 
     print(f"已安装的插件 ({len(plugins)}):")
-    print(f"  {'名称':<24} {'版本':<12} {'作者':<16} 描述")
-    print(f"  {'-'*24} {'-'*12} {'-'*16} {'-'*20}")
+    print(f"  {'名称':<24} {'类型':<8} {'版本':<12} {'作者':<16} 描述")
+    print(f"  {'-'*24} {'-'*8} {'-'*12} {'-'*16} {'-'*20}")
     for p in plugins:
         if p.is_dir():
             meta_path = p / "vux.json"
@@ -381,7 +422,15 @@ def list_plugins():
                     version = meta.get("版本", meta.get("version", "?"))
                     author = meta.get("作者", meta.get("author", ""))
                     desc = meta.get("描述", meta.get("description", ""))
-                    print(f"  {name:<24} {version:<12} {author:<16} {desc}")
+
+                    # 判断插件类型：是否有 .vulage 文件
+                    vulage_files = list(p.glob("*.vulage"))
+                    if vulage_files:
+                        ptype = ".vulage"
+                    else:
+                        ptype = ".vux"
+
+                    print(f"  {name:<24} {ptype:<8} {version:<12} {author:<16} {desc}")
                 except Exception:
                     pass
 

@@ -284,6 +284,8 @@ int vus_config_load(VusConfig *config, const char *project_dir)
             json_parse_string(&ctx, config->version, sizeof(config->version));
         } else if (strcmp(field_key, "风格") == 0) {
             json_parse_string(&ctx, config->style, sizeof(config->style));
+        } else if (strcmp(field_key, "语言插件") == 0) {
+            json_parse_string(&ctx, config->language_plugin, sizeof(config->language_plugin));
         } else if (strcmp(field_key, "主文件") == 0) {
             json_parse_string(&ctx, config->main_file, sizeof(config->main_file));
         } else if (strcmp(field_key, "输出模式") == 0) {

@@ -12,6 +12,7 @@
 #include "config.h"
 #include "../include/vus/vus.h"
 #include "../include/vus/vus_abi.h"
+#include "vus_lang.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -140,6 +141,28 @@ VusResult vus_compile_to_c(const char *vus_file_path, VusConfig *config) {
         snprintf(result.error_msg, sizeof(result.error_msg),
                  "Failed to read source file: %s", vus_file_path);
         return result;
+    }
+
+    /* 语言插件预处理：加载并转换源码 */
+    if (config->language_plugin[0] != '\0') {
+        /* 加载语言插件 */
+        if (vus_lang_load_from_config(config->language_plugin, config->project_dir) != 0) {
+            result.success = 0;
+            snprintf(result.error_msg, sizeof(result.error_msg),
+                     "Failed to load language plugin: %s", config->language_plugin);
+            free(source);
+            return result;
+        }
+
+        /* 预处理源代码 */
+        char *preprocessed = NULL;
+        if (vus_lang_preprocess(config->language_plugin, source, &preprocessed) == 0 && preprocessed) {
+            free(source);
+            source = preprocessed;
+            source_len = strlen(source);
+        } else {
+            free(preprocessed);
+        }
     }
 
     /* 词法分析 */
@@ -341,6 +364,7 @@ static int vus_init(int force) {
         "    \"name\": \"我的项目\",\n"
         "    \"version\": \"0.1.0\",\n"
         "    \"风格\": \"函数\",\n"
+        "    \"语言插件\": \"\",\n"
         "    \"主文件\": \"main.vus\",\n"
         "    \"输出模式\": \"c\",\n"
         "    \"列表模式\": \"严格\",\n"
@@ -538,6 +562,9 @@ static void print_help(void) {
     printf("  run           <file>   编译并运行\n");
     printf("  init                   交互式项目初始化\n");
     printf("  test                   运行测试\n");
+    printf("  lang list              列出已安装语言插件\n");
+    printf("  lang load <文件>       加载语言插件\n");
+    printf("  lang info <名称>       查看语言插件信息\n");
     printf("  vux install <源>       安装 .vux 插件\n");
     printf("  vux build   [目录]     打包 .vux 插件\n");
     printf("  vux info    <插件>     查看插件信息\n");
@@ -681,6 +708,39 @@ int main(int argc, char *argv[]) {
         config_set_compiler_rt(&config);
 
         return vus_run(file, &config);
+    }
+
+    /* lang 语言插件管理 */
+    if (strcmp(cmd, "lang") == 0) {
+        if (argc >= 3 && strcmp(argv[2], "list") == 0) {
+            vus_lang_list_all();
+            return 0;
+        }
+        if (argc >= 3 && strcmp(argv[2], "load") == 0 && argc >= 4) {
+            int ret = vus_lang_load(argv[3]);
+            if (ret == 0) {
+                vus_lang_init_all();
+                printf("语言插件 '%s' 加载成功\n", argv[3]);
+                return 0;
+            }
+            fprintf(stderr, "语言插件 '%s' 加载失败 (错误码: %d)\n", argv[3], ret);
+            return 1;
+        }
+        if (argc >= 3 && strcmp(argv[2], "info") == 0 && argc >= 4) {
+            VusLangPlugin *p = vus_lang_find(argv[3]);
+            if (p) {
+                printf("名称: %s\n", p->name);
+                printf("版本: %s\n", p->version ? p->version : "?");
+                printf("AST 版本: %s\n", p->ast_version ? p->ast_version : "?");
+                printf("描述: %s\n", p->description ? p->description : "?");
+                printf("作者: %s\n", p->author ? p->author : "?");
+                return 0;
+            }
+            fprintf(stderr, "未找到语言插件: %s\n", argv[3]);
+            return 1;
+        }
+        fprintf(stderr, "用法: vus lang <list|load|info>\n");
+        return 1;
     }
 
     /* vux 插件管理（委派给 Python 脚本）*/
