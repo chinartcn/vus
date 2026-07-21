@@ -5,6 +5,8 @@
 
 VUS 是面向 Linux、Android Termux、嵌入式 ARM 设备的中文友好多范式编译型强类型编程语言。填补 C 与 Python 之间的空白，编译到 C → GCC/Clang → ARM/x86 原生可执行文件。
 
+📖 **完整教程**: [docs/TUTORIAL.md](docs/TUTORIAL.md) — 从零开始学会 VUS
+
 ## 特性
 
 - **中文友好**：支持函数风格（中英混写）和易语言风格（全中文 + `.` 前缀）
