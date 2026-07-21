@@ -242,11 +242,9 @@ static char *gen_expr_binary(GenBuf *buf, VusAstBinaryOp *bin) {
             "vus_string_new((vus_to_int(%s, &_err) >= vus_to_int(%s, &_err)) ? \"true\" : \"false\")",
             left, right);
     } else if (strcmp(bin->op, "+") == 0) {
-        size_t sz = strlen(left) + strlen(right) + 128;
+        size_t sz = strlen(left) + strlen(right) + 64;
         result = (char *)malloc(sz);
-        snprintf(result, sz,
-            "vus_to_string(vus_to_int(%s, &_err) + vus_to_int(%s, &_err))",
-            left, right);
+        snprintf(result, sz, "vus_add(%s, %s)", left, right);
     } else if (strcmp(bin->op, "-") == 0) {
         size_t sz = strlen(left) + strlen(right) + 128;
         result = (char *)malloc(sz);
@@ -416,7 +414,7 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
     /* 对于函数调用，生成 vus_函数名(args) 形式，参数为 VusString* 数组 */
     char args_buf[4096] = {0};
     size_t pos = 0;
-    pos += snprintf(args_buf + pos, sizeof(args_buf) - pos, "({VusString* _vus_args[%zu];", nargs + 1);
+    pos += snprintf(args_buf + pos, sizeof(args_buf) - pos, "({VusString* _vus_args[%zu];_vus_args[0]=NULL;", nargs + 1);
     for (size_t i = 0; i < nargs; i++) {
         pos += snprintf(args_buf + pos, sizeof(args_buf) - pos,
             "_vus_args[%zu]=%s;", i + 1, arg_exprs[i]);
@@ -587,7 +585,7 @@ static void gen_stmt_for_range(GenBuf *buf, VusAstForRange *fr) {
     gen_emit_linef(buf, "VusString* vus_%s = NULL;", san);
     gen_emit_linef(buf, "int64_t _start = vus_to_int(%s, &_err);", start);
     gen_emit_linef(buf, "int64_t _end = vus_to_int(%s, &_err);", end);
-    gen_emit_linef(buf, "for (int64_t _i = _start; _i < _end; _i++) {");
+    gen_emit_linef(buf, "for (int64_t _i = _start; _i <= _end; _i++) {");
     buf->indent++;
     gen_emit_linef(buf, "vus_ref(vus_to_string(_i));");
     gen_emit_linef(buf, "vus_unref(vus_%s);", san);

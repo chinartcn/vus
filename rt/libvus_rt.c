@@ -342,6 +342,18 @@ VusString* vus_input(VusString* prompt) {
     return vus_string_new(buf);
 }
 
+VusString* vus_add(VusString* a, VusString* b) {
+    int err_a = 0, err_b = 0;
+    int64_t na = vus_to_int(a, &err_a);
+    int64_t nb = vus_to_int(b, &err_b);
+    if (err_a == 0 && err_b == 0) {
+        /* 两个都是合法数字，做算术加法 */
+        return vus_to_string(na + nb);
+    }
+    /* 否则做字符串拼接 */
+    return vus_string_concat(a, b);
+}
+
 int64_t vus_to_int(VusString* s, int* err) {
     if (!s || !s->data) {
         if (err) *err = 1;

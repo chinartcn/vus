@@ -105,6 +105,9 @@ void vus_error_free(VusError* err);
 void vus_print(VusString* s);
 VusString* vus_input(VusString* prompt);
 
+// vus_add：加法/字符串拼接。若两个操作数均可解析为整数则做算术加法，否则做字符串拼接。
+VusString* vus_add(VusString* a, VusString* b);
+
 // vus_to_int：字符串转整数。成功时返回结果，*err 置 0。
 // 失败时返回 0，*err 置非 0（调用方应检查 err 并抛出异常）。
 int64_t vus_to_int(VusString* s, int* err);
