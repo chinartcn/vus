@@ -1,0 +1,18 @@
+# 测试：结构体链式成员访问
+# 验证 r.p1.x 这类链式访问能正确编译
+
+struct Point:
+    x: int
+    y: int
+
+struct Rect:
+    p1: Point
+    p2: Point
+
+p = Point(10, 20)
+print(p.x)
+print(p.y)
+
+r = Rect(Point(0, 0), Point(100, 200))
+print(r.p1.x)
+print(r.p2.y)

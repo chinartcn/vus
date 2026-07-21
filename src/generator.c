@@ -161,6 +161,81 @@ static void gen_sanitize_name(const char *name, char *out, size_t out_size) {
     out[o] = '\0';
 }
 
+/* ============ 结构体类型跟踪 ============ */
+
+typedef struct GenStructField {
+    char *name;
+    char *type_ann;
+} GenStructField;
+
+typedef struct GenStructInfo {
+    char           *name;
+    GenStructField *fields;
+    size_t          num_fields;
+    struct GenStructInfo *next;
+} GenStructInfo;
+
+/* 添加结构体定义到类型表 */
+static GenStructInfo *gen_struct_add(GenStructInfo *list, const char *name,
+                                     GenStructField *fields, size_t num_fields) {
+    GenStructInfo *info = (GenStructInfo *)calloc(1, sizeof(GenStructInfo));
+    if (!info) return list;
+    info->name = strdup(name);
+    info->fields = fields;
+    info->num_fields = num_fields;
+    info->next = list;
+    return info;
+}
+
+/* 查找包含指定字段名的结构体名称 */
+static const char *gen_find_struct_by_field(GenStructInfo *list, const char *field_name) {
+    for (GenStructInfo *si = list; si; si = si->next) {
+        for (size_t i = 0; i < si->num_fields; i++) {
+            if (strcmp(si->fields[i].name, field_name) == 0) {
+                return si->name;
+            }
+        }
+    }
+    return NULL;
+}
+
+/* 查找结构体字段的类型注解 */
+static const char *gen_find_field_type(GenStructInfo *list, const char *struct_name, const char *field_name) {
+    for (GenStructInfo *si = list; si; si = si->next) {
+        if (strcmp(si->name, struct_name) == 0) {
+            for (size_t i = 0; i < si->num_fields; i++) {
+                if (strcmp(si->fields[i].name, field_name) == 0) {
+                    return si->fields[i].type_ann;
+                }
+            }
+        }
+    }
+    return NULL;
+}
+
+/* 检查指定名称的结构体是否存在 */
+static int gen_struct_exists(GenStructInfo *list, const char *name) {
+    for (GenStructInfo *si = list; si; si = si->next) {
+        if (strcmp(si->name, name) == 0) return 1;
+    }
+    return 0;
+}
+
+/* 释放结构体类型表 */
+static void gen_struct_free(GenStructInfo *list) {
+    while (list) {
+        GenStructInfo *next = list->next;
+        free(list->name);
+        for (size_t i = 0; i < list->num_fields; i++) {
+            free(list->fields[i].name);
+            free(list->fields[i].type_ann);
+        }
+        free(list->fields);
+        free(list);
+        list = next;
+    }
+}
+
 /* ============ 字符串转义 ============ */
 
 static void gen_string_escape(const char *input, char *output, size_t out_size) {
@@ -194,6 +269,68 @@ static void gen_string_escape(const char *input, char *output, size_t out_size) 
 
 /* 返回 malloc 分配的字符串，调用方需 free */
 static char *gen_expr(GenBuf *buf, VusAstNode *node);
+static GenStructInfo *s_gen_structs = NULL; /* 结构体类型表，用于成员访问 */
+
+static char *gen_expr_access(GenBuf *buf, VusAstAccess *access) {
+    /* 生成成员访问表达式
+     * 对于 p.name，生成 ((vus_struct_StructName*)vus_p)->vus_name
+     * 通过检查 s_gen_structs 列表来尝试匹配字段。
+     * 支持链式访问如 r.p1.x，通过递归解析中间类型。
+     */
+    char *obj = gen_expr(buf, access->object);
+    char san_member[256];
+    gen_sanitize_name(access->member, san_member, sizeof(san_member));
+
+    /* 尝试确定用于类型转换的结构体名称 */
+    const char *struct_name = NULL;
+
+    VusAstNode *obj_node = access->object;
+    if (obj_node && obj_node->type == VUS_AST_IDENTIFIER) {
+        /* 简单标识符访问：通过字段名匹配结构体 */
+        struct_name = gen_find_struct_by_field(s_gen_structs, access->member);
+    } else if (obj_node && obj_node->type == VUS_AST_ACCESS) {
+        /* 链式访问：解析中间表达式返回的结构体类型 */
+        VusAstAccess *inner = (VusAstAccess *)obj_node;
+        /* 确定内层访问的对象所属的结构体 */
+        const char *inner_struct = NULL;
+        if (inner->object && inner->object->type == VUS_AST_IDENTIFIER) {
+            inner_struct = gen_find_struct_by_field(s_gen_structs, inner->member);
+        }
+        /* 如果找到了内层结构体，查找字段的类型注解 */
+        if (inner_struct) {
+            const char *member_type = gen_find_field_type(s_gen_structs, inner_struct, inner->member);
+            if (member_type && gen_struct_exists(s_gen_structs, member_type)) {
+                struct_name = member_type;
+            }
+        }
+        /* 如果仍未解析，尝试直接匹配字段名 */
+        if (!struct_name) {
+            struct_name = gen_find_struct_by_field(s_gen_structs, access->member);
+        }
+    }
+
+    if (struct_name) {
+        char san_struct[256];
+        gen_sanitize_name(struct_name, san_struct, sizeof(san_struct));
+        /* obj 在模板中被使用两次，需要更大的缓冲区 */
+        size_t sz = strlen(obj) * 2 + strlen(san_struct) + strlen(san_member) + 256;
+        char *result = (char *)malloc(sz);
+        snprintf(result, sz,
+            "({if(!%s){VusString* _null_str=vus_string_new(\"\");_null_str;}((vus_struct_%s*)%s)->vus_%s;})",
+            obj, san_struct, obj, san_member);
+        free(obj);
+        return result;
+    }
+
+    /* 兜底：生成通用访问表达式（使用成员名作为类型名） */
+    size_t sz = strlen(obj) * 2 + strlen(san_member) + strlen(san_member) + 256;
+    char *result = (char *)malloc(sz);
+    snprintf(result, sz,
+        "({if(!%s){VusString* _null_str=vus_string_new(\"\");_null_str;}((vus_struct_%s*)%s)->vus_%s;})",
+        obj, san_member, obj, san_member);
+    free(obj);
+    return result;
+}
 
 static char *gen_expr_binary(GenBuf *buf, VusAstBinaryOp *bin) {
     char *left = gen_expr(buf, bin->left);
@@ -349,7 +486,7 @@ static char *gen_expr_unary(GenBuf *buf, VusAstUnaryOp *un) {
 
 static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
     /* 处理内置函数 */
-    if (strcmp(call->func_name, "打印") == 0) {
+    if (strcmp(call->func_name, "打印") == 0 || strcmp(call->func_name, "print") == 0) {
         if (call->args && call->args->count > 0) {
             char *arg = gen_expr(buf, call->args->items[0]);
             size_t sz = strlen(arg) + 64;
@@ -494,6 +631,34 @@ static char *gen_expr(GenBuf *buf, VusAstNode *node) {
             return gen_expr_bool(buf, (VusAstBool *)node);
         case VUS_AST_NULL_LITERAL:
             return strdup("NULL");
+        case VUS_AST_ACCESS:
+            return gen_expr_access(buf, (VusAstAccess *)node);
+        case VUS_AST_STRUCT_INSTANTIATE: {
+            VusAstStructInst *si = (VusAstStructInst *)node;
+            char san[256];
+            gen_sanitize_name(si->struct_name, san, sizeof(san));
+            size_t nargs = si->args ? si->args->count : 0;
+            char **arg_exprs = NULL;
+            if (nargs > 0) {
+                arg_exprs = (char **)calloc(nargs, sizeof(char *));
+                for (size_t i = 0; i < nargs; i++) {
+                    arg_exprs[i] = gen_expr(buf, si->args->items[i]);
+                }
+            }
+            char args_buf[4096] = {0};
+            size_t pos = 0;
+            pos += snprintf(args_buf + pos, sizeof(args_buf) - pos,
+                "({VusString* _vus_args[%zu];_vus_args[0]=NULL;", nargs + 1);
+            for (size_t i = 0; i < nargs; i++) {
+                pos += snprintf(args_buf + pos, sizeof(args_buf) - pos,
+                    "_vus_args[%zu]=%s;", i + 1, arg_exprs[i]);
+            }
+            pos += snprintf(args_buf + pos, sizeof(args_buf) - pos,
+                "vus_%s(_vus_args);_vus_args[0];})", san);
+            for (size_t i = 0; i < nargs; i++) free(arg_exprs[i]);
+            free(arg_exprs);
+            return strdup(args_buf);
+        }
         default:
             return strdup("NULL");
     }
@@ -770,6 +935,9 @@ static void gen_statement(GenBuf *buf, VusAstNode *node) {
         case VUS_AST_THROW:
             gen_stmt_throw(buf, (VusAstThrow *)node);
             break;
+        case VUS_AST_STRUCT_DEF:
+            /* 结构体定义在顶层生成 C 类型，语句级别跳过 */
+            break;
         default:
             break;
     }
@@ -783,6 +951,23 @@ static void gen_function(GenBuf *buf, VusAstFunctionDef *func) {
 
     /* 函数注释 */
     gen_emit_linef(buf, "/* VUS function: %s */", func->name);
+
+    /* 泛型类型参数注释 */
+    if (func->type_params && func->type_params->count > 0) {
+        char tp_buf[512] = {0};
+        size_t pos = 0;
+        pos += snprintf(tp_buf + pos, sizeof(tp_buf) - pos, "/* generic type params: ");
+        for (size_t i = 0; i < func->type_params->count; i++) {
+            VusAstNode *pnode = func->type_params->items[i];
+            if (pnode->type == VUS_AST_PARAM) {
+                VusAstParam *tp = (VusAstParam *)pnode;
+                if (i > 0) pos += snprintf(tp_buf + pos, sizeof(tp_buf) - pos, ", ");
+                pos += snprintf(tp_buf + pos, sizeof(tp_buf) - pos, "%s", tp->name);
+            }
+        }
+        snprintf(tp_buf + pos, sizeof(tp_buf) - pos, " */");
+        gen_emit_line(buf, tp_buf);
+    }
 
     /* 函数签名：void vus_xxx(void* _args) */
     gen_emit_linef(buf, "void vus_%s(void* _args) {", san);
@@ -841,6 +1026,69 @@ static void gen_function(GenBuf *buf, VusAstFunctionDef *func) {
     gen_emit_line(buf, "}\n");
 }
 
+/* ============ 结构体代码生成 ============ */
+
+/* 生成 C 结构体类型定义 */
+static void gen_struct_type_def(GenBuf *buf, VusAstStructDef *sd) {
+    char san[256];
+    gen_sanitize_name(sd->name, san, sizeof(san));
+
+    gen_emit_linef(buf, "/* VUS struct: %s */", sd->name);
+    gen_emit_linef(buf, "typedef struct vus_struct_%s {", san);
+    buf->indent++;
+    gen_emit_linef(buf, "int ref;  /* 引用计数 */");
+
+    if (sd->fields) {
+        for (size_t i = 0; i < sd->fields->count; i++) {
+            VusAstNode *fnode = sd->fields->items[i];
+            if (fnode->type == VUS_AST_PARAM) {
+                VusAstParam *p = (VusAstParam *)fnode;
+                char fsan[256];
+                gen_sanitize_name(p->name, fsan, sizeof(fsan));
+                gen_emit_linef(buf, "VusString* vus_%s;", fsan);
+            }
+        }
+    }
+
+    buf->indent--;
+    gen_emit_linef(buf, "} vus_struct_%s;\n", san);
+}
+
+/* 生成结构体构造函数 */
+static void gen_struct_constructor(GenBuf *buf, VusAstStructDef *sd) {
+    char san[256];
+    gen_sanitize_name(sd->name, san, sizeof(san));
+
+    gen_emit_linef(buf, "/* VUS struct constructor: %s */", sd->name);
+    gen_emit_linef(buf, "void vus_%s(void* _args) {", san);
+    buf->indent++;
+
+    gen_emit_line(buf, "VusString** _vus_params = (VusString**)_args;");
+    gen_emit_linef(buf, "vus_struct_%s* _obj = (vus_struct_%s*)calloc(1, sizeof(vus_struct_%s));",
+                   san, san, san);
+
+    if (sd->fields) {
+        for (size_t i = 0; i < sd->fields->count; i++) {
+            VusAstNode *fnode = sd->fields->items[i];
+            if (fnode->type == VUS_AST_PARAM) {
+                VusAstParam *p = (VusAstParam *)fnode;
+                char fsan[256];
+                gen_sanitize_name(p->name, fsan, sizeof(fsan));
+                gen_emit_linef(buf, "if (_vus_params[%zu]) {", i + 1);
+                buf->indent++;
+                gen_emit_linef(buf, "_obj->vus_%s = _vus_params[%zu];", fsan, i + 1);
+                gen_emit_linef(buf, "vus_ref(_obj->vus_%s);", fsan);
+                buf->indent--;
+                gen_emit_line(buf, "}");
+            }
+        }
+    }
+
+    gen_emit_line(buf, "_vus_params[0] = (VusString*)_obj;");
+    buf->indent--;
+    gen_emit_line(buf, "}\n");
+}
+
 /* ============ 主函数生成 ============ */
 
 static void gen_main_function(GenBuf *buf, VusAstProgram *program, int debug) {
@@ -854,11 +1102,11 @@ static void gen_main_function(GenBuf *buf, VusAstProgram *program, int debug) {
     gen_emit_line(buf, "int _err = 0;");
     gen_emit_line(buf, "VusError* _vus_err = NULL;");
 
-    /* 遍历所有顶层语句（跳过函数定义，它们已单独生成） */
+    /* 遍历所有顶层语句（跳过函数定义和结构体定义，它们已单独生成） */
     if (program->statements) {
         for (size_t i = 0; i < program->statements->count; i++) {
             VusAstNode *node = program->statements->items[i];
-            if (node->type != VUS_AST_FUNCTION_DEF) {
+            if (node->type != VUS_AST_FUNCTION_DEF && node->type != VUS_AST_STRUCT_DEF) {
                 gen_statement(buf, node);
             }
         }
@@ -916,6 +1164,46 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config) {
     }
     gen_emit(buf, "\n");
 
+    /* 收集结构体定义并生成 C 结构体类型 */
+    s_gen_structs = NULL;
+    if (program->statements) {
+        for (size_t i = 0; i < program->statements->count; i++) {
+            VusAstNode *node = program->statements->items[i];
+            if (node->type == VUS_AST_STRUCT_DEF) {
+                VusAstStructDef *sd = (VusAstStructDef *)node;
+
+                /* 构建字段信息 */
+                size_t nf = sd->fields ? sd->fields->count : 0;
+                GenStructField *fields = NULL;
+                if (nf > 0) {
+                    fields = (GenStructField *)calloc(nf, sizeof(GenStructField));
+                    for (size_t j = 0; j < nf; j++) {
+                        VusAstNode *fnode = sd->fields->items[j];
+                        if (fnode->type == VUS_AST_PARAM) {
+                            VusAstParam *p = (VusAstParam *)fnode;
+                            fields[j].name = strdup(p->name);
+                            fields[j].type_ann = p->type_annotation ? strdup(p->type_annotation) : NULL;
+                        }
+                    }
+                }
+                s_gen_structs = gen_struct_add(s_gen_structs, sd->name, fields, nf);
+
+                /* 生成 C 结构体类型定义 */
+                gen_struct_type_def(buf, sd);
+            }
+        }
+    }
+
+    /* 生成结构体构造函数 */
+    if (program->statements) {
+        for (size_t i = 0; i < program->statements->count; i++) {
+            VusAstNode *node = program->statements->items[i];
+            if (node->type == VUS_AST_STRUCT_DEF) {
+                gen_struct_constructor(buf, (VusAstStructDef *)node);
+            }
+        }
+    }
+
     /* 函数定义 */
     if (program->statements) {
         for (size_t i = 0; i < program->statements->count; i++) {
@@ -932,6 +1220,11 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config) {
     char *result = strdup(buf->data);
     free(buf->data);
     free(buf);
+
+    /* 清理结构体类型表 */
+    gen_struct_free(s_gen_structs);
+    s_gen_structs = NULL;
+
     return result;
 }
 
@@ -981,7 +1274,7 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
     int n;
     if (extra_objects && extra_objects[0]) {
         n = snprintf(cmd, sizeof(cmd),
-            "gcc %s -g -I\"%s\" \"%s\" \"%s\" %s -o \"%s\" -lm 2>&1",
+            "gcc %s -g -I\"%s\" \"%s\" \"%s\" %s -o \"%s\" -lm -lpthread 2>&1",
             opt_level,
             abs_rt_dir,
             c_source_path,
@@ -990,7 +1283,7 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
             output_path);
     } else {
         n = snprintf(cmd, sizeof(cmd),
-            "gcc %s -g -I\"%s\" \"%s\" \"%s\" -o \"%s\" -lm 2>&1",
+            "gcc %s -g -I\"%s\" \"%s\" \"%s\" -o \"%s\" -lm -lpthread 2>&1",
             opt_level,
             abs_rt_dir,
             c_source_path,
