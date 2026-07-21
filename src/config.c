@@ -286,6 +286,36 @@ int vus_config_load(VusConfig *config, const char *project_dir)
             json_parse_string(&ctx, config->style, sizeof(config->style));
         } else if (strcmp(field_key, "语言插件") == 0) {
             json_parse_string(&ctx, config->language_plugin, sizeof(config->language_plugin));
+        } else if (strcmp(field_key, "vusx依赖") == 0) {
+            /* 解析 vusx 依赖列表 */
+            config->vusx_deps_count = 0;
+            json_skip_ws(&ctx);
+            if (ctx.pos < ctx.len && ctx.json[ctx.pos] == '[') {
+                ctx.pos++; /* 跳过 [ */
+                while (ctx.pos < ctx.len && config->vusx_deps_count < VUS_CONFIG_MAX_VUSX_DEPS) {
+                    json_skip_ws(&ctx);
+                    if (ctx.pos >= ctx.len) break;
+                    if (ctx.json[ctx.pos] == ']') break;
+                    if (ctx.json[ctx.pos] == ',') { ctx.pos++; continue; }
+                    if (ctx.json[ctx.pos] == '"') {
+                        ctx.pos++; /* 跳过 " */
+                        size_t o = 0;
+                        while (ctx.pos < ctx.len && ctx.json[ctx.pos] != '"' &&
+                               o < sizeof(config->vusx_deps[0]) - 1) {
+                            if (ctx.json[ctx.pos] == '\\' && ctx.pos + 1 < ctx.len) {
+                                ctx.pos++;
+                            }
+                            config->vusx_deps[config->vusx_deps_count][o++] = ctx.json[ctx.pos];
+                            ctx.pos++;
+                        }
+                        config->vusx_deps[config->vusx_deps_count][o] = '\0';
+                        if (ctx.pos < ctx.len) ctx.pos++; /* 跳过 " */
+                        config->vusx_deps_count++;
+                    } else {
+                        ctx.pos++;
+                    }
+                }
+            }
         } else if (strcmp(field_key, "主文件") == 0) {
             json_parse_string(&ctx, config->main_file, sizeof(config->main_file));
         } else if (strcmp(field_key, "输出模式") == 0) {

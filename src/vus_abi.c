@@ -12,6 +12,7 @@
 #include "lexer.h"
 #include "config.h"
 #include "vus_lang.h"
+#include "vus_vusx.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,7 +46,8 @@ static char *read_file(const char *path, size_t *out_len) {
 
 /* 将 VUS 源码字符串编译为 C 代码，核心编译流水线 */
 static VusResult compile_source(const char *source, size_t source_len,
-                                VusConfig *config, const char *output_c_path) {
+                                VusConfig *config, const char *output_c_path,
+                                const char *source_name) {
     VusResult result;
     memset(&result, 0, sizeof(result));
 
@@ -64,7 +66,7 @@ static VusResult compile_source(const char *source, size_t source_len,
     /* 词法分析 */
     VusLexer *lexer = vus_lexer_new(processed_source, processed_len);
     if (!lexer) {
-        snprintf(result.error_msg, sizeof(result.error_msg), "Failed to create lexer");
+        snprintf(result.error_msg, sizeof(result.error_msg), "文件 %s: 词法分析器创建失败", source_name);
         free(preprocessed);
         return result;
     }
@@ -73,7 +75,7 @@ static VusResult compile_source(const char *source, size_t source_len,
     VusToken *tokens = vus_lexer_tokenize(lexer, &token_count);
     if (lexer->error) {
         snprintf(result.error_msg, sizeof(result.error_msg),
-                 "Lexer error: %s", vus_lexer_error(lexer));
+                 "文件 %s: 词法分析错误: %s", source_name, vus_lexer_error(lexer));
         vus_lexer_free_tokens(tokens, token_count);
         vus_lexer_free(lexer);
         free(preprocessed);
@@ -86,7 +88,7 @@ static VusResult compile_source(const char *source, size_t source_len,
     /* 语法分析 */
     VusParser *parser = vus_parser_new(tokens, token_count);
     if (!parser) {
-        snprintf(result.error_msg, sizeof(result.error_msg), "Failed to create parser");
+        snprintf(result.error_msg, sizeof(result.error_msg), "文件 %s: 语法分析器创建失败", source_name);
         vus_lexer_free_tokens(tokens, token_count);
         free(preprocessed);
         return result;
@@ -95,7 +97,7 @@ static VusResult compile_source(const char *source, size_t source_len,
     VusAstProgram *program = vus_parser_parse(parser);
     if (parser->error) {
         snprintf(result.error_msg, sizeof(result.error_msg),
-                 "Parser error: %s", vus_parser_error(parser));
+                 "文件 %s: 语法分析错误: %s", source_name, vus_parser_error(parser));
         vus_parser_free(parser);
         vus_lexer_free_tokens(tokens, token_count);
         free(preprocessed);
@@ -108,7 +110,7 @@ static VusResult compile_source(const char *source, size_t source_len,
     /* 代码生成 */
     char *c_code = vus_generate_c(program, config);
     if (!c_code) {
-        snprintf(result.error_msg, sizeof(result.error_msg), "Failed to generate C code");
+        snprintf(result.error_msg, sizeof(result.error_msg), "文件 %s: C 代码生成失败", source_name);
         vus_ast_node_free((VusAstNode *)program);
         free(preprocessed);
         return result;
@@ -118,7 +120,7 @@ static VusResult compile_source(const char *source, size_t source_len,
     FILE *fp = fopen(output_c_path, "w");
     if (!fp) {
         snprintf(result.error_msg, sizeof(result.error_msg),
-                 "Failed to write C file: %s", output_c_path);
+                 "文件 %s: C 文件写入失败: %s", source_name, output_c_path);
         vus_generate_free(c_code);
         vus_ast_node_free((VusAstNode *)program);
         free(preprocessed);
@@ -144,20 +146,60 @@ static VusResult compile_source(const char *source, size_t source_len,
 /* 从源码编译 C 并链接为可执行文件 */
 static VusResult compile_source_to_exe(const char *source, size_t source_len,
                                        VusConfig *config, const char *output_c_path,
-                                       const char *output_exe_path) {
-    VusResult result = compile_source(source, source_len, config, output_c_path);
+                                       const char *output_exe_path,
+                                       const char *source_name) {
+    VusResult result = compile_source(source, source_len, config, output_c_path, source_name);
     if (!result.success) return result;
+
+    /* 编译 vusx 依赖 */
+    VusVusxPlugin vusx_plugins[VUS_MAX_VUSX_DEPS];
+    int vusx_count = 0;
+    char extra_objects[4096] = "";
+
+    if (config->vusx_deps_count > 0) {
+        memset(vusx_plugins, 0, sizeof(vusx_plugins));
+        int resolved = 0;
+        for (int i = 0; i < config->vusx_deps_count && resolved < VUS_MAX_VUSX_DEPS; i++) {
+            if (vus_vusx_resolve(config->vusx_deps[i], &vusx_plugins[resolved]) == 0) {
+                resolved++;
+            } else {
+                fprintf(stderr, "警告: vusx 依赖 '%s' 解析失败，跳过\n", config->vusx_deps[i]);
+            }
+        }
+        vusx_count = resolved;
+
+        if (vusx_count > 0) {
+            if (vus_vusx_compile_all(vusx_plugins, vusx_count, config) != 0) {
+                result.success = 0;
+                snprintf(result.error_msg, sizeof(result.error_msg),
+                         "vusx 依赖编译失败");
+                vus_vusx_cleanup_all(vusx_plugins, vusx_count);
+                return result;
+            }
+
+            /* 构建额外 .o 文件列表 */
+            for (int i = 0; i < vusx_count; i++) {
+                size_t len = strlen(extra_objects);
+                snprintf(extra_objects + len, sizeof(extra_objects) - len,
+                         " \"%s\"", vusx_plugins[i].obj_output);
+            }
+        }
+    }
 
     /* 调用 GCC 链接 */
     char error_msg[512];
     int cr = vus_compile_c(result.c_output_path, output_exe_path,
-                           config, error_msg, sizeof(error_msg));
+                           config, error_msg, sizeof(error_msg),
+                           extra_objects[0] ? extra_objects : NULL);
     if (cr != 0) {
         result.success = 0;
         snprintf(result.error_msg, sizeof(result.error_msg),
-                 "GCC compilation failed: %s", error_msg);
+                 "GCC 编译失败: %s", error_msg);
+        if (vusx_count > 0) vus_vusx_cleanup_all(vusx_plugins, vusx_count);
         return result;
     }
+
+    if (vusx_count > 0) vus_vusx_cleanup_all(vusx_plugins, vusx_count);
 
     strncpy(result.exe_output_path, output_exe_path, sizeof(result.exe_output_path) - 1);
     result.exe_output_path[sizeof(result.exe_output_path) - 1] = '\0';
@@ -230,7 +272,7 @@ VusResult vus_compile_file(const char *path, VusConfig *config) {
 
     if (!path) {
         snprintf(result.error_msg, sizeof(result.error_msg),
-                 "Invalid argument: path is NULL");
+                 "参数无效: 路径为空");
         return result;
     }
 
@@ -239,7 +281,7 @@ VusResult vus_compile_file(const char *path, VusConfig *config) {
     char *source = read_file(path, &source_len);
     if (!source) {
         snprintf(result.error_msg, sizeof(result.error_msg),
-                 "Failed to read file: %s", path);
+                 "文件读取失败: %s", path);
         return result;
     }
 
@@ -277,7 +319,7 @@ VusResult vus_compile_file(const char *path, VusConfig *config) {
     char c_output_path[1024];
     snprintf(c_output_path, sizeof(c_output_path), "%s/%s.c", build_dir, name_buf);
 
-    result = compile_source(source, source_len, config, c_output_path);
+    result = compile_source(source, source_len, config, c_output_path, path);
     free(source);
     return result;
 }
@@ -290,7 +332,7 @@ VusResult vus_compile_string(const char *source, VusConfig *config) {
 
     if (!source) {
         snprintf(result.error_msg, sizeof(result.error_msg),
-                 "Invalid argument: source is NULL");
+                 "参数无效: 源码为空");
         return result;
     }
 
@@ -323,7 +365,7 @@ VusResult vus_compile_string(const char *source, VusConfig *config) {
     snprintf(c_output_path, sizeof(c_output_path), "%s/%s.c", build_dir, name_buf);
 
     size_t source_len = strlen(source);
-    result = compile_source(source, source_len, config, c_output_path);
+    result = compile_source(source, source_len, config, c_output_path, name_buf);
     return result;
 }
 
@@ -335,7 +377,7 @@ VusResult vus_compile_string_to_exe(const char *source, VusConfig *config) {
 
     if (!source) {
         snprintf(result.error_msg, sizeof(result.error_msg),
-                 "Invalid argument: source is NULL");
+                 "参数无效: 源码为空");
         return result;
     }
 
@@ -369,7 +411,7 @@ VusResult vus_compile_string_to_exe(const char *source, VusConfig *config) {
 
     size_t source_len = strlen(source);
     result = compile_source_to_exe(source, source_len, config,
-                                   c_output_path, exe_output_path);
+                                   c_output_path, exe_output_path, name_buf);
     return result;
 }
 
@@ -381,7 +423,7 @@ VusResult vus_eval(const char *code, VusConfig *config, char *output) {
 
     if (!code) {
         snprintf(result.error_msg, sizeof(result.error_msg),
-                 "Invalid argument: code is NULL");
+                 "参数无效: 代码为空");
         if (output) output[0] = '\0';
         return result;
     }
@@ -395,7 +437,7 @@ VusResult vus_eval(const char *code, VusConfig *config, char *output) {
 
     if (n >= (int)sizeof(wrapped)) {
         snprintf(result.error_msg, sizeof(result.error_msg),
-                 "Code too long for vus_eval (max %zu bytes)", sizeof(wrapped) - 50);
+                 "代码过长，vus_eval 最多支持 %zu 字节", sizeof(wrapped) - 50);
         if (output) output[0] = '\0';
         return result;
     }
@@ -431,7 +473,7 @@ VusResult vus_eval(const char *code, VusConfig *config, char *output) {
 
     size_t source_len = strlen(wrapped);
     result = compile_source_to_exe(wrapped, source_len, config,
-                                   c_output_path, exe_output_path);
+                                   c_output_path, exe_output_path, name_buf);
     if (!result.success) {
         if (output) output[0] = '\0';
         return result;
@@ -445,7 +487,7 @@ VusResult vus_eval(const char *code, VusConfig *config, char *output) {
     if (!fp) {
         result.success = 0;
         snprintf(result.error_msg, sizeof(result.error_msg),
-                 "Failed to execute compiled program");
+                 "无法执行编译后的程序");
         if (output) output[0] = '\0';
         return result;
     }
@@ -465,7 +507,7 @@ VusResult vus_eval(const char *code, VusConfig *config, char *output) {
 
     if (status != 0 && !result.error_msg[0]) {
         snprintf(result.error_msg, sizeof(result.error_msg),
-                 "Program exited with code %d", status);
+                 "程序退出，返回码 %d", status);
     }
 
     return result;

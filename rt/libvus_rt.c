@@ -317,6 +317,40 @@ void vus_error_free(VusError* err) {
     }
 }
 
+// ============ 调试支持 ============
+
+int vus_debug_enabled = 0;
+
+void vus_debug_print(const char* msg) {
+    if (vus_debug_enabled) {
+        fprintf(stdout, "[调试] %s\n", msg);
+    }
+}
+
+// ============ 栈追踪支持 ============
+
+int vus_stack_depth = 0;
+const char* vus_stack_frames[VUS_MAX_STACK_DEPTH];
+
+void vus_stack_push(const char* func_name) {
+    if (vus_stack_depth < VUS_MAX_STACK_DEPTH) {
+        vus_stack_frames[vus_stack_depth++] = func_name;
+    }
+}
+
+void vus_stack_pop(void) {
+    if (vus_stack_depth > 0) {
+        vus_stack_depth--;
+    }
+}
+
+void vus_stack_print(void) {
+    fprintf(stderr, "调用栈追踪:\n");
+    for (int i = 0; i < vus_stack_depth; i++) {
+        fprintf(stderr, "  [%d] %s\n", i, vus_stack_frames[i]);
+    }
+}
+
 // ============ 标准库辅助函数 ============
 
 void vus_print(VusString* s) {

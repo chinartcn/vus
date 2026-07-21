@@ -372,11 +372,17 @@ vus run tests/test_demo.vus
 
 | 命令 | 说明 |
 |------|------|
+| `vus lang list` | 列出已安装的语言插件（.vulage） |
+| `vus lang load <文件>` | 加载语言插件共享库 |
+| `vus lang info <名称>` | 查看语言插件详细信息 |
 | `vus vux install <源>` | 安装 .vux 插件 |
 | `vus vux build [目录]` | 打包 .vux 插件 |
 | `vus vux info <插件>` | 查看插件信息 |
 | `vus vux list` | 列出已安装插件 |
 | `vus vux run <插件> [输入]` | 运行插件 |
+| `vus vusx list` | 列出项目中的 vusx 依赖 |
+| `vus vusx info <路径>` | 查看 vusx 插件信息 |
+| `vus vusx build <路径>` | 编译 vusx 插件 |
 
 ### 7.3 配置文件 `vus.json`
 
@@ -385,13 +391,17 @@ vus run tests/test_demo.vus
 ```json
 {
     "风格": "函数",
+    "语言插件": "",
+    "vusx依赖": [],
     "运行时目录": "rt",
     "构建目录": "构建",
     "优化": "速度"
 }
 ```
 
-- `风格`：`"函数"`（中英混写）或 `"易语言"`（全中文 `.` 前缀）
+- `风格`：`"函数"`（中英混写）或 `"易语言"`（需安装易语言语言插件）
+- `语言插件`：语言插件名称（如 `"易语言"`），空表示使用核心语法
+- `vusx依赖`：`.vusx` 插件目录路径列表
 - `运行时目录`：运行时库路径
 - `构建目录`：编译输出目录
 - `优化`：`"速度"` 或 `"大小"`
@@ -472,6 +482,171 @@ vus vux list
 # 运行插件
 vus vux run 我的插件 "测试输入"
 ```
+
+---
+
+### 8.5 .vulage 语言插件（语法风格）
+
+`.vulage` 是**语言插件**，在编译前预处理源码，将非标准语法转换为标准 VUS 函数风格。适合需要自定义语法风格的用户。
+
+#### 工作原理
+
+```
+VUS 源码（易语言风格等）
+    ↓
+[语言插件预处理] — 在词法分析之前转换源码
+    ↓
+标准 VUS 函数风格源码
+    ↓
+[正常编译流水线] → 可执行文件
+```
+
+#### 目录结构
+
+```
+plugins/lang/易语言/
+├── vux.json          # 插件元数据
+└── __init__.py       # 预处理脚本（Python）
+```
+
+#### vux.json 元数据
+
+```json
+{
+    "名称": "易语言",
+    "版本": "1.0.0",
+    "类型": "vulage",
+    "描述": "易语言风格的 VUS 语法插件",
+    "入口": "__init__.py"
+}
+```
+
+#### 编写语言插件
+
+```python
+# plugins/lang/易语言/__init__.py
+class 易语言:
+    def preprocess(self, source):
+        """将易语言风格转换为标准 VUS 函数风格。"""
+        lines = source.split('\n')
+        result = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith('.'):
+                # 转换 .关键字 → 关键字
+                line = line.replace('.功能 ', '定义 ', 1)
+                line = line.replace('.如果 ', '如果 ', 1)
+                line = line.replace('.否则', '否则')
+                line = line.replace('.返回 ', '返回 ', 1)
+                line = line.replace('.结束', '')
+                line = line.replace('.打印(', '打印(')
+                line = line.replace('.循环 ', '当循环 ', 1)
+            result.append(line)
+        return '\n'.join(result)
+```
+
+#### 使用语言插件
+
+```bash
+# 在 vus.json 中配置
+{
+    "语言插件": "易语言"
+}
+
+# 编译时自动加载
+vus run main.vus
+```
+
+---
+
+### 8.6 .vusx 插件（VUS 编写）
+
+`.vusx` 是**用 VUS 自身编写的功能插件**，在编译时自动编译并链接到主程序。这是 VUS 的"自举"第一步——用 VUS 扩展 VUS。
+
+#### 工作原理
+
+```
+读取 vus.json → 解析 vusx 依赖
+    ↓
+编译 .vusx 插件（VUS → C → .o）
+    ↓
+编译主程序（VUS → C）
+    ↓
+GCC 链接：主程序.o + .vusx 插件.o → 可执行文件
+```
+
+#### 目录结构
+
+```
+my_utils.vusx/
+├── vusx.json          # 插件元数据（必需）
+└── main.vus           # VUS 源码（必需）
+```
+
+#### vusx.json 格式
+
+```json
+{
+    "名称": "my_utils",
+    "版本": "1.0.0",
+    "入口": "main.vus",
+    "导出": ["问候", "计算"]
+}
+```
+
+#### 编写 vusx 插件
+
+```vus
+#// my_utils.vusx/main.vus
+定义 问候(名字):
+    打印("你好，" + 名字 + "！\n")
+
+定义 计算(a, b):
+    返回 a + b
+```
+
+#### 在项目中引用
+
+在 `vus.json` 中添加：
+
+```json
+{
+    "vusx依赖": ["my_utils.vusx"]
+}
+```
+
+然后在主程序中使用：
+
+```vus
+#// main.vus
+问候("世界")
+结果 = 计算(10, 20)
+打印(结果)
+```
+
+#### 管理命令
+
+```bash
+# 列出项目中的 vusx 依赖
+vus vusx list
+
+# 查看 vusx 插件信息
+vus vusx info my_utils.vusx
+
+# 单独编译 vusx 插件
+vus vusx build my_utils.vusx
+```
+
+---
+
+### 8.7 四层插件体系对比
+
+| 类型 | 扩展名 | 编写语言 | 加载时机 | 作用 |
+|------|--------|----------|----------|------|
+| **源码** | `.vus` | VUS | 编译时 | 主程序源码 |
+| **VUS 插件** | `.vusx` | VUS | 编译时（自动编译+链接） | 用 VUS 扩展 VUS |
+| **功能插件** | `.vux` | Python/C | 运行时 | 扩展编译器功能 |
+| **语言插件** | `.vulage` | Python/C | 编译前预处理 | 自定义语法风格 |
 
 ---
 
@@ -651,7 +826,9 @@ vus/
 ├── include/vus/       # 公共 API 头文件
 │   ├── vus.h          # 核心类型和配置
 │   ├── vus_abi.h      # C ABI 接口
-│   └── vus_plugin.h   # 插件系统接口
+│   ├── vus_plugin.h   # 插件系统接口（.vux）
+│   ├── vus_lang.h     # 语言插件接口（.vulage）
+│   └── vus_vusx.h     # VUS 插件接口（.vusx）
 ├── src/               # 编译器源码
 │   ├── main.c         # CLI 入口
 │   ├── lexer.c/h      # 词法分析器
@@ -661,13 +838,19 @@ vus/
 │   ├── generator.c/h  # 代码生成器
 │   ├── config.c/h     # 配置加载
 │   ├── vus_abi.c      # C ABI 实现
-│   └── vus_plugin.c   # 插件系统实现
+│   ├── vus_plugin.c   # .vux 插件系统实现
+│   ├── vus_lang.c/h   # .vulage 语言插件系统实现
+│   └── vus_vusx.c/h   # .vusx 插件系统实现
 ├── rt/                # 运行时库
 │   ├── libvus_rt.h    # 运行时类型定义
 │   └── libvus_rt.c    # 运行时实现
 ├── scripts/           # 工具脚本
-│   ├── vux_plugin_manager.py  # 插件管理
+│   ├── vux_plugin_manager.py  # 插件管理（安装/打包/列出）
 │   └── vux_plugin_entry.py    # 插件基类
+├── plugins/           # 插件目录
+│   ├── lang/          # 语言插件（.vulage）
+│   │   └── 易语言/    # 示例：易语言语法插件
+│   └── func/          # 功能插件（.vux）
 ├── tests/             # 测试用例
 ├── examples/          # 示例程序
 │   └── plugins/示例/  # 示例插件

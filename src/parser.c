@@ -106,8 +106,8 @@ static VusToken *parser_expect(VusParser *parser, VusTokenType type) {
         const char *expected = vus_token_type_name(type);
         if (token) {
             const char *got = vus_token_type_name(token->type);
-            parser_set_error(parser, "期望 %s，但遇到 %s（第 %d 行）",
-                             expected, got, token->line);
+            parser_set_error(parser, "期望 %s，但遇到 %s（第 %d 行第 %d 列）",
+                             expected, got, token->line, token->column);
         } else {
             parser_set_error(parser, "期望 %s，但遇到文件结尾", expected);
         }
@@ -523,7 +523,7 @@ static VusAstNode *parse_for_stmt(VusParser *parser) {
         parser_advance(parser); /* 消耗 在 */
         is_foreach = 1;
     } else {
-        parser_set_error(parser, "无效的 for 循环语法（第 %d 行）", line);
+        parser_set_error(parser, "无效的 for 循环语法（第 %d 行第 %d 列）", line, parser_peek(parser)->column);
         free(var_name);
         return NULL;
     }
@@ -560,7 +560,7 @@ static VusAstNode *parse_for_stmt(VusParser *parser) {
                 if (!end) { free(var_name); return NULL; }
             }
         } else {
-            parser_set_error(parser, "内部错误：无法识别的 for-range 风格（第 %d 行）", line);
+            parser_set_error(parser, "内部错误：无法识别的 for-range 风格（第 %d 行第 %d 列）", line, parser_peek(parser)->column);
             free(var_name);
             return NULL;
         }
@@ -821,7 +821,7 @@ static VusAstNode *parse_from_import_stmt(VusParser *parser) {
     /* 期望 import/导入 */
     VusToken *next = parser_peek(parser);
     if (!next || (next->type != VUS_TOKEN_IMPORT && next->type != VUS_TOKEN_CN_IMPORT)) {
-        parser_set_error(parser, "期望 import/导入，但遇到其他 Token（第 %d 行）", line);
+        parser_set_error(parser, "期望 import/导入，但遇到其他 Token（第 %d 行第 %d 列）", line, next->column);
         free(module);
         return NULL;
     }
@@ -1353,8 +1353,8 @@ static VusAstNode *parse_primary(VusParser *parser) {
         }
 
         default:
-            parser_set_error(parser, "意外的 Token: %s（第 %d 行）",
-                             vus_token_type_name(token->type), token->line);
+            parser_set_error(parser, "意外的 Token: %s（第 %d 行第 %d 列）",
+                             vus_token_type_name(token->type), token->line, token->column);
             return NULL;
     }
 }

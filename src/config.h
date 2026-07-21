@@ -13,6 +13,9 @@
 extern "C" {
 #endif
 
+/* ============ 常量 ============ */
+#define VUS_CONFIG_MAX_VUSX_DEPS 16  /* 最大 vusx 依赖数量 */
+
 /* ============ 配置结构体 ============ */
 typedef struct {
     char  project_dir[1024];   /* 项目根目录 */
@@ -20,6 +23,8 @@ typedef struct {
     char  version[64];         /* 版本号 */
     char  style[32];           /* 语法风格（默认"函数"） */
     char  language_plugin[64]; /* 语言插件名称（如"易语言"，空=使用核心语法）*/
+    char  vusx_deps[VUS_CONFIG_MAX_VUSX_DEPS][256]; /* vusx 依赖路径列表 */
+    int   vusx_deps_count;                    /* vusx 依赖数量 */
     char  main_file[256];      /* 主文件路径 */
     char  output_mode[16];     /* "c" 或 "exe" */
     char  list_mode[16];       /* "严格" 或 "混合" */

@@ -29,7 +29,7 @@ typedef struct {
 static GenBuf *gen_buf_new(void) {
     GenBuf *buf = (GenBuf *)malloc(sizeof(GenBuf));
     if (!buf) return NULL;
-    buf->cap = 4096;
+    buf->cap = 16384;
     buf->len = 0;
     buf->indent = 0;
     buf->data = (char *)malloc(buf->cap);
@@ -661,9 +661,11 @@ static void gen_stmt_return(GenBuf *buf, VusAstReturn *ret) {
         gen_emit_line(buf, "vus_ref(_tmp);");
         gen_emit_line(buf, "vus_unref(_vus_params[0]);");
         gen_emit_line(buf, "_vus_params[0] = _tmp; }");
+        gen_emit_line(buf, "vus_stack_pop();");
         gen_emit_line(buf, "return;");
         free(val);
     } else {
+        gen_emit_line(buf, "vus_stack_pop();");
         gen_emit_line(buf, "return;");
     }
 }
@@ -812,12 +814,18 @@ static void gen_function(GenBuf *buf, VusAstFunctionDef *func) {
     gen_emit_line(buf, "VusString* _vus_result = NULL;");
     gen_emit_line(buf, "int _err = 0;");
 
+    /* 栈追踪：记录函数调用 */
+    gen_emit_linef(buf, "vus_stack_push(\"%s\");", func->name);
+
     /* 函数体 */
     if (func->body) {
         for (size_t i = 0; i < func->body->count; i++) {
             gen_statement(buf, func->body->items[i]);
         }
     }
+
+    /* 栈追踪：函数退出 */
+    gen_emit_line(buf, "vus_stack_pop();");
 
     /* 设置返回值（在 args[0] 中） */
     gen_emit_line(buf, "if (_vus_result) {");
@@ -835,9 +843,13 @@ static void gen_function(GenBuf *buf, VusAstFunctionDef *func) {
 
 /* ============ 主函数生成 ============ */
 
-static void gen_main_function(GenBuf *buf, VusAstProgram *program) {
+static void gen_main_function(GenBuf *buf, VusAstProgram *program, int debug) {
     gen_emit_line(buf, "int main(void) {");
     buf->indent++;
+
+    if (debug) {
+        gen_emit_line(buf, "vus_debug_enabled = 1;");
+    }
 
     gen_emit_line(buf, "int _err = 0;");
     gen_emit_line(buf, "VusError* _vus_err = NULL;");
@@ -915,7 +927,7 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config) {
     }
 
     /* 主函数 */
-    gen_main_function(buf, program);
+    gen_main_function(buf, program, config->debug);
 
     char *result = strdup(buf->data);
     free(buf->data);
@@ -924,7 +936,8 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config) {
 }
 
 int vus_compile_c(const char *c_source_path, const char *output_path,
-                  VusConfig *config, char *error_msg, size_t error_size) {
+                  VusConfig *config, char *error_msg, size_t error_size,
+                  const char *extra_objects) {
     if (!c_source_path || !output_path || !config) {
         if (error_msg && error_size > 0) {
             snprintf(error_msg, error_size, "Invalid arguments to vus_compile_c");
@@ -965,13 +978,25 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
 
     /* 构建 GCC 命令 */
     char cmd[8192];
-    int n = snprintf(cmd, sizeof(cmd),
-        "gcc %s -g -I\"%s\" \"%s\" \"%s\" -o \"%s\" -lm 2>&1",
-        opt_level,
-        abs_rt_dir,
-        c_source_path,
-        rt_source,
-        output_path);
+    int n;
+    if (extra_objects && extra_objects[0]) {
+        n = snprintf(cmd, sizeof(cmd),
+            "gcc %s -g -I\"%s\" \"%s\" \"%s\" %s -o \"%s\" -lm 2>&1",
+            opt_level,
+            abs_rt_dir,
+            c_source_path,
+            rt_source,
+            extra_objects,
+            output_path);
+    } else {
+        n = snprintf(cmd, sizeof(cmd),
+            "gcc %s -g -I\"%s\" \"%s\" \"%s\" -o \"%s\" -lm 2>&1",
+            opt_level,
+            abs_rt_dir,
+            c_source_path,
+            rt_source,
+            output_path);
+    }
 
     if (n >= (int)sizeof(cmd)) {
         if (error_msg && error_size > 0) {

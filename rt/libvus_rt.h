@@ -99,6 +99,19 @@ void vus_error_push(VusError** chain, VusError* err);
 void vus_error_print(VusError* err);
 void vus_error_free(VusError* err);
 
+// ============ 调试支持 ============
+extern int vus_debug_enabled;
+void vus_debug_print(const char* msg);
+
+// ============ 栈追踪支持 ============
+#define VUS_MAX_STACK_DEPTH 256
+extern int vus_stack_depth;
+extern const char* vus_stack_frames[VUS_MAX_STACK_DEPTH];
+
+void vus_stack_push(const char* func_name);
+void vus_stack_pop(void);
+void vus_stack_print(void);
+
 // ============ 标准库辅助函数 ============
 // 以下函数由编译器生成的 C 代码调用，用于标准库功能
 

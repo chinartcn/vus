@@ -13,6 +13,7 @@
 #include "../include/vus/vus.h"
 #include "../include/vus/vus_abi.h"
 #include "vus_lang.h"
+#include "vus_vusx.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -129,7 +130,7 @@ VusResult vus_compile_to_c(const char *vus_file_path, VusConfig *config) {
     if (!vus_file_path || !config) {
         result.success = 0;
         snprintf(result.error_msg, sizeof(result.error_msg),
-                 "Invalid arguments to vus_compile_to_c");
+                 "vus_compile_to_c 参数无效");
         return result;
     }
 
@@ -139,7 +140,7 @@ VusResult vus_compile_to_c(const char *vus_file_path, VusConfig *config) {
     if (!source) {
         result.success = 0;
         snprintf(result.error_msg, sizeof(result.error_msg),
-                 "Failed to read source file: %s", vus_file_path);
+                 "源码文件读取失败: %s", vus_file_path);
         return result;
     }
 
@@ -149,7 +150,7 @@ VusResult vus_compile_to_c(const char *vus_file_path, VusConfig *config) {
         if (vus_lang_load_from_config(config->language_plugin, config->project_dir) != 0) {
             result.success = 0;
             snprintf(result.error_msg, sizeof(result.error_msg),
-                     "Failed to load language plugin: %s", config->language_plugin);
+                     "%s: 语言插件加载失败: %s", vus_file_path, config->language_plugin);
             free(source);
             return result;
         }
@@ -170,7 +171,7 @@ VusResult vus_compile_to_c(const char *vus_file_path, VusConfig *config) {
     if (!lexer) {
         result.success = 0;
         snprintf(result.error_msg, sizeof(result.error_msg),
-                 "Failed to create lexer");
+                 "%s: 词法分析器创建失败", vus_file_path);
         free(source);
         return result;
     }
@@ -181,7 +182,7 @@ VusResult vus_compile_to_c(const char *vus_file_path, VusConfig *config) {
     if (lexer->error) {
         result.success = 0;
         snprintf(result.error_msg, sizeof(result.error_msg),
-                 "Lexer error: %s", vus_lexer_error(lexer));
+                 "%s: 词法分析错误: %s", vus_file_path, vus_lexer_error(lexer));
         vus_lexer_free_tokens(tokens, token_count);
         vus_lexer_free(lexer);
         free(source);
@@ -196,7 +197,7 @@ VusResult vus_compile_to_c(const char *vus_file_path, VusConfig *config) {
     if (!parser) {
         result.success = 0;
         snprintf(result.error_msg, sizeof(result.error_msg),
-                 "Failed to create parser");
+                 "%s: 语法分析器创建失败", vus_file_path);
         vus_lexer_free_tokens(tokens, token_count);
         free(source);
         return result;
@@ -207,7 +208,7 @@ VusResult vus_compile_to_c(const char *vus_file_path, VusConfig *config) {
     if (parser->error) {
         result.success = 0;
         snprintf(result.error_msg, sizeof(result.error_msg),
-                 "Parser error: %s", vus_parser_error(parser));
+                 "%s: 语法分析错误: %s", vus_file_path, vus_parser_error(parser));
         vus_parser_free(parser);
         vus_lexer_free_tokens(tokens, token_count);
         free(source);
@@ -221,7 +222,7 @@ VusResult vus_compile_to_c(const char *vus_file_path, VusConfig *config) {
     if (!c_code) {
         result.success = 0;
         snprintf(result.error_msg, sizeof(result.error_msg),
-                 "Failed to generate C code");
+                 "%s: C 代码生成失败", vus_file_path);
         vus_ast_node_free((VusAstNode *)program);
         free(source);
         return result;
@@ -255,7 +256,7 @@ VusResult vus_compile_to_c(const char *vus_file_path, VusConfig *config) {
     if (!fp) {
         result.success = 0;
         snprintf(result.error_msg, sizeof(result.error_msg),
-                 "Failed to write C file: %s", c_output_path);
+                 "C 文件写入失败: %s", c_output_path);
         vus_generate_free(c_code);
         vus_ast_node_free((VusAstNode *)program);
         free(source);
@@ -305,15 +306,51 @@ VusResult vus_compile_to_exe(const char *vus_file_path, VusConfig *config) {
                          : snprintf(build_dir, sizeof(build_dir), "%s/构建", config->project_dir);
     snprintf(exe_output_path, sizeof(exe_output_path), "%s/%s", build_dir, name_buf);
 
+    /* 编译 vusx 依赖 */
+    VusVusxPlugin vusx_plugins[VUS_MAX_VUSX_DEPS];
+    int vusx_count = 0;
+    char extra_objects[4096] = "";
+
+    if (config->vusx_deps_count > 0) {
+        memset(vusx_plugins, 0, sizeof(vusx_plugins));
+        int resolved = 0;
+        for (int i = 0; i < config->vusx_deps_count && resolved < VUS_MAX_VUSX_DEPS; i++) {
+            if (vus_vusx_resolve(config->vusx_deps[i], &vusx_plugins[resolved]) == 0) {
+                resolved++;
+            } else {
+                fprintf(stderr, "警告: vusx 依赖 '%s' 解析失败，跳过\n", config->vusx_deps[i]);
+            }
+        }
+        vusx_count = resolved;
+
+        if (vusx_count > 0) {
+            if (vus_vusx_compile_all(vusx_plugins, vusx_count, config) != 0) {
+                result.success = 0;
+                snprintf(result.error_msg, sizeof(result.error_msg),
+                         "vusx 依赖编译失败");
+                return result;
+            }
+
+            for (int i = 0; i < vusx_count; i++) {
+                size_t len = strlen(extra_objects);
+                snprintf(extra_objects + len, sizeof(extra_objects) - len,
+                         " \"%s\"", vusx_plugins[i].obj_output);
+            }
+        }
+    }
+
     /* 调用 GCC 编译 */
     char error_msg[512];
     int compile_result = vus_compile_c(result.c_output_path, exe_output_path,
-                                        config, error_msg, sizeof(error_msg));
+                                        config, error_msg, sizeof(error_msg),
+                                        extra_objects[0] ? extra_objects : NULL);
+
+    if (vusx_count > 0) vus_vusx_cleanup_all(vusx_plugins, vusx_count);
 
     if (compile_result != 0) {
         result.success = 0;
         snprintf(result.error_msg, sizeof(result.error_msg),
-                 "GCC compilation failed: %s", error_msg);
+                 "GCC 编译失败: %s", error_msg);
         return result;
     }
 
@@ -365,6 +402,7 @@ static int vus_init(int force) {
         "    \"version\": \"0.1.0\",\n"
         "    \"风格\": \"函数\",\n"
         "    \"语言插件\": \"\",\n"
+        "    \"vusx依赖\": [],\n"
         "    \"主文件\": \"main.vus\",\n"
         "    \"输出模式\": \"c\",\n"
         "    \"列表模式\": \"严格\",\n"
@@ -560,6 +598,7 @@ static void print_help(void) {
     printf("  build --c-only <file>   编译为 C 代码\n");
     printf("  build --exe   <file>   编译为可执行文件\n");
     printf("  run           <file>   编译并运行\n");
+    printf("  run --debug   <file>   编译并以调试模式运行\n");
     printf("  init                   交互式项目初始化\n");
     printf("  test                   运行测试\n");
     printf("  lang list              列出已安装语言插件\n");
@@ -570,6 +609,9 @@ static void print_help(void) {
     printf("  vux info    <插件>     查看插件信息\n");
     printf("  vux list               列出已安装插件\n");
     printf("  vux run     <插件>     运行插件\n");
+    printf("  vusx list              列出项目中的 vusx 依赖\n");
+    printf("  vusx info   <路径>     查看 vusx 插件信息\n");
+    printf("  vusx build  <路径>     编译 vusx 插件\n");
     printf("  --version, -v          显示版本信息\n");
     printf("  --help, -h             显示此帮助\n\n");
     printf("示例:\n");
@@ -682,11 +724,23 @@ int main(int argc, char *argv[]) {
     /* run */
     if (strcmp(cmd, "run") == 0) {
         if (argc < 3) {
-            fprintf(stderr, "用法: vus run <file>\n");
+            fprintf(stderr, "用法: vus run [--debug] <file>\n");
             return 1;
         }
 
-        const char *file = argv[2];
+        int debug_mode = 0;
+        const char *file = NULL;
+
+        if (strcmp(argv[2], "--debug") == 0) {
+            debug_mode = 1;
+            if (argc < 4) {
+                fprintf(stderr, "用法: vus run --debug <file>\n");
+                return 1;
+            }
+            file = argv[3];
+        } else {
+            file = argv[2];
+        }
 
         VusConfig config;
         memset(&config, 0, sizeof(config));
@@ -706,6 +760,10 @@ int main(int argc, char *argv[]) {
             strcpy(config.optimization, "速度");
         }
         config_set_compiler_rt(&config);
+
+        if (debug_mode) {
+            config.debug = 1;
+        }
 
         return vus_run(file, &config);
     }
@@ -815,6 +873,85 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "fork 失败\n");
             return 1;
         }
+    }
+
+    /* vusx 插件管理 */
+    if (strcmp(cmd, "vusx") == 0) {
+        if (argc < 3) {
+            fprintf(stderr, "用法: vus vusx <list|info|build> [参数]\n");
+            return 1;
+        }
+
+        const char *subcmd = argv[2];
+
+        if (strcmp(subcmd, "list") == 0) {
+            /* 从当前目录的 vus.json 读取 vusx 依赖 */
+            VusConfig config;
+            memset(&config, 0, sizeof(config));
+            if (vus_config_load(&config, ".") == 0 && config.vusx_deps_count > 0) {
+                printf("vusx 依赖 (%d):\n", config.vusx_deps_count);
+                for (int i = 0; i < config.vusx_deps_count; i++) {
+                    VusVusxPlugin plugin;
+                    if (vus_vusx_resolve(config.vusx_deps[i], &plugin) == 0) {
+                        printf("  [%d] %s v%s — %s\n",
+                               i, plugin.name, plugin.version, config.vusx_deps[i]);
+                    } else {
+                        printf("  [%d] (未解析) — %s\n", i, config.vusx_deps[i]);
+                    }
+                }
+            } else {
+                printf("没有配置 vusx 依赖。\n");
+            }
+            return 0;
+        }
+
+        if (strcmp(subcmd, "info") == 0 && argc >= 4) {
+            VusVusxPlugin plugin;
+            if (vus_vusx_resolve(argv[3], &plugin) == 0) {
+                printf("名称:    %s\n", plugin.name);
+                printf("版本:    %s\n", plugin.version);
+                printf("目录:    %s\n", plugin.dir);
+                printf("入口:    %s\n", plugin.main_vus);
+                printf("导出:    ");
+                if (plugin.export_count > 0) {
+                    for (int i = 0; i < plugin.export_count; i++) {
+                        printf("%s%s", i > 0 ? ", " : "", plugin.exports[i]);
+                    }
+                } else {
+                    printf("(无)");
+                }
+                printf("\n");
+                return 0;
+            }
+            fprintf(stderr, "vusx 插件解析失败: %s\n", argv[3]);
+            return 1;
+        }
+
+        if (strcmp(subcmd, "build") == 0 && argc >= 4) {
+            VusVusxPlugin plugin;
+            if (vus_vusx_resolve(argv[3], &plugin) != 0) {
+                fprintf(stderr, "vusx 插件解析失败: %s\n", argv[3]);
+                return 1;
+            }
+
+            VusConfig config;
+            memset(&config, 0, sizeof(config));
+            strcpy(config.style, "函数");
+            strcpy(config.project_dir, ".");
+            strcpy(config.rt_dir, "rt");
+            strcpy(config.build_dir, "构建");
+            config_set_compiler_rt(&config);
+
+            if (vus_vusx_compile(&plugin, &config) == 0) {
+                printf("vusx 插件 '%s' 编译成功: %s\n", plugin.name, plugin.obj_output);
+                return 0;
+            }
+            fprintf(stderr, "vusx 插件 '%s' 编译失败\n", plugin.name);
+            return 1;
+        }
+
+        fprintf(stderr, "用法: vus vusx <list|info|build> [参数]\n");
+        return 1;
     }
 
     /* 未知命令 */

@@ -50,6 +50,11 @@
 - `vus run <文件>` — 编译并运行 VUS 程序
 - `vus build <文件>` — 编译为可执行文件
 - `vus compile <文件>` — 仅编译为 C 代码
+- `vus init` — 交互式项目初始化
+- `vus test` — 运行测试用例
+- `vus lang list|load|info` — 语言插件管理（.vulage）
+- `vus vux install|build|info|list|run` — 功能插件管理（.vux）
+- `vus vusx list|info|build` — VUS 插件管理（.vusx）
 - `vus --help` — 显示帮助信息
 - `vus --version` — 显示版本信息
 
@@ -62,6 +67,17 @@
 - 完整的 `VusResult` 错误报告
 
 ### 插件系统 (v0.1) — 新增
+
+**四层插件体系**：
+
+| 类型 | 扩展名 | 编写语言 | 加载时机 | 状态 |
+|------|--------|----------|----------|:----:|
+| 源码 | `.vus` | VUS | 编译时 | ✅ 稳定 |
+| VUS 插件 | `.vusx` | VUS | 编译时（自动编译+链接） | ✅ 新增 |
+| 功能插件 | `.vux` | Python/C | 运行时 | ✅ 新增 |
+| 语言插件 | `.vulage` | Python/C | 编译前预处理 | ✅ 新增 |
+
+**`.vux` 运行时插件**：
 - `VusPlugin` 结构体（name、version、init、run、cleanup）
 - `VusPluginAPI` 编译器 API 表（compile_file、compile_string、eval 等）
 - `vus_register_plugin()` — 注册插件
@@ -69,6 +85,19 @@
 - 生命周期管理：`vus_plugin_init_all`、`vus_plugin_run_all`、`vus_plugin_cleanup_all`
 - 查询与列表：`vus_plugin_find`、`vus_plugin_count`、`vus_plugin_list_all`
 - Linux .so 和 Windows .dll 兼容导出宏
+
+**`.vulage` 语言插件**：
+- `VusLangPlugin` 结构体（name、version、preprocess、init、cleanup）
+- dlopen 动态加载共享库
+- 编译前预处理：在词法分析之前转换源码
+- 易语言语法插件示例（plugins/lang/易语言/）
+
+**`.vusx` VUS 插件**：
+- `VusVusxPlugin` 结构体（name、version、dir、main_vus、exports）
+- 编译时自动解析 vusx.json 元数据
+- VUS → C → .o 编译流水线
+- 自动链接到主程序可执行文件
+- CLI 命令：`vus vusx list|info|build`
 
 ---
 
@@ -276,7 +305,9 @@ vus/
 ├── include/vus/       # 公共 API 头文件
 │   ├── vus.h          # 核心类型和配置
 │   ├── vus_abi.h      # C ABI 接口
-│   └── vus_plugin.h   # 插件系统接口
+│   ├── vus_plugin.h   # 插件系统接口（.vux）
+│   ├── vus_lang.h     # 语言插件接口（.vulage）
+│   └── vus_vusx.h     # VUS 插件接口（.vusx）
 ├── src/               # 编译器源码
 │   ├── main.c         # CLI 入口
 │   ├── lexer.c/h      # 词法分析器
@@ -286,13 +317,22 @@ vus/
 │   ├── generator.c/h  # 代码生成器
 │   ├── config.c/h     # 配置加载
 │   ├── vus_abi.c      # C ABI 实现
-│   └── vus_plugin.c   # 插件系统实现
+│   ├── vus_plugin.c   # .vux 插件系统实现
+│   ├── vus_lang.c/h   # .vulage 语言插件系统实现
+│   └── vus_vusx.c/h   # .vusx 插件系统实现
 ├── rt/                # 运行时库
 │   ├── libvus_rt.h    # 运行时类型定义
 │   └── libvus_rt.c    # 运行时实现
 ├── tests/             # 测试用例
 │   ├── test_*.vus     # 功能测试
 │   └── run_tests.sh   # 测试运行脚本
+├── scripts/           # 工具脚本
+│   ├── vux_plugin_manager.py  # 插件管理
+│   └── vux_plugin_entry.py    # 插件基类
+├── plugins/           # 插件目录
+│   ├── lang/          # 语言插件（.vulage）
+│   │   └── 易语言/    # 示例语言插件
+│   └── func/          # 功能插件（.vux）
 ├── examples/          # 示例程序
 ├── docs/              # 文档
 ├── Makefile           # 构建系统

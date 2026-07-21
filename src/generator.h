@@ -19,9 +19,11 @@ extern "C" {
 /* 将 AST 生成 C 代码，返回分配的字符串 */
 char *vus_generate_c(VusAstProgram *program, VusConfig *config);
 
-/* 将 C 代码编译为可执行文件（调用 GCC） */
+/* 将 C 代码编译为可执行文件（调用 GCC）
+ * extra_objects — 额外 .o 文件列表（空格分隔），可为 NULL */
 int vus_compile_c(const char *c_source_path, const char *output_path,
-                  VusConfig *config, char *error_msg, size_t error_size);
+                  VusConfig *config, char *error_msg, size_t error_size,
+                  const char *extra_objects);
 
 /* 释放生成的 C 代码字符串 */
 void vus_generate_free(char *code);
