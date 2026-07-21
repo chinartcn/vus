@@ -4,7 +4,7 @@
 
 # --- 变量 ---
 CC       = gcc
-CFLAGS   = -Wall -Wextra -g -O2 -std=c11
+CFLAGS   = -Wall -Wextra -g -O2 -std=c11 -Wno-format-truncation
 SRC_DIR  = src
 RT_DIR   = rt
 BUILD_DIR = build
