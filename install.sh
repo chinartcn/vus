@@ -94,9 +94,9 @@ case ":$PATH:" in
         if [ ! -f "$HOME/.profile" ]; then
             echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.profile"
         fi
-        # 当前会话生效
-        export PATH="$TARGET_DIR:$PATH"
-        echo "  ✅ 已添加到 PATH（当前会话及后续登录均生效）"
+        echo "  ✅ 已写入 shell 配置文件（~/.bashrc / ~/.zshrc / ~/.profile）"
+        echo "  ⚠️  请执行以下命令刷新 PATH，或重新打开终端："
+        echo "     source ~/.bashrc"
         ;;
 esac
 
@@ -106,11 +106,14 @@ echo "验证安装..."
 if "$INSTALL_DIR/vus" --help &>/dev/null; then
     echo "  ✅ VUS 安装成功！"
     echo ""
-    echo "快速开始："
+    echo "快速开始（执行 source ~/.bashrc 后）："
     echo "  vus init               # 初始化项目"
     echo "  vus run main.vus       # 编译并运行"
     echo "  vus build --c-only     # 仅编译为 C 代码"
     echo "  vus build --exe        # 编译为可执行文件"
+    echo ""
+    echo "当前终端可立即使用（通过完整路径）："
+    echo "  $INSTALL_DIR/vus init"
 else
     echo "  ❌ 安装验证失败"
     exit 1
