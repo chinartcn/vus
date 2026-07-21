@@ -3,6 +3,10 @@
 
 # 构建产物
 构建/
+build/
+vus
+*.o
+*.a
 
 # 系统文件
 .DS_Store
@@ -14,3 +18,7 @@ Thumbs.db
 
 # 依赖包
 .vus_packages/
+
+# Python 缓存
+__pycache__/
+*.pyc
