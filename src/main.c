@@ -14,6 +14,7 @@
 #include "../include/vus/vus_abi.h"
 #include "vus_lang.h"
 #include "vus_vusx.h"
+#include "vus_apk.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -597,6 +598,8 @@ static void print_help(void) {
     printf("命令:\n");
     printf("  build --c-only <file>   编译为 C 代码\n");
     printf("  build --exe   <file>   编译为可执行文件\n");
+    printf("  build --apk   <file>   编译为 Android APK 项目\n");
+    printf("                [--ndk-path <路径>] [--app-name <名称>] [--output <目录>]\n");
     printf("  run           <file>   编译并运行\n");
     printf("  run --debug   <file>   编译并以调试模式运行\n");
     printf("  init                   交互式项目初始化\n");
@@ -669,7 +672,7 @@ int main(int argc, char *argv[]) {
     /* build */
     if (strcmp(cmd, "build") == 0) {
         if (argc < 4) {
-            fprintf(stderr, "用法: vus build --c-only|--exe <file>\n");
+            fprintf(stderr, "用法: vus build --c-only|--exe|--apk <file> [选项]\n");
             return 1;
         }
 
@@ -715,9 +718,41 @@ int main(int argc, char *argv[]) {
                 fprintf(stderr, "编译失败: %s\n", result.error_msg);
                 return 1;
             }
+        } else if (strcmp(mode, "--apk") == 0) {
+            /* 解析可选参数 */
+            const char *ndk_path = NULL;
+            const char *app_name = NULL;
+            const char *output_dir = NULL;
+            for (int i = 4; i < argc; i++) {
+                if (strcmp(argv[i], "--ndk-path") == 0 && i + 1 < argc) {
+                    ndk_path = argv[++i];
+                } else if (strcmp(argv[i], "--app-name") == 0 && i + 1 < argc) {
+                    app_name = argv[++i];
+                } else if (strcmp(argv[i], "--output") == 0 && i + 1 < argc) {
+                    output_dir = argv[++i];
+                } else {
+                    fprintf(stderr, "未知选项: %s\n", argv[i]);
+                    fprintf(stderr, "用法: vus build --apk <file> [--ndk-path <路径>] [--app-name <名称>] [--output <目录>]\n");
+                    return 1;
+                }
+            }
+
+            VusApkResult result = vus_compile_to_apk(file, &config, ndk_path, app_name, output_dir);
+            if (result.success) {
+                if (result.ndk_found) {
+                    printf("APK 项目已生成: %s\n", result.apk_path);
+                } else {
+                    printf("APK 项目已生成（未找到 NDK，仅生成项目结构）: %s\n", result.apk_path);
+                    printf("提示: 可通过 --ndk-path 指定 NDK 路径，或设置 ANDROID_NDK_HOME 环境变量\n");
+                }
+                return 0;
+            } else {
+                fprintf(stderr, "APK 编译失败: %s\n", result.error_msg);
+                return 1;
+            }
         } else {
             fprintf(stderr, "未知编译模式: %s\n", mode);
-            fprintf(stderr, "用法: vus build --c-only|--exe <file>\n");
+            fprintf(stderr, "用法: vus build --c-only|--exe|--apk <file>\n");
             return 1;
         }
     }
