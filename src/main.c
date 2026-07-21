@@ -51,6 +51,32 @@ static char *read_file(const char *path, size_t *out_len) {
 
 /* ============ 获取项目目录 ============ */
 
+/* 编译器安装目录 */
+static char g_compiler_dir[1024] = "";
+
+/* 从 argv[0] 解析编译器安装目录 */
+static int find_compiler_dir(const char *argv0) {
+    char *resolved = realpath(argv0, NULL);
+    if (!resolved) return 0;
+    char *last_slash = strrchr(resolved, '/');
+    if (!last_slash) {
+        free(resolved);
+        return 0;
+    }
+    *last_slash = '\0';
+    strncpy(g_compiler_dir, resolved, sizeof(g_compiler_dir) - 1);
+    g_compiler_dir[sizeof(g_compiler_dir) - 1] = '\0';
+    free(resolved);
+    return 1;
+}
+
+/* 将 config->rt_dir 设为编译器自带的运行时库绝对路径 */
+static void config_set_compiler_rt(VusConfig *config) {
+    if (g_compiler_dir[0]) {
+        snprintf(config->rt_dir, sizeof(config->rt_dir), "%s/rt", g_compiler_dir);
+    }
+}
+
 /* 从文件路径中提取项目目录（查找 vus.json 所在目录） */
 static int find_project_dir(const char *vus_file, char *project_dir, size_t dir_size) {
     /* 先从当前目录查找 vus.json */
@@ -483,6 +509,7 @@ static int vus_test(void) {
         strcpy(config.build_dir, "构建");
         strcpy(config.optimization, "速度");
     }
+    config_set_compiler_rt(&config);
 
     /* 排序测试文件（按文件名升序） */
     for (size_t i = 0; i < test_count; i++) {
@@ -567,6 +594,9 @@ static void print_help(void) {
 /* ============ main 函数 ============ */
 
 int main(int argc, char *argv[]) {
+    /* 解析编译器安装目录 */
+    find_compiler_dir(argv[0]);
+
     if (argc < 2) {
         print_help();
         return 0;
@@ -623,6 +653,7 @@ int main(int argc, char *argv[]) {
             strcpy(config.build_dir, "构建");
             strcpy(config.optimization, "速度");
         }
+        config_set_compiler_rt(&config);
 
         if (strcmp(mode, "--c-only") == 0) {
             VusResult result = vus_compile_to_c(file, &config);
@@ -675,6 +706,7 @@ int main(int argc, char *argv[]) {
             strcpy(config.build_dir, "构建");
             strcpy(config.optimization, "速度");
         }
+        config_set_compiler_rt(&config);
 
         return vus_run(file, &config);
     }
