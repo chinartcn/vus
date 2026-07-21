@@ -11,6 +11,7 @@
 #include "lexer.h"
 #include "config.h"
 #include "../include/vus/vus.h"
+#include "../include/vus/vus_abi.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -582,6 +583,12 @@ static void print_help(void) {
     printf("  run           <file>   编译并运行\n");
     printf("  init                   交互式项目初始化\n");
     printf("  test                   运行测试\n");
+    printf("  vux install <源>       安装 .vux 插件\n");
+    printf("  vux build   [目录]     打包 .vux 插件\n");
+    printf("  vux info    <插件>     查看插件信息\n");
+    printf("  vux list               列出已安装插件\n");
+    printf("  vux run     <插件>     运行插件\n");
+    printf("  --version, -v          显示版本信息\n");
     printf("  --help, -h             显示此帮助\n\n");
     printf("示例:\n");
     printf("  vus init\n");
@@ -589,6 +596,8 @@ static void print_help(void) {
     printf("  vus build --exe main.vus\n");
     printf("  vus run main.vus\n");
     printf("  vus test\n");
+    printf("  vux install 示例\n");
+    printf("  vux list\n");
 }
 
 /* ============ main 函数 ============ */
@@ -603,6 +612,14 @@ int main(int argc, char *argv[]) {
     }
 
     const char *cmd = argv[1];
+
+    /* --version */
+    if (strcmp(cmd, "--version") == 0 || strcmp(cmd, "-v") == 0) {
+        printf("VUS 编译器 v0.1\n");
+        printf("ABI 版本: %d.%d.%d\n",
+               VUS_ABI_VERSION_MAJOR, VUS_ABI_VERSION_MINOR, VUS_ABI_VERSION_PATCH);
+        return 0;
+    }
 
     /* --help */
     if (strcmp(cmd, "--help") == 0 || strcmp(cmd, "-h") == 0) {
@@ -709,6 +726,80 @@ int main(int argc, char *argv[]) {
         config_set_compiler_rt(&config);
 
         return vus_run(file, &config);
+    }
+
+    /* vux 插件管理（委派给 Python 脚本）*/
+    if (strcmp(cmd, "vux") == 0) {
+        if (argc < 3) {
+            fprintf(stderr, "用法: vus vux <install|build|info|list|run> [参数]\n");
+            return 1;
+        }
+
+        /* 查找脚本路径 */
+        const char *script_name = "vux_plugin_manager.py";
+        char script_path[2048];
+
+        /* 尝试多个位置 */
+        const char *search_paths[] = {
+            g_compiler_dir,
+            ".",
+            "./scripts",
+            "../scripts",
+            "/usr/local/share/vus/scripts",
+            "/usr/share/vus/scripts",
+        };
+
+        int found = 0;
+        for (size_t i = 0; i < sizeof(search_paths) / sizeof(search_paths[0]); i++) {
+            if (search_paths[i][0] == '\0') continue;
+            snprintf(script_path, sizeof(script_path),
+                     "%s/scripts/%s", search_paths[i], script_name);
+            if (access(script_path, F_OK) == 0) {
+                found = 1;
+                break;
+            }
+            /* 也尝试直接路径 */
+            snprintf(script_path, sizeof(script_path),
+                     "%s/%s", search_paths[i], script_name);
+            if (access(script_path, F_OK) == 0) {
+                found = 1;
+                break;
+            }
+        }
+
+        if (!found) {
+            fprintf(stderr, "错误: 找不到插件管理脚本 %s\n", script_name);
+            fprintf(stderr, "请确保 scripts/ 目录在编译器安装目录中\n");
+            return 1;
+        }
+
+        /* 构建命令: python3 script.py <subcommand> [args...] */
+        char *cmd_args[256];
+        int cmd_argc = 0;
+        cmd_args[cmd_argc++] = "python3";
+        cmd_args[cmd_argc++] = script_path;
+
+        for (int i = 2; i < argc && cmd_argc < 255; i++) {
+            cmd_args[cmd_argc++] = argv[i];
+        }
+        cmd_args[cmd_argc] = NULL;
+
+        /* 执行 */
+        pid_t pid = fork();
+        if (pid == 0) {
+            execvp("python3", cmd_args);
+            /* 如果 python3 不存在，尝试 python */
+            cmd_args[0] = "python";
+            execvp("python", cmd_args);
+            _exit(127);
+        } else if (pid > 0) {
+            int status;
+            waitpid(pid, &status, 0);
+            return WEXITSTATUS(status);
+        } else {
+            fprintf(stderr, "fork 失败\n");
+            return 1;
+        }
     }
 
     /* 未知命令 */

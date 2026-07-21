@@ -105,9 +105,15 @@ clean:
 
 install: vus
 	install -m 755 vus /usr/local/bin/vus
+	install -d /usr/local/share/vus/scripts
+	install -m 644 scripts/vux_plugin_manager.py /usr/local/share/vus/scripts/
+	install -m 644 scripts/vux_plugin_entry.py /usr/local/share/vus/scripts/
+	install -d /usr/local/share/vus/examples/plugins
+	cp -r examples/plugins/* /usr/local/share/vus/examples/plugins/ 2>/dev/null || true
 
 uninstall:
 	rm -f /usr/local/bin/vus
+	rm -rf /usr/local/share/vus
 
 # =============================================================================
 # 测试
