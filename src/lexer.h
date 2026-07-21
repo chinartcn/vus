@@ -2,7 +2,7 @@
  * lexer.h — VUS 词法分析器接口
  *
  * 将 VUS 源码字符串转换为 Token 流。
- * 支持函数风格（中英别名）和易语言风格（点前缀）。
+ * 支持函数风格（中英别名）。
  * 使用缩进栈处理 INDENT/DEDENT。
  */
 
@@ -22,7 +22,6 @@ typedef struct {
     size_t      pos;           /* 当前读取位置 */
     int         line;          /* 当前行号 */
     int         column;        /* 当前列号 */
-    const char *style;         /* "函数" 或 "易语言" */
 
     /* 输出 */
     VusToken   *tokens;        /* Token 数组 */
@@ -43,7 +42,7 @@ typedef struct {
 /* ============ 词法分析器操作 ============ */
 
 /* 创建并初始化词法分析器 */
-VusLexer *vus_lexer_new(const char *source, size_t source_len, const char *style);
+VusLexer *vus_lexer_new(const char *source, size_t source_len);
 
 /* 执行词法分析，返回 Token 数组 */
 VusToken *vus_lexer_tokenize(VusLexer *lexer, size_t *out_count);

@@ -49,7 +49,7 @@ static VusResult compile_source(const char *source, size_t source_len,
     memset(&result, 0, sizeof(result));
 
     /* 词法分析 */
-    VusLexer *lexer = vus_lexer_new(source, source_len, config->style);
+    VusLexer *lexer = vus_lexer_new(source, source_len);
     if (!lexer) {
         snprintf(result.error_msg, sizeof(result.error_msg), "Failed to create lexer");
         return result;
@@ -69,7 +69,7 @@ static VusResult compile_source(const char *source, size_t source_len,
     vus_lexer_free(lexer);
 
     /* 语法分析 */
-    VusParser *parser = vus_parser_new(tokens, token_count, config->style);
+    VusParser *parser = vus_parser_new(tokens, token_count);
     if (!parser) {
         snprintf(result.error_msg, sizeof(result.error_msg), "Failed to create parser");
         vus_lexer_free_tokens(tokens, token_count);

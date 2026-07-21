@@ -2,7 +2,7 @@
  * token.c — VUS Token 操作实现
  *
  * 实现 Token 创建/释放、关键字查找、字符分类函数。
- * 关键字查找表覆盖英文、中文别名、类型关键字和易语言风格。
+ * 关键字查找表覆盖英文关键字、中文别名和类型关键字。
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -105,24 +105,6 @@ const char *vus_token_type_name(VusTokenType type)
     case VUS_TOKEN_CN_CONTINUE:  return "继续";
     case VUS_TOKEN_CN_THROW:     return "抛出";
     case VUS_TOKEN_CN_IN:        return "在";
-
-    /* 易语言关键字 */
-    case VUS_TOKEN_EASY_FUNC:    return "功能";
-    case VUS_TOKEN_EASY_IF:      return "如果";
-    case VUS_TOKEN_EASY_ELIF:    return "否则如果";
-    case VUS_TOKEN_EASY_ELSE:    return "否则";
-    case VUS_TOKEN_EASY_FOR:     return "计次循环";
-    case VUS_TOKEN_EASY_WHILE:   return "循环";
-    case VUS_TOKEN_EASY_FOREACH: return "遍历";
-    case VUS_TOKEN_EASY_RETURN:  return "返回";
-    case VUS_TOKEN_EASY_IMPORT:  return "导入";
-    case VUS_TOKEN_EASY_FROM:    return "从";
-    case VUS_TOKEN_EASY_TRY:     return "尝试";
-    case VUS_TOKEN_EASY_EXCEPT:  return "捕获";
-    case VUS_TOKEN_EASY_GLOBAL:  return "全局";
-    case VUS_TOKEN_EASY_BREAK:   return "跳出";
-    case VUS_TOKEN_EASY_THROW:   return "抛出";
-    case VUS_TOKEN_EASY_END:     return "结束";
 
     /* 类型关键字 */
     case VUS_TOKEN_TYPE_INT:     return "整型";
@@ -245,27 +227,6 @@ static const KeywordEntry s_keywords[] = {
 
 #define KEYWORD_COUNT (sizeof(s_keywords) / sizeof(s_keywords[0]))
 
-/* 易语言关键字（不带点前缀） */
-static const KeywordEntry s_easy_keywords[] = {
-    {"从",       3, VUS_TOKEN_EASY_FROM},
-    {"全局",     6, VUS_TOKEN_EASY_GLOBAL},
-    {"功能",     6, VUS_TOKEN_EASY_FUNC},
-    {"如果",     6, VUS_TOKEN_EASY_IF},
-    {"尝试",     6, VUS_TOKEN_EASY_TRY},
-    {"导入",     6, VUS_TOKEN_EASY_IMPORT},
-    {"返回",     6, VUS_TOKEN_EASY_RETURN},
-    {"抛出",     6, VUS_TOKEN_EASY_THROW},
-    {"捕获",     6, VUS_TOKEN_EASY_EXCEPT},
-    {"跳出",     6, VUS_TOKEN_EASY_BREAK},
-    {"遍历",     6, VUS_TOKEN_EASY_FOREACH},
-    {"循环",     6, VUS_TOKEN_EASY_WHILE},
-    {"否则",     6, VUS_TOKEN_EASY_ELSE},
-    {"结束",     6, VUS_TOKEN_EASY_END},
-    {"计次循环", 12, VUS_TOKEN_EASY_FOR},
-};
-
-#define EASY_KEYWORD_COUNT (sizeof(s_easy_keywords) / sizeof(s_easy_keywords[0]))
-
 /*
  * 线性扫描关键字查找表。
  * 表较小，线性扫描足够快且避免 UTF-8 排序问题。
@@ -285,11 +246,6 @@ static VusTokenType lookup_linear(const KeywordEntry *table, size_t count,
 VusTokenType vus_keyword_lookup(const char *start, size_t len)
 {
     return lookup_linear(s_keywords, KEYWORD_COUNT, start, len);
-}
-
-VusTokenType vus_keyword_easy_lookup(const char *start, size_t len)
-{
-    return lookup_linear(s_easy_keywords, EASY_KEYWORD_COUNT, start, len);
 }
 
 /* ============ UTF-8 解码函数 ============ */

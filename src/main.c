@@ -143,7 +143,7 @@ VusResult vus_compile_to_c(const char *vus_file_path, VusConfig *config) {
     }
 
     /* 词法分析 */
-    VusLexer *lexer = vus_lexer_new(source, source_len, config->style);
+    VusLexer *lexer = vus_lexer_new(source, source_len);
     if (!lexer) {
         result.success = 0;
         snprintf(result.error_msg, sizeof(result.error_msg),
@@ -169,7 +169,7 @@ VusResult vus_compile_to_c(const char *vus_file_path, VusConfig *config) {
     vus_lexer_free(lexer);
 
     /* 语法分析 */
-    VusParser *parser = vus_parser_new(tokens, token_count, config->style);
+    VusParser *parser = vus_parser_new(tokens, token_count);
     if (!parser) {
         result.success = 0;
         snprintf(result.error_msg, sizeof(result.error_msg),
@@ -332,60 +332,15 @@ static int vus_init(int force) {
     }
 
     printf("==== VUS 项目初始化向导 v0.1 ====\n");
-    printf("本向导将为你的项目配置基础代码风格，选定后全局锁定。\n\n");
-
-    printf("【适配推荐】\n");
-    printf("  1. 函数风格：熟悉 Python、有编程基础，可中英混写\n");
-    printf("  2. 易语言风格：零基础，完全不想使用任何英文符号\n\n");
-
-    printf("【风格示例展示】\n");
-    printf("  [1] 函数风格\n");
-    printf("      定义 求和(a, b):\n");
-    printf("          返回 a + b\n");
-    printf("      打印(求和(1, 2))\n\n");
-    printf("  [2] 易语言风格\n");
-    printf("      .功能 求和(a, b)\n");
-    printf("          .返回 a + b\n");
-    printf("      .结束\n");
-    printf("      .打印(.求和(1, 2))\n\n");
-
-    /* 选择风格 */
-    int style_choice = 0;
-    char input[64];
-    printf("请输入选择编号 [1/2]：\n> ");
-    if (!fgets(input, sizeof(input), stdin)) {
-        fprintf(stderr, "输入错误\n");
-        return 1;
-    }
-    style_choice = atoi(input);
-
-    const char *style_name = NULL;
-    if (style_choice == 1) {
-        style_name = "函数";
-    } else if (style_choice == 2) {
-        style_name = "易语言";
-    } else {
-        fprintf(stderr, "无效选择，默认使用「函数风格」\n");
-        style_name = "函数";
-    }
-
-    /* 确认 */
-    printf("\n已选择「%s风格」，确认保存该配置？(y/n)\n> ", style_name);
-    if (!fgets(input, sizeof(input), stdin)) {
-        fprintf(stderr, "输入错误\n");
-        return 1;
-    }
-    if (input[0] != 'y' && input[0] != 'Y') {
-        printf("已取消初始化。\n");
-        return 0;
-    }
+    printf("VUS 默认使用函数风格（中英混写，兼容 Python 用户习惯）。\n");
+    printf("如需易语言风格，请安装「易语言语法插件」: vus plugin install 易语言\n\n");
 
     /* 生成 vus.json */
     const char *json_template =
         "{\n"
         "    \"name\": \"我的项目\",\n"
         "    \"version\": \"0.1.0\",\n"
-        "    \"风格\": \"%s\",\n"
+        "    \"风格\": \"函数\",\n"
         "    \"主文件\": \"main.vus\",\n"
         "    \"输出模式\": \"c\",\n"
         "    \"列表模式\": \"严格\",\n"
@@ -399,7 +354,7 @@ static int vus_init(int force) {
         "}\n";
 
     char json_content[2048];
-    snprintf(json_content, sizeof(json_content), json_template, style_name);
+    snprintf(json_content, sizeof(json_content), "%s", json_template);
 
     FILE *fp = fopen("vus.json", "w");
     if (!fp) {

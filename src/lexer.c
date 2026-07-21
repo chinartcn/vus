@@ -2,7 +2,7 @@
  * lexer.c — VUS 词法分析器实现
  *
  * 将 VUS 源码字符串转换为 Token 流。
- * 支持函数风格（中英别名）和易语言风格（点前缀关键字）。
+ * 支持函数风格（中英别名关键字）。
  * 使用缩进栈处理 INDENT/DEDENT。
  *
  * 缩进规则：
@@ -14,11 +14,6 @@
  * 注释：
  *   - # 开头到行尾
  *   - // 开头到行尾
- *
- * 易语言风格：
- *   - .关键字 发出 EASY_* 关键字 Token
- *   - .标识符 发出带点前缀的 IDENTIFIER Token
- *   - .. 为 CONCAT 运算符
  */
 
 #include "lexer.h"
@@ -566,7 +561,7 @@ static void lexer_set_error(VusLexer *lexer, const char *msg)
 /*
  * 创建并初始化词法分析器。
  */
-VusLexer *vus_lexer_new(const char *source, size_t source_len, const char *style)
+VusLexer *vus_lexer_new(const char *source, size_t source_len)
 {
     VusLexer *lexer = calloc(1, sizeof(VusLexer));
     if (!lexer) return NULL;
@@ -576,7 +571,6 @@ VusLexer *vus_lexer_new(const char *source, size_t source_len, const char *style
     lexer->pos        = 0;
     lexer->line       = 1;
     lexer->column     = 1;
-    lexer->style      = style;
 
     lexer->tokens     = NULL;
     lexer->token_count = 0;
@@ -704,7 +698,7 @@ VusToken *vus_lexer_tokenize(VusLexer *lexer, size_t *out_count)
             continue;
         }
 
-        /* === 点号 / 易语言风格 / 连接运算符 === */
+        /* === 点号 / 连接运算符 === */
         if (c == '.') {
             if (lexer_peek_next(lexer) == '.') {
                 /* .. 连接运算符 */
@@ -712,34 +706,6 @@ VusToken *vus_lexer_tokenize(VusLexer *lexer, size_t *out_count)
                 lexer_advance(lexer); /* 第二个 . */
                 lexer_add_token(lexer, VUS_TOKEN_CONCAT,
                                 lexer->source + (lexer->pos - 2), 2, line, col);
-                continue;
-            }
-
-            if (lexer->style &&
-                strcmp(lexer->style, "易语言") == 0 &&
-                lexer->pos + 1 < lexer->source_len &&
-                vus_is_ident_start((unsigned char)lexer->source[lexer->pos + 1]))
-            {
-                /* 易语言风格：.关键字 或 .标识符 */
-                const char *dot_start = lexer->source + lexer->pos;
-                lexer_advance(lexer); /* 跳过点号 */
-
-                const char *id_start = lexer->source + lexer->pos;
-                int id_line = lexer->line;
-                int id_col  = lexer->column;
-
-                lexer_skip_ident(lexer);
-
-                size_t id_len = (lexer->source + lexer->pos) - id_start;
-                size_t full_len = id_len + 1; /* 包含点号 */
-
-                VusTokenType ktype = vus_keyword_easy_lookup(id_start, id_len);
-                if (ktype != VUS_TOKEN_IDENTIFIER) {
-                    lexer_add_token(lexer, ktype, dot_start, full_len, line, col);
-                } else {
-                    lexer_add_token(lexer, VUS_TOKEN_IDENTIFIER,
-                                    dot_start, full_len, line, col);
-                }
                 continue;
             }
 

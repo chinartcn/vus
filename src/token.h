@@ -2,7 +2,7 @@
  * token.h — VUS 词法单元类型定义
  *
  * 定义 TokenType 枚举和 Token 结构体，是词法分析器和语法分析器的共享接口。
- * 所有关键字（英文、中文别名、易语言风格）都在此集中定义。
+ * 所有关键字（英文、中文别名）都在此集中定义。
  */
 
 #ifndef VUS_TOKEN_H
@@ -69,24 +69,6 @@ typedef enum {
     VUS_TOKEN_CN_CONTINUE,
     VUS_TOKEN_CN_THROW,
     VUS_TOKEN_CN_IN,
-
-    /* 关键字 — 易语言风格 */
-    VUS_TOKEN_EASY_FUNC,
-    VUS_TOKEN_EASY_IF,
-    VUS_TOKEN_EASY_ELIF,
-    VUS_TOKEN_EASY_ELSE,
-    VUS_TOKEN_EASY_FOR,
-    VUS_TOKEN_EASY_WHILE,
-    VUS_TOKEN_EASY_FOREACH,
-    VUS_TOKEN_EASY_RETURN,
-    VUS_TOKEN_EASY_IMPORT,
-    VUS_TOKEN_EASY_FROM,
-    VUS_TOKEN_EASY_TRY,
-    VUS_TOKEN_EASY_EXCEPT,
-    VUS_TOKEN_EASY_GLOBAL,
-    VUS_TOKEN_EASY_BREAK,
-    VUS_TOKEN_EASY_THROW,
-    VUS_TOKEN_EASY_END,
 
     /* 类型注解关键字 */
     VUS_TOKEN_TYPE_INT,
@@ -165,9 +147,6 @@ const char *vus_token_type_name(VusTokenType type);
 
 /* 根据字符串查找关键字类型，返回 VUS_TOKEN_IDENTIFIER 表示不是关键字 */
 VusTokenType vus_keyword_lookup(const char *start, size_t len);
-
-/* 易语言风格关键字查找（不包含点前缀） */
-VusTokenType vus_keyword_easy_lookup(const char *start, size_t len);
 
 /* 解码 UTF-8 序列，返回 Unicode 码点 */
 int vus_utf8_decode(const char *s, int *bytes_consumed);

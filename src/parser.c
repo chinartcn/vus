@@ -2,7 +2,7 @@
  * parser.c — VUS 语法分析器实现
  *
  * 递归下降解析器，将 Token 流转换为 AST。
- * 支持两种风格："函数"（Python 风格）和"易语言"（易语言风格）。
+ * 支持函数风格（中英别名关键字）。
  *
  * 表达式优先级（从低到高）：
  *   logical_or → logical_and → comparison → concat → additive → multiplicative → unary → primary
@@ -77,14 +77,7 @@ static VusAstNode *parse_primary(VusParser *parser);
 static VusAstList *parse_call_args(VusParser *parser);
 
 /* ==================================================================
- * 辅助函数：判断易语言风格
- * ================================================================== */
-static int is_easy_style(VusParser *parser) {
-    return strcmp(parser->style, "易语言") == 0;
-}
-
-/* ==================================================================
- * 内部辅助函数实现
+ * 辅助函数实现
  * ================================================================== */
 
 static void parser_advance(VusParser *parser) {
@@ -156,8 +149,7 @@ static void parser_set_error(VusParser *parser, const char *fmt, ...) {
  * ================================================================== */
 
 /*
- * 解析语句列表，直到遇到 DEDENT、EOF 或 EASY_END（易语言 .结束）。
- * 在易语言风格中，还会检查 EASY_END 作为块终止符。
+ * 解析语句列表，直到遇到 DEDENT 或 EOF。
  */
 static VusAstList *parse_statements(VusParser *parser) {
     VusAstList *list = vus_ast_list_new();
@@ -172,7 +164,6 @@ static VusAstList *parse_statements(VusParser *parser) {
         /* 块终止条件 */
         if (token->type == VUS_TOKEN_DEDENT) break;
         if (token->type == VUS_TOKEN_EOF) break;
-        if (token->type == VUS_TOKEN_EASY_END) break;
 
         VusAstNode *stmt = parse_statement(parser);
         if (parser->error) {
@@ -199,56 +190,46 @@ static VusAstNode *parse_statement(VusParser *parser) {
         /* ===== 函数定义 ===== */
         case VUS_TOKEN_DEF:
         case VUS_TOKEN_CN_DEF:
-        case VUS_TOKEN_EASY_FUNC:
             return parse_function_def(parser);
 
         /* ===== 条件语句 ===== */
         case VUS_TOKEN_IF:
         case VUS_TOKEN_CN_IF:
-        case VUS_TOKEN_EASY_IF:
             return parse_if_stmt(parser);
 
         /* ===== 循环语句 ===== */
         case VUS_TOKEN_FOR:
         case VUS_TOKEN_CN_FOR:
-        case VUS_TOKEN_EASY_FOR:
-        case VUS_TOKEN_EASY_FOREACH:
             return parse_for_stmt(parser);
 
         /* ===== While 循环 ===== */
         case VUS_TOKEN_WHILE:
         case VUS_TOKEN_CN_WHILE:
-        case VUS_TOKEN_EASY_WHILE:
             return parse_while_stmt(parser);
 
         /* ===== 异常处理 ===== */
         case VUS_TOKEN_TRY:
         case VUS_TOKEN_CN_TRY:
-        case VUS_TOKEN_EASY_TRY:
             return parse_try_stmt(parser);
 
         /* ===== 返回语句 ===== */
         case VUS_TOKEN_RETURN:
         case VUS_TOKEN_CN_RETURN:
-        case VUS_TOKEN_EASY_RETURN:
             return parse_return_stmt(parser);
 
         /* ===== 导入语句 ===== */
         case VUS_TOKEN_IMPORT:
         case VUS_TOKEN_CN_IMPORT:
-        case VUS_TOKEN_EASY_IMPORT:
             return parse_import_stmt(parser);
 
         /* ===== From-Import 语句 ===== */
         case VUS_TOKEN_FROM:
         case VUS_TOKEN_CN_FROM:
-        case VUS_TOKEN_EASY_FROM:
             return parse_from_import_stmt(parser);
 
         /* ===== Break ===== */
         case VUS_TOKEN_BREAK:
         case VUS_TOKEN_CN_BREAK:
-        case VUS_TOKEN_EASY_BREAK:
             return parse_break_stmt(parser);
 
         /* ===== Continue ===== */
@@ -259,13 +240,11 @@ static VusAstNode *parse_statement(VusParser *parser) {
         /* ===== Throw ===== */
         case VUS_TOKEN_THROW:
         case VUS_TOKEN_CN_THROW:
-        case VUS_TOKEN_EASY_THROW:
             return parse_throw_stmt(parser);
 
         /* ===== Global ===== */
         case VUS_TOKEN_GLOBAL:
         case VUS_TOKEN_CN_GLOBAL:
-        case VUS_TOKEN_EASY_GLOBAL:
             return parse_global_stmt(parser);
 
         /* ===== 赋值或表达式 ===== */
@@ -282,11 +261,11 @@ static VusAstNode *parse_statement(VusParser *parser) {
  *   def name(params):\n    body
  *   def name(params) -> type:\n    body
  *
- * 易语言风格（.功能）:
- *   .功能 name(params)\n    body\n.结束
+ * 中文别名:
+ *   定义 name(params):\n    body
  */
 static VusAstNode *parse_function_def(VusParser *parser) {
-    VusToken *keyword = parser_peek(parser); /* 消耗 def/定义/.功能 */
+    VusToken *keyword = parser_peek(parser); /* 消耗 def/定义 */
     int line = keyword->line;
     int col = keyword->column;
     parser_advance(parser);
@@ -307,41 +286,24 @@ static VusAstNode *parse_function_def(VusParser *parser) {
         params = vus_ast_list_new();
     }
 
-    /* 函数风格：期望冒号 */
-    if (!is_easy_style(parser)) {
-        parser_expect(parser, VUS_TOKEN_COLON);
-        if (parser->error) { free(name); vus_ast_list_free(params); return NULL; }
-    }
+    /* 期望冒号 */
+    parser_expect(parser, VUS_TOKEN_COLON);
+    if (parser->error) { free(name); vus_ast_list_free(params); return NULL; }
 
     /* 解析函数体 */
     parser_skip_newlines(parser);
 
     VusAstList *body = NULL;
 
-    if (is_easy_style(parser)) {
-        /* 易语言：期望 INDENT，然后解析到 .结束 */
-        VusToken *indent = parser_expect(parser, VUS_TOKEN_INDENT);
-        if (!indent) { free(name); vus_ast_list_free(params); return NULL; }
+    /* 期望 INDENT，然后解析到 DEDENT */
+    VusToken *indent = parser_expect(parser, VUS_TOKEN_INDENT);
+    if (!indent) { free(name); vus_ast_list_free(params); return NULL; }
 
-        body = parse_statements(parser);
-        if (parser->error) { free(name); vus_ast_list_free(params); vus_ast_list_free(body); return NULL; }
+    body = parse_statements(parser);
+    if (parser->error) { free(name); vus_ast_list_free(params); vus_ast_list_free(body); return NULL; }
 
-        parser_expect(parser, VUS_TOKEN_EASY_END);
-        if (parser->error) { free(name); vus_ast_list_free(params); vus_ast_list_free(body); return NULL; }
-
-        /* 消耗 .结束 后的 DEDENT */
-        parser_match(parser, VUS_TOKEN_DEDENT);
-    } else {
-        /* 函数风格：期望 INDENT，然后解析到 DEDENT */
-        VusToken *indent = parser_expect(parser, VUS_TOKEN_INDENT);
-        if (!indent) { free(name); vus_ast_list_free(params); return NULL; }
-
-        body = parse_statements(parser);
-        if (parser->error) { free(name); vus_ast_list_free(params); vus_ast_list_free(body); return NULL; }
-
-        parser_expect(parser, VUS_TOKEN_DEDENT);
-        if (parser->error) { free(name); vus_ast_list_free(params); vus_ast_list_free(body); return NULL; }
-    }
+    parser_expect(parser, VUS_TOKEN_DEDENT);
+    if (parser->error) { free(name); vus_ast_list_free(params); vus_ast_list_free(body); return NULL; }
 
     VusAstFunctionDef *node = vus_ast_func_def_new(name, params, body, line, col);
     free(name);
@@ -407,14 +369,13 @@ static VusAstList *parse_params(VusParser *parser) {
  *   elif cond:\n    body
  *   else:\n    body
  *
- * 易语言风格:
- *   .如果 cond\n    body
- *   .否则如果 cond\n    body
- *   .否则\n    body
- *   .结束
+ * 中文别名:
+ *   如果 cond:\n    body
+ *   否则如果 cond:\n    body
+ *   否则:\n    body
  */
 static VusAstNode *parse_if_stmt(VusParser *parser) {
-    VusToken *keyword = parser_peek(parser); /* 消耗 if/如果/.如果 */
+    VusToken *keyword = parser_peek(parser); /* 消耗 if/如果 */
     int line = keyword->line;
     int col = keyword->column;
     parser_advance(parser);
@@ -423,11 +384,9 @@ static VusAstNode *parse_if_stmt(VusParser *parser) {
     VusAstNode *cond = parse_expr(parser);
     if (!cond) return NULL;
 
-    /* 函数风格：期望冒号 */
-    if (!is_easy_style(parser)) {
-        parser_expect(parser, VUS_TOKEN_COLON);
-        if (parser->error) return NULL;
-    }
+    /* 期望冒号 */
+    parser_expect(parser, VUS_TOKEN_COLON);
+    if (parser->error) return NULL;
 
     /* 解析 then 体 */
     parser_skip_newlines(parser);
@@ -450,23 +409,15 @@ static VusAstNode *parse_if_stmt(VusParser *parser) {
         VusToken *next = parser_peek(parser);
         if (!next) break;
 
-        int is_elif = 0;
-        if (next->type == VUS_TOKEN_ELIF || next->type == VUS_TOKEN_CN_ELIF ||
-            next->type == VUS_TOKEN_EASY_ELIF) {
-            is_elif = 1;
-        }
-
-        if (!is_elif) break;
+        if (next->type != VUS_TOKEN_ELIF && next->type != VUS_TOKEN_CN_ELIF) break;
 
         parser_advance(parser); /* 消耗 elif */
 
         VusAstNode *elif_cond = parse_expr(parser);
         if (!elif_cond) return NULL;
 
-        if (!is_easy_style(parser)) {
-            parser_expect(parser, VUS_TOKEN_COLON);
-            if (parser->error) return NULL;
-        }
+        parser_expect(parser, VUS_TOKEN_COLON);
+        if (parser->error) return NULL;
 
         parser_skip_newlines(parser);
         VusToken *elif_indent = parser_expect(parser, VUS_TOKEN_INDENT);
@@ -485,14 +436,11 @@ static VusAstNode *parse_if_stmt(VusParser *parser) {
     {
         parser_skip_newlines(parser);
         VusToken *next = parser_peek(parser);
-        if (next && (next->type == VUS_TOKEN_ELSE || next->type == VUS_TOKEN_CN_ELSE ||
-                     next->type == VUS_TOKEN_EASY_ELSE)) {
+        if (next && (next->type == VUS_TOKEN_ELSE || next->type == VUS_TOKEN_CN_ELSE)) {
             parser_advance(parser); /* 消耗 else */
 
-            if (!is_easy_style(parser)) {
-                parser_expect(parser, VUS_TOKEN_COLON);
-                if (parser->error) return NULL;
-            }
+            parser_expect(parser, VUS_TOKEN_COLON);
+            if (parser->error) return NULL;
 
             parser_skip_newlines(parser);
             VusToken *else_indent = parser_expect(parser, VUS_TOKEN_INDENT);
@@ -508,13 +456,6 @@ static VusAstNode *parse_if_stmt(VusParser *parser) {
         }
     }
 
-    /* 易语言风格：消耗 .结束 */
-    if (is_easy_style(parser)) {
-        parser_skip_newlines(parser);
-        parser_match(parser, VUS_TOKEN_EASY_END);
-        parser_match(parser, VUS_TOKEN_DEDENT);
-    }
-
     return (VusAstNode*)if_node;
 }
 
@@ -527,82 +468,12 @@ static VusAstNode *parse_if_stmt(VusParser *parser) {
  *   for 元素 in 列表:\n    body              — foreach
  *   循环 i 从 1 到 10:\n    body              — 中文 for-range
  *   循环 元素 在 列表:\n    body               — 中文 foreach
- *
- * 易语言风格:
- *   .计次循环 i, 1, 10\n    body\n.结束      — for-range
- *   .遍历 元素, 列表\n    body\n.结束          — foreach
  */
 static VusAstNode *parse_for_stmt(VusParser *parser) {
-    VusToken *keyword = parser_peek(parser); /* 消耗 for/循环/.计次循环/.遍历 */
+    VusToken *keyword = parser_peek(parser); /* 消耗 for/循环 */
     int line = keyword->line;
     int col = keyword->column;
     parser_advance(parser);
-
-    /* 易语言 .计次循环 — for-range */
-    if (keyword->type == VUS_TOKEN_EASY_FOR) {
-        VusToken *var_token = parser_expect(parser, VUS_TOKEN_IDENTIFIER);
-        if (!var_token) return NULL;
-        char *var_name = strndup(var_token->start, var_token->length);
-
-        parser_expect(parser, VUS_TOKEN_COMMA);
-        if (parser->error) { free(var_name); return NULL; }
-
-        VusAstNode *start = parse_expr(parser);
-        if (!start) { free(var_name); return NULL; }
-
-        parser_expect(parser, VUS_TOKEN_COMMA);
-        if (parser->error) { free(var_name); return NULL; }
-
-        VusAstNode *end = parse_expr(parser);
-        if (!end) { free(var_name); return NULL; }
-
-        /* 解析 body */
-        parser_skip_newlines(parser);
-        VusToken *indent = parser_expect(parser, VUS_TOKEN_INDENT);
-        if (!indent) { free(var_name); return NULL; }
-
-        VusAstList *body = parse_statements(parser);
-        if (parser->error) { free(var_name); return NULL; }
-
-        parser_expect(parser, VUS_TOKEN_EASY_END);
-        if (parser->error) { free(var_name); return NULL; }
-
-        parser_match(parser, VUS_TOKEN_DEDENT);
-
-        VusAstForRange *node = vus_ast_for_range_new(var_name, start, end, body, line, col);
-        free(var_name);
-        return (VusAstNode*)node;
-    }
-
-    /* 易语言 .遍历 — foreach */
-    if (keyword->type == VUS_TOKEN_EASY_FOREACH) {
-        VusToken *var_token = parser_expect(parser, VUS_TOKEN_IDENTIFIER);
-        if (!var_token) return NULL;
-        char *var_name = strndup(var_token->start, var_token->length);
-
-        parser_expect(parser, VUS_TOKEN_COMMA);
-        if (parser->error) { free(var_name); return NULL; }
-
-        VusAstNode *iterable = parse_expr(parser);
-        if (!iterable) { free(var_name); return NULL; }
-
-        /* 解析 body */
-        parser_skip_newlines(parser);
-        VusToken *indent = parser_expect(parser, VUS_TOKEN_INDENT);
-        if (!indent) { free(var_name); return NULL; }
-
-        VusAstList *body = parse_statements(parser);
-        if (parser->error) { free(var_name); return NULL; }
-
-        parser_expect(parser, VUS_TOKEN_EASY_END);
-        if (parser->error) { free(var_name); return NULL; }
-
-        parser_match(parser, VUS_TOKEN_DEDENT);
-
-        VusAstForEach *node = vus_ast_for_each_new(var_name, iterable, body, line, col);
-        free(var_name);
-        return (VusAstNode*)node;
-    }
 
     /* 函数风格 / 中文风格 for 循环 */
     /* 需要区分 for-range 和 foreach */
@@ -665,8 +536,6 @@ static VusAstNode *parse_for_stmt(VusParser *parser) {
         if (keyword->type == VUS_TOKEN_FOR || keyword->type == VUS_TOKEN_CN_FOR) {
             /* range(expr, expr) 或 从 expr 到 expr */
             if (next->type == VUS_TOKEN_IN) {
-                /* range(expr, expr) 模式 — start 和 end 已在 parse_call_args 中 */
-                /* 但我们已经消耗了 "range" 和 "("，现在解析两个参数 */
                 start = parse_expr(parser);
                 if (!start) { free(var_name); return NULL; }
 
@@ -691,17 +560,14 @@ static VusAstNode *parse_for_stmt(VusParser *parser) {
                 if (!end) { free(var_name); return NULL; }
             }
         } else {
-            /* 不应该到达这里 */
             parser_set_error(parser, "内部错误：无法识别的 for-range 风格（第 %d 行）", line);
             free(var_name);
             return NULL;
         }
 
-        /* 函数风格：期望冒号 */
-        if (!is_easy_style(parser)) {
-            parser_expect(parser, VUS_TOKEN_COLON);
-            if (parser->error) { free(var_name); return NULL; }
-        }
+        /* 期望冒号 */
+        parser_expect(parser, VUS_TOKEN_COLON);
+        if (parser->error) { free(var_name); return NULL; }
 
         /* 解析 body */
         parser_skip_newlines(parser);
@@ -724,11 +590,9 @@ static VusAstNode *parse_for_stmt(VusParser *parser) {
         VusAstNode *iterable = parse_expr(parser);
         if (!iterable) { free(var_name); return NULL; }
 
-        /* 函数风格：期望冒号 */
-        if (!is_easy_style(parser)) {
-            parser_expect(parser, VUS_TOKEN_COLON);
-            if (parser->error) { free(var_name); return NULL; }
-        }
+        /* 期望冒号 */
+        parser_expect(parser, VUS_TOKEN_COLON);
+        if (parser->error) { free(var_name); return NULL; }
 
         /* 解析 body */
         parser_skip_newlines(parser);
@@ -757,31 +621,20 @@ static VusAstNode *parse_for_stmt(VusParser *parser) {
  * 函数风格:
  *   while cond:\n    body
  *   当循环 cond:\n    body
- *
- * 易语言风格:
- *   .循环\n    body\n.结束
  */
 static VusAstNode *parse_while_stmt(VusParser *parser) {
-    VusToken *keyword = parser_peek(parser); /* 消耗 while/当循环/.循环 */
+    VusToken *keyword = parser_peek(parser); /* 消耗 while/当循环 */
     int line = keyword->line;
     int col = keyword->column;
     parser_advance(parser);
 
-    VusAstNode *cond = NULL;
+    /* 解析条件表达式 */
+    VusAstNode *cond = parse_expr(parser);
+    if (!cond) return NULL;
 
-    if (is_easy_style(parser)) {
-        /* 易语言 .循环 没有条件表达式，创建条件为 true 的 while */
-        /* 实际上 .循环 是无限循环，需要内部 break */
-        cond = (VusAstNode*)vus_ast_bool_new(1, line, col);
-    } else {
-        /* 解析条件表达式 */
-        cond = parse_expr(parser);
-        if (!cond) return NULL;
-
-        /* 期望冒号 */
-        parser_expect(parser, VUS_TOKEN_COLON);
-        if (parser->error) return NULL;
-    }
+    /* 期望冒号 */
+    parser_expect(parser, VUS_TOKEN_COLON);
+    if (parser->error) return NULL;
 
     /* 解析 body */
     parser_skip_newlines(parser);
@@ -790,11 +643,6 @@ static VusAstNode *parse_while_stmt(VusParser *parser) {
 
     VusAstList *body = parse_statements(parser);
     if (parser->error) return NULL;
-
-    if (is_easy_style(parser)) {
-        parser_expect(parser, VUS_TOKEN_EASY_END);
-        if (parser->error) return NULL;
-    }
 
     parser_expect(parser, VUS_TOKEN_DEDENT);
     if (parser->error) return NULL;
@@ -809,21 +657,16 @@ static VusAstNode *parse_while_stmt(VusParser *parser) {
  *
  * 函数风格:
  *   try:\n    body except Type:\n    body
- *
- * 易语言风格:
- *   .尝试\n    body\n.加塞处理\n    body\n.结束
  */
 static VusAstNode *parse_try_stmt(VusParser *parser) {
-    VusToken *keyword = parser_peek(parser); /* 消耗 try/尝试/.尝试 */
+    VusToken *keyword = parser_peek(parser); /* 消耗 try/尝试 */
     int line = keyword->line;
     int col = keyword->column;
     parser_advance(parser);
 
-    /* 函数风格：期望冒号 */
-    if (!is_easy_style(parser)) {
-        parser_expect(parser, VUS_TOKEN_COLON);
-        if (parser->error) return NULL;
-    }
+    /* 期望冒号 */
+    parser_expect(parser, VUS_TOKEN_COLON);
+    if (parser->error) return NULL;
 
     /* 解析 try body */
     parser_skip_newlines(parser);
@@ -846,8 +689,7 @@ static VusAstNode *parse_try_stmt(VusParser *parser) {
         if (!next) break;
 
         int is_except = 0;
-        if (next->type == VUS_TOKEN_EXCEPT || next->type == VUS_TOKEN_CN_EXCEPT ||
-            next->type == VUS_TOKEN_EASY_EXCEPT) {
+        if (next->type == VUS_TOKEN_EXCEPT || next->type == VUS_TOKEN_CN_EXCEPT) {
             is_except = 1;
         }
 
@@ -881,11 +723,9 @@ static VusAstNode *parse_try_stmt(VusParser *parser) {
             parser_match(parser, VUS_TOKEN_RPAREN);
         }
 
-        /* 函数风格：期望冒号 */
-        if (!is_easy_style(parser)) {
-            parser_expect(parser, VUS_TOKEN_COLON);
-            if (parser->error) { free(except_type); return NULL; }
-        }
+        /* 期望冒号 */
+        parser_expect(parser, VUS_TOKEN_COLON);
+        if (parser->error) { free(except_type); return NULL; }
 
         /* 解析 except body */
         parser_skip_newlines(parser);
@@ -902,13 +742,6 @@ static VusAstNode *parse_try_stmt(VusParser *parser) {
         free(except_type);
     }
 
-    /* 易语言风格：消耗 .结束 */
-    if (is_easy_style(parser)) {
-        parser_skip_newlines(parser);
-        parser_match(parser, VUS_TOKEN_EASY_END);
-        parser_match(parser, VUS_TOKEN_DEDENT);
-    }
-
     return (VusAstNode*)try_node;
 }
 
@@ -916,18 +749,17 @@ static VusAstNode *parse_try_stmt(VusParser *parser) {
  * Return 语句解析
  * ================================================================== */
 static VusAstNode *parse_return_stmt(VusParser *parser) {
-    VusToken *keyword = parser_peek(parser); /* 消耗 return/返回/.返回 */
+    VusToken *keyword = parser_peek(parser); /* 消耗 return/返回 */
     int line = keyword->line;
     int col = keyword->column;
     parser_advance(parser);
 
     VusAstNode *value = NULL;
 
-    /* 检查是否返回值（后面不是 NEWLINE/INDENT/DEDENT/EOF/EASY_END 时） */
+    /* 检查是否返回值（后面不是 NEWLINE/INDENT/DEDENT/EOF 时） */
     VusToken *next = parser_peek(parser);
     if (next && next->type != VUS_TOKEN_NEWLINE && next->type != VUS_TOKEN_INDENT &&
-        next->type != VUS_TOKEN_DEDENT && next->type != VUS_TOKEN_EOF &&
-        next->type != VUS_TOKEN_EASY_END) {
+        next->type != VUS_TOKEN_DEDENT && next->type != VUS_TOKEN_EOF) {
         value = parse_expr(parser);
         if (!value) return NULL;
     }
@@ -939,7 +771,7 @@ static VusAstNode *parse_return_stmt(VusParser *parser) {
  * Import 语句解析
  * ================================================================== */
 static VusAstNode *parse_import_stmt(VusParser *parser) {
-    VusToken *keyword = parser_peek(parser); /* 消耗 import/导入/.导入 */
+    VusToken *keyword = parser_peek(parser); /* 消耗 import/导入 */
     int line = keyword->line;
     int col = keyword->column;
     parser_advance(parser);
@@ -976,7 +808,7 @@ static VusAstNode *parse_import_stmt(VusParser *parser) {
  * From-Import 语句解析
  * ================================================================== */
 static VusAstNode *parse_from_import_stmt(VusParser *parser) {
-    VusToken *keyword = parser_peek(parser); /* 消耗 from/从/.从 */
+    VusToken *keyword = parser_peek(parser); /* 消耗 from/从 */
     int line = keyword->line;
     int col = keyword->column;
     parser_advance(parser);
@@ -988,8 +820,7 @@ static VusAstNode *parse_from_import_stmt(VusParser *parser) {
 
     /* 期望 import/导入 */
     VusToken *next = parser_peek(parser);
-    if (!next || (next->type != VUS_TOKEN_IMPORT && next->type != VUS_TOKEN_CN_IMPORT &&
-                  next->type != VUS_TOKEN_EASY_IMPORT)) {
+    if (!next || (next->type != VUS_TOKEN_IMPORT && next->type != VUS_TOKEN_CN_IMPORT)) {
         parser_set_error(parser, "期望 import/导入，但遇到其他 Token（第 %d 行）", line);
         free(module);
         return NULL;
@@ -1058,8 +889,7 @@ static VusAstNode *parse_throw_stmt(VusParser *parser) {
     VusAstNode *value = NULL;
     VusToken *next = parser_peek(parser);
     if (next && next->type != VUS_TOKEN_NEWLINE && next->type != VUS_TOKEN_INDENT &&
-        next->type != VUS_TOKEN_DEDENT && next->type != VUS_TOKEN_EOF &&
-        next->type != VUS_TOKEN_EASY_END) {
+        next->type != VUS_TOKEN_DEDENT && next->type != VUS_TOKEN_EOF) {
         value = parse_expr(parser);
         if (!value) return NULL;
     }
@@ -1556,7 +1386,7 @@ static VusAstList *parse_call_args(VusParser *parser) {
  * 公开 API 实现
  * ================================================================== */
 
-VusParser *vus_parser_new(VusToken *tokens, size_t count, const char *style) {
+VusParser *vus_parser_new(VusToken *tokens, size_t count) {
     VusParser *parser = (VusParser*)calloc(1, sizeof(VusParser));
     if (!parser) return NULL;
 
@@ -1565,18 +1395,6 @@ VusParser *vus_parser_new(VusToken *tokens, size_t count, const char *style) {
     parser->pos = 0;
     parser->error = 0;
     parser->error_msg[0] = '\0';
-
-    if (style && style[0]) {
-        size_t len = strlen(style);
-        if (len >= sizeof(parser->style)) {
-            len = sizeof(parser->style) - 1;
-        }
-        memcpy(parser->style, style, len);
-        parser->style[len] = '\0';
-    } else {
-        memcpy(parser->style, "函数", 7); /* "函数" 的 UTF-8 字节长度 */
-        parser->style[6] = '\0';
-    }
 
     return parser;
 }

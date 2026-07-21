@@ -18,7 +18,7 @@ typedef struct {
     char  project_dir[1024];   /* 项目根目录 */
     char  name[256];           /* 项目名称 */
     char  version[64];         /* 版本号 */
-    char  style[32];           /* "函数" 或 "易语言" */
+    char  style[32];           /* 语法风格（默认"函数"） */
     char  main_file[256];      /* 主文件路径 */
     char  output_mode[16];     /* "c" 或 "exe" */
     char  list_mode[16];       /* "严格" 或 "混合" */

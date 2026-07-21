@@ -2,7 +2,7 @@
  * parser.h — VUS 语法分析器接口
  *
  * 将 Token 流解析为 AST（抽象语法树）。
- * 使用递归下降解析算法。
+ * 使用递归下降解析算法，支持函数风格（中英别名关键字）。
  */
 
 #ifndef VUS_PARSER_H
@@ -20,7 +20,6 @@ typedef struct {
     VusToken    *tokens;
     size_t       token_count;
     size_t       pos;
-    char         style[32];    /* "函数" 或 "易语言" */
     int          error;
     char         error_msg[256];
 } VusParser;
@@ -28,7 +27,7 @@ typedef struct {
 /* ============ 语法分析器操作 ============ */
 
 /* 创建语法分析器 */
-VusParser *vus_parser_new(VusToken *tokens, size_t count, const char *style);
+VusParser *vus_parser_new(VusToken *tokens, size_t count);
 
 /* 执行语法分析，返回 AST 根节点 */
 VusAstProgram *vus_parser_parse(VusParser *parser);
