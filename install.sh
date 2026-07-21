@@ -1,6 +1,6 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # VUS 一键安装脚本
-# 用法: curl -fsSL https://gitee.com/rtccn_mc/vus/raw/master/install.sh | bash
+# 用法: curl -fsSL https://gitee.com/rtccn_mc/vus/raw/master/install.sh | sh
 
 set -e
 
@@ -14,7 +14,7 @@ echo ""
 echo "检查依赖..."
 
 # 检查 git
-if ! command -v git &>/dev/null; then
+if ! command -v git >/dev/null 2>&1; then
     echo "错误: 未找到 git，请先安装 Git"
     echo "  Ubuntu/Debian: sudo apt install git"
     echo "  CentOS/RHEL:   sudo yum install git"
@@ -24,7 +24,7 @@ fi
 echo "  ✅ git"
 
 # 检查 GCC
-if ! command -v gcc &>/dev/null; then
+if ! command -v gcc >/dev/null 2>&1; then
     echo "错误: 未找到 gcc，请先安装 GCC"
     echo "  Ubuntu/Debian: sudo apt install gcc"
     echo "  CentOS/RHEL:   sudo yum install gcc"
@@ -34,7 +34,7 @@ fi
 echo "  ✅ gcc"
 
 # 检查 make
-if ! command -v make &>/dev/null; then
+if ! command -v make >/dev/null 2>&1; then
     echo "错误: 未找到 make，请先安装 make"
     echo "  Ubuntu/Debian: sudo apt install make"
     echo "  CentOS/RHEL:   sudo yum install make"
@@ -81,32 +81,52 @@ echo "  ✅ 已创建符号链接: $TARGET_DIR/vus"
 case ":$PATH:" in
     *":$TARGET_DIR:"*) ;;
     *)
-        # 写入 shell 配置
-        for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
-            if [ -f "$rc" ] || [ "$rc" = "$HOME/.bashrc" ]; then
-                LINE="export PATH=\"\$HOME/.local/bin:\$PATH\""
-                if [ -f "$rc" ]; then
-                    grep -qxF "$LINE" "$rc" 2>/dev/null || echo "$LINE" >> "$rc"
-                fi
-            fi
-        done
-        # 确保 .profile 也有（如果不存在）
-        if [ ! -f "$HOME/.profile" ]; then
-            echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.profile"
+        # 检测当前 shell 并写入对应的配置文件
+        LINE="export PATH=\"\$HOME/.local/bin:\$PATH\""
+        RC_FILE=""
+        SHELL_NAME="$(basename "${SHELL:-/bin/sh}")"
+        case "$SHELL_NAME" in
+            bash)
+                RC_FILE="$HOME/.bashrc"
+                REFRESH_CMD="source $RC_FILE"
+                ;;
+            zsh)
+                RC_FILE="$HOME/.zshrc"
+                REFRESH_CMD="source $RC_FILE"
+                ;;
+            fish)
+                RC_FILE="$HOME/.config/fish/config.fish"
+                mkdir -p "$(dirname "$RC_FILE")"
+                LINE="fish_add_path $TARGET_DIR"
+                REFRESH_CMD="source $RC_FILE"
+                ;;
+            *)  # ash, sh, dash 等 POSIX shell
+                RC_FILE="$HOME/.profile"
+                REFRESH_CMD=". $RC_FILE"
+                ;;
+        esac
+        if [ -n "$RC_FILE" ]; then
+            mkdir -p "$(dirname "$RC_FILE")"
+            grep -qxF "$LINE" "$RC_FILE" 2>/dev/null || echo "$LINE" >> "$RC_FILE"
+            echo "  ✅ 已写入 $RC_FILE"
         fi
-        echo "  ✅ 已写入 shell 配置文件（~/.bashrc / ~/.zshrc / ~/.profile）"
+        # 也写入 .profile 作为后备（兼容所有 POSIX shell）
+        if [ "$RC_FILE" != "$HOME/.profile" ]; then
+            grep -qxF "export PATH=\"\$HOME/.local/bin:\$PATH\"" "$HOME/.profile" 2>/dev/null || \
+                echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.profile"
+        fi
         echo "  ⚠️  请执行以下命令刷新 PATH，或重新打开终端："
-        echo "     source ~/.bashrc"
+        echo "     $REFRESH_CMD"
         ;;
 esac
 
 # 验证安装
 echo ""
 echo "验证安装..."
-if "$INSTALL_DIR/vus" --help &>/dev/null; then
+if "$INSTALL_DIR/vus" --help >/dev/null 2>&1; then
     echo "  ✅ VUS 安装成功！"
     echo ""
-    echo "快速开始（执行 source ~/.bashrc 后）："
+    echo "快速开始（执行上方刷新命令后）："
     echo "  vus init               # 初始化项目"
     echo "  vus run main.vus       # 编译并运行"
     echo "  vus build --c-only     # 仅编译为 C 代码"
