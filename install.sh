@@ -70,20 +70,35 @@ chmod +x "$INSTALL_DIR/vus"
 # 创建符号链接
 echo ""
 echo "设置 PATH..."
-if [ -d "$HOME/.local/bin" ]; then
-    ln -sf "$INSTALL_DIR/vus" "$HOME/.local/bin/vus"
-    echo "  ✅ 已创建符号链接: $HOME/.local/bin/vus"
-    echo "  请确保 $HOME/.local/bin 在 PATH 中"
-elif [ -d "$HOME/bin" ]; then
-    ln -sf "$INSTALL_DIR/vus" "$HOME/bin/vus"
-    echo "  ✅ 已创建符号链接: $HOME/bin/vus"
-else
+TARGET_DIR="$HOME/.local/bin"
+if [ ! -d "$HOME/.local/bin" ]; then
     mkdir -p "$HOME/.local/bin"
-    ln -sf "$INSTALL_DIR/vus" "$HOME/.local/bin/vus"
-    echo "  ✅ 已创建符号链接: $HOME/.local/bin/vus"
-    echo "  请将以下内容添加到 ~/.bashrc 或 ~/.zshrc："
-    echo "    export PATH=\"\$HOME/.local/bin:\$PATH\""
 fi
+ln -sf "$INSTALL_DIR/vus" "$TARGET_DIR/vus"
+echo "  ✅ 已创建符号链接: $TARGET_DIR/vus"
+
+# 自动将 TARGET_DIR 加入 PATH（如果尚未在 PATH 中）
+case ":$PATH:" in
+    *":$TARGET_DIR:"*) ;;
+    *)
+        # 写入 shell 配置
+        for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+            if [ -f "$rc" ] || [ "$rc" = "$HOME/.bashrc" ]; then
+                LINE="export PATH=\"\$HOME/.local/bin:\$PATH\""
+                if [ -f "$rc" ]; then
+                    grep -qxF "$LINE" "$rc" 2>/dev/null || echo "$LINE" >> "$rc"
+                fi
+            fi
+        done
+        # 确保 .profile 也有（如果不存在）
+        if [ ! -f "$HOME/.profile" ]; then
+            echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.profile"
+        fi
+        # 当前会话生效
+        export PATH="$TARGET_DIR:$PATH"
+        echo "  ✅ 已添加到 PATH（当前会话及后续登录均生效）"
+        ;;
+esac
 
 # 验证安装
 echo ""
