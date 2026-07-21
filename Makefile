@@ -13,7 +13,7 @@ TEST_DIR = tests
 # 源文件
 SRCS     = $(SRC_DIR)/main.c $(SRC_DIR)/token.c $(SRC_DIR)/lexer.c \
            $(SRC_DIR)/parser.c $(SRC_DIR)/generator.c $(SRC_DIR)/config.c \
-           $(SRC_DIR)/ast.c
+           $(SRC_DIR)/ast.c $(SRC_DIR)/vus_abi.c $(SRC_DIR)/vus_plugin.c
 OBJS     = $(SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
 RT_SRC   = $(RT_DIR)/libvus_rt.c
 RT_OBJ   = $(BUILD_DIR)/libvus_rt.o
@@ -43,7 +43,7 @@ all: vus $(RT_LIB)
 
 # 链接编译器
 vus: $(OBJS)
-	$(CC) $(CFLAGS) -o $@ $^ -lm
+	$(CC) $(CFLAGS) -o $@ $^ -lm -ldl
 
 # 编译源文件
 $(BUILD_DIR)/main.o: $(SRC_DIR)/main.c $(MAIN_H) $(COMMON_H) | $(BUILD_DIR)
@@ -65,6 +65,16 @@ $(BUILD_DIR)/config.o: $(SRC_DIR)/config.c $(CONFIG_H) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c -o $@ $<
 
 $(BUILD_DIR)/ast.o: $(SRC_DIR)/ast.c $(SRC_DIR)/ast.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(SRC_DIR) -c -o $@ $<
+
+# ABI 接口
+ABI_H    = $(SRC_DIR)/../include/vus/vus_abi.h
+PLUGIN_H = $(SRC_DIR)/../include/vus/vus_plugin.h
+
+$(BUILD_DIR)/vus_abi.o: $(SRC_DIR)/vus_abi.c $(ABI_H) $(GEN_H) $(PARSER_H) $(LEXER_H) $(CONFIG_H) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(SRC_DIR) -c -o $@ $<
+
+$(BUILD_DIR)/vus_plugin.o: $(SRC_DIR)/vus_plugin.c $(PLUGIN_H) $(ABI_H) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c -o $@ $<
 
 # 编译运行时库
