@@ -48,6 +48,16 @@ build_target() {
     cp -r "$SCRIPT_DIR/rt" "$pkg_dir/rt"
     mkdir -p "$pkg_dir/构建"
     
+    # 写入版本信息
+    cat > "$pkg_dir/version.json" <<VERSION_EOF
+{
+    "名称": "VUS 编译器",
+    "版本": "${VERSION}",
+    "架构": "${target}",
+    "构建日期": "$(date '+%Y-%m-%d %H:%M:%S')"
+}
+VERSION_EOF
+    
     # 创建安装脚本
     cat > "$pkg_dir/install.sh" << 'INSTALL_EOF'
 #!/bin/sh

@@ -612,6 +612,7 @@ static void print_help(void) {
     printf("  vusx list              列出项目中的 vusx 依赖\n");
     printf("  vusx info   <路径>     查看 vusx 插件信息\n");
     printf("  vusx build  <路径>     编译 vusx 插件\n");
+    printf("  update                 自动更新编译器\n");
     printf("  --version, -v          显示版本信息\n");
     printf("  --help, -h             显示此帮助\n\n");
     printf("示例:\n");
@@ -873,6 +874,143 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "fork 失败\n");
             return 1;
         }
+    }
+
+    /* vus update — 自动更新 */
+    if (strcmp(cmd, "update") == 0) {
+        printf("正在检查更新...\n");
+
+        /* 获取编译器所在目录 */
+        char exe_path[4096];
+        ssize_t exe_len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+        if (exe_len <= 0) {
+            fprintf(stderr, "错误: 无法获取编译器路径\n");
+            return 1;
+        }
+        exe_path[exe_len] = '\0';
+
+        /* 获取父目录 */
+        char *last_slash = strrchr(exe_path, '/');
+        if (last_slash) *last_slash = '\0';
+        char compiler_dir[4096];
+        strncpy(compiler_dir, exe_path, sizeof(compiler_dir) - 1);
+        compiler_dir[sizeof(compiler_dir) - 1] = '\0';
+
+        /* 检查 .git 目录是否存在 */
+        char git_dir[4096];
+        snprintf(git_dir, sizeof(git_dir), "%s/.git", compiler_dir);
+        struct stat st;
+        if (stat(git_dir, &st) == 0 && S_ISDIR(st.st_mode)) {
+            /* Git 安装 — git pull + make */
+            printf("检测到 Git 安装，执行 git pull...\n");
+            fflush(stdout);
+
+            pid_t pid = fork();
+            if (pid == 0) {
+                /* 子进程：执行 git pull */
+                execlp("git", "git", "-C", compiler_dir, "pull", "--ff-only", NULL);
+                _exit(1);
+            }
+            int status;
+            waitpid(pid, &status, 0);
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                printf("  ✅ 源码更新成功\n");
+            } else {
+                fprintf(stderr, "  ❌ git pull 失败\n");
+                return 1;
+            }
+
+            /* 重新编译 */
+            printf("重新编译...\n");
+            fflush(stdout);
+
+            pid = fork();
+            if (pid == 0) {
+                execlp("make", "make", "-C", compiler_dir, NULL);
+                _exit(1);
+            }
+            waitpid(pid, &status, 0);
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                printf("  ✅ 编译成功\n");
+            } else {
+                fprintf(stderr, "  ❌ 编译失败\n");
+                return 1;
+            }
+        } else {
+            /* 非 Git 安装 — 下载预编译包 */
+            printf("检测到预编译安装，正在下载最新版本...\n");
+
+            /* 检测架构 */
+            FILE *arch_fp = popen("uname -m", "r");
+            char arch_buf[64] = "";
+            if (arch_fp) {
+                if (fgets(arch_buf, sizeof(arch_buf), arch_fp)) {
+                    char *nl = strchr(arch_buf, '\n');
+                    if (nl) *nl = '\0';
+                }
+                pclose(arch_fp);
+            }
+
+            const char *pkg_arch = "";
+            if (strcmp(arch_buf, "x86_64") == 0 || strcmp(arch_buf, "amd64") == 0) {
+                pkg_arch = "amd64";
+            } else if (strcmp(arch_buf, "aarch64") == 0 || strcmp(arch_buf, "arm64") == 0) {
+                pkg_arch = "arm64";
+            } else if (strncmp(arch_buf, "armv", 4) == 0 || strcmp(arch_buf, "arm") == 0) {
+                pkg_arch = "arm32";
+            } else {
+                fprintf(stderr, "错误: 不支持的架构: %s\n", arch_buf);
+                fprintf(stderr, "请手动从 %s 更新\n", "https://gitee.com/rtccn_mc/vus");
+                return 1;
+            }
+
+            char url[512];
+            snprintf(url, sizeof(url),
+                     "https://gitee.com/rtccn_mc/vus/releases/download/latest/vus-%s.tar.gz",
+                     pkg_arch);
+
+            char tmp_path[1024];
+            snprintf(tmp_path, sizeof(tmp_path), "/tmp/vus_update_%s.tar.gz", pkg_arch);
+
+            /* 下载 */
+            char cmd[1024];
+            int use_curl = (system("command -v curl >/dev/null 2>&1") == 0);
+            if (use_curl) {
+                snprintf(cmd, sizeof(cmd), "curl -fsSL \"%s\" -o \"%s\"", url, tmp_path);
+            } else {
+                snprintf(cmd, sizeof(cmd), "wget -q \"%s\" -O \"%s\"", url, tmp_path);
+            }
+
+            if (system(cmd) != 0) {
+                fprintf(stderr, "错误: 下载预编译包失败\n");
+                fprintf(stderr, "请手动访问: https://gitee.com/rtccn_mc/vus\n");
+                return 1;
+            }
+
+            /* 解压安装 */
+            char extract_dir[1024];
+            snprintf(extract_dir, sizeof(extract_dir), "/tmp/vus_update_extract");
+            snprintf(cmd, sizeof(cmd), "mkdir -p \"%s\" && tar xzf \"%s\" -C \"%s\"", extract_dir, tmp_path, extract_dir);
+            if (system(cmd) != 0) {
+                fprintf(stderr, "错误: 解压失败\n");
+                unlink(tmp_path);
+                return 1;
+            }
+
+            /* 复制到安装目录 */
+            snprintf(cmd, sizeof(cmd), "cp -r \"%s/vus-%s/\"* \"%s/\"", extract_dir, pkg_arch, compiler_dir);
+            if (system(cmd) != 0) {
+                fprintf(stderr, "错误: 安装失败\n");
+            } else {
+                printf("  ✅ 更新成功！\n");
+            }
+
+            /* 清理 */
+            snprintf(cmd, sizeof(cmd), "rm -rf \"%s\" \"%s\"", extract_dir, tmp_path);
+            system(cmd);
+        }
+
+        return 0;
     }
 
     /* vusx 插件管理 */

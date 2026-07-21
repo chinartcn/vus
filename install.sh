@@ -11,6 +11,20 @@ INSTALL_DIR="${VUS_HOME:-$HOME/.vus}"
 VERSION="latest"
 
 echo "==== VUS 语言安装工具 v0.2 ===="
+
+# 简单进度提示
+progress() {
+    local msg="$1"
+    printf "  %s" "$msg"
+    local i=0
+    while [ $i -lt 10 ]; do
+        printf "."
+        i=$((i + 1))
+        sleep 0.1
+    done
+    printf "\n"
+}
+
 echo ""
 
 # 检测系统架构
@@ -46,9 +60,10 @@ if [ -n "$PKG_ARCH" ] && [ -n "$DOWNLOAD_CMD" ]; then
     PKG_NAME="vus-${PKG_ARCH}.tar.gz"
     PKG_URL="${RELEASE_BASE}/${VERSION}/${PKG_NAME}"
 
-    echo "尝试下载预编译包: ${PKG_NAME} ..."
+    echo "尝试下载预编译包: ${PKG_NAME}"
 
     TMP_DIR=$(mktemp -d 2>/dev/null || mktemp -d /tmp/vus_install.XXXXXX)
+    progress "下载中..."
     if $DOWNLOAD_CMD "$PKG_URL" > "$TMP_DIR/$PKG_NAME" 2>/dev/null && [ -s "$TMP_DIR/$PKG_NAME" ]; then
         echo "  ✅ 预编译包下载成功"
         echo ""
@@ -56,6 +71,11 @@ if [ -n "$PKG_ARCH" ] && [ -n "$DOWNLOAD_CMD" ]; then
 
         mkdir -p "$INSTALL_DIR"
         tar xzf "$TMP_DIR/$PKG_NAME" -C "$TMP_DIR"
+        # 版本校验
+        if [ -f "$TMP_DIR/vus-${PKG_ARCH}/version.json" ]; then
+            PKG_VER=$(grep '"版本"' "$TMP_DIR/vus-${PKG_ARCH}/version.json" | cut -d'"' -f4)
+            echo "  📦 版本: ${PKG_VER}"
+        fi
         cp -r "$TMP_DIR/vus-${PKG_ARCH}/"* "$INSTALL_DIR/"
         chmod +x "$INSTALL_DIR/vus"
         rm -rf "$TMP_DIR"
@@ -120,6 +140,7 @@ if [ "$INSTALL_FROM_SOURCE" -eq 1 ]; then
     # 编译 VUS 编译器
     echo ""
     echo "编译 VUS 编译器..."
+    progress "编译中..."
     if make -C "$INSTALL_DIR" 2>&1; then
         echo "  ✅ 编译成功"
     else
