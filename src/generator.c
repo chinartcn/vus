@@ -944,10 +944,23 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
         }
     }
 
+    /* 将 rt_dir 解析为绝对路径（相对于 project_dir） */
+    char abs_rt_dir[2048];
+    if (config->rt_dir[0] == '/') {
+        /* 已经是绝对路径 */
+        strncpy(abs_rt_dir, config->rt_dir, sizeof(abs_rt_dir) - 1);
+        abs_rt_dir[sizeof(abs_rt_dir) - 1] = '\0';
+    } else if (config->project_dir[0]) {
+        snprintf(abs_rt_dir, sizeof(abs_rt_dir), "%s/%s", config->project_dir, config->rt_dir);
+    } else {
+        strncpy(abs_rt_dir, config->rt_dir, sizeof(abs_rt_dir) - 1);
+        abs_rt_dir[sizeof(abs_rt_dir) - 1] = '\0';
+    }
+
     /* 确定 rt 源文件路径 */
     char rt_source[2048];
     if (config->rt_dir[0]) {
-        snprintf(rt_source, sizeof(rt_source), "%s/libvus_rt.c", config->rt_dir);
+        snprintf(rt_source, sizeof(rt_source), "%s/libvus_rt.c", abs_rt_dir);
     } else {
         rt_source[0] = '\0';
     }
@@ -957,7 +970,7 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
     int n = snprintf(cmd, sizeof(cmd),
         "gcc %s -g -I\"%s\" \"%s\" \"%s\" -o \"%s\" -lm 2>&1",
         opt_level,
-        config->rt_dir,
+        abs_rt_dir,
         c_source_path,
         rt_source,
         output_path);
