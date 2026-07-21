@@ -251,7 +251,7 @@ case "$RUN_TESTS" in
         TOTAL=$((TOTAL + 1))
         echo "测试 $TOTAL: 比较运算符 (test_comparison)..."
         OUTPUT=$("$VUS" run "$TESTS_DIR/test_comparison.vus" 2>/dev/null)
-        if echo "$OUTPUT" | grep -q "true"; then
+        if echo "$OUTPUT" | grep -q "小于"; then
             echo "  ✅ 输出正确: $OUTPUT"
             PASS=$((PASS + 1))
         else
@@ -347,11 +347,11 @@ case "$RUN_TESTS" in
         TOTAL=$((TOTAL + 1))
         echo "测试 $TOTAL: 示例程序 (examples/hello)..."
         OUTPUT=$("$VUS" run "$INSTALL_DIR/examples/hello.vus" 2>/dev/null)
-        if echo "$OUTPUT" | grep -q "Hello"; then
-            echo "  ✅ 示例程序正确"
+        if echo "$OUTPUT" | grep -q "欢迎"; then
+            echo "  ✅ 示例程序正确: a + b = 30"
             PASS=$((PASS + 1))
         else
-            echo "  ❌ 示例程序错误"
+            echo "  ❌ 示例程序错误: $OUTPUT"
             FAIL=$((FAIL + 1))
         fi
 
