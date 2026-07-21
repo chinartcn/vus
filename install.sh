@@ -1,71 +1,134 @@
 #!/bin/sh
 # VUS 一键安装脚本
 # 用法: curl -fsSL https://gitee.com/rtccn_mc/vus/raw/master/install.sh | sh
+#        curl -fsSL https://gitee.com/rtccn_mc/vus/raw/master/install.sh | VUS_HOME=/opt/vus sh
 
 set -e
 
 REPO_URL="https://gitee.com/rtccn_mc/vus.git"
+RELEASE_BASE="https://gitee.com/rtccn_mc/vus/releases/download"
 INSTALL_DIR="${VUS_HOME:-$HOME/.vus}"
+VERSION="latest"
 
-echo "==== VUS 语言安装工具 v0.1 ===="
+echo "==== VUS 语言安装工具 v0.2 ===="
 echo ""
 
-# 检查依赖
-echo "检查依赖..."
+# 检测系统架构
+ARCH="$(uname -m)"
+case "$ARCH" in
+    x86_64|amd64)     PKG_ARCH="amd64" ;;
+    aarch64|arm64)    PKG_ARCH="arm64" ;;
+    armv7l|armv6l|arm) PKG_ARCH="arm32" ;;
+    *)                PKG_ARCH="" ;;
+esac
 
-# 检查 git
-if ! command -v git >/dev/null 2>&1; then
-    echo "错误: 未找到 git，请先安装 Git"
-    echo "  Ubuntu/Debian: sudo apt install git"
-    echo "  CentOS/RHEL:   sudo yum install git"
-    echo "  Termux:        pkg install git"
-    exit 1
+# 检查下载工具
+DOWNLOAD_CMD=""
+if command -v curl >/dev/null 2>&1; then
+    DOWNLOAD_CMD="curl -fsSL"
+elif command -v wget >/dev/null 2>&1; then
+    DOWNLOAD_CMD="wget -qO-"
 fi
-echo "  ✅ git"
 
-# 检查 GCC
-if ! command -v gcc >/dev/null 2>&1; then
-    echo "错误: 未找到 gcc，请先安装 GCC"
-    echo "  Ubuntu/Debian: sudo apt install gcc"
-    echo "  CentOS/RHEL:   sudo yum install gcc"
-    echo "  Termux:        pkg install gcc"
-    exit 1
-fi
-echo "  ✅ gcc"
+# 检查 git（源码编译时需要）
+GIT_AVAILABLE=0
+command -v git >/dev/null 2>&1 && GIT_AVAILABLE=1
 
-# 检查 make
-if ! command -v make >/dev/null 2>&1; then
-    echo "错误: 未找到 make，请先安装 make"
-    echo "  Ubuntu/Debian: sudo apt install make"
-    echo "  CentOS/RHEL:   sudo yum install make"
-    exit 1
-fi
-echo "  ✅ make"
+echo "系统架构: $ARCH"
 echo ""
 
-# 克隆仓库
-echo "正在安装 VUS..."
-if [ -d "$INSTALL_DIR" ]; then
-    echo "检测到已有安装，正在更新..."
-    cd "$INSTALL_DIR"
-    git pull --ff-only
+# ============================================================
+# 尝试预编译包安装（仅支持的架构）
+# ============================================================
+INSTALL_FROM_SOURCE=0
+
+if [ -n "$PKG_ARCH" ] && [ -n "$DOWNLOAD_CMD" ]; then
+    PKG_NAME="vus-${PKG_ARCH}.tar.gz"
+    PKG_URL="${RELEASE_BASE}/${VERSION}/${PKG_NAME}"
+
+    echo "尝试下载预编译包: ${PKG_NAME} ..."
+
+    TMP_DIR=$(mktemp -d 2>/dev/null || mktemp -d /tmp/vus_install.XXXXXX)
+    if $DOWNLOAD_CMD "$PKG_URL" > "$TMP_DIR/$PKG_NAME" 2>/dev/null && [ -s "$TMP_DIR/$PKG_NAME" ]; then
+        echo "  ✅ 预编译包下载成功"
+        echo ""
+        echo "正在安装..."
+
+        mkdir -p "$INSTALL_DIR"
+        tar xzf "$TMP_DIR/$PKG_NAME" -C "$TMP_DIR"
+        cp -r "$TMP_DIR/vus-${PKG_ARCH}/"* "$INSTALL_DIR/"
+        chmod +x "$INSTALL_DIR/vus"
+        rm -rf "$TMP_DIR"
+
+        echo "  ✅ 预编译包安装完成"
+    else
+        rm -rf "$TMP_DIR"
+        echo "  ⚠️  预编译包下载失败，切换到源码编译"
+        INSTALL_FROM_SOURCE=1
+    fi
 else
-    git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
-    cd "$INSTALL_DIR"
+    INSTALL_FROM_SOURCE=1
 fi
 
-# 编译 VUS 编译器
-echo ""
-echo "编译 VUS 编译器..."
-if make -C "$INSTALL_DIR" 2>&1; then
-    echo "  ✅ 编译成功"
-else
-    echo "  ❌ 编译失败"
-    exit 1
-fi
+# ============================================================
+# 源码编译安装（无预编译包或下载失败时）
+# ============================================================
+if [ "$INSTALL_FROM_SOURCE" -eq 1 ]; then
+    echo "使用源码编译安装..."
 
-# 设置可执行权限
-chmod +x "$INSTALL_DIR/vus"
+    # 检查依赖
+    echo "检查依赖..."
+    if [ "$GIT_AVAILABLE" -eq 0 ]; then
+        echo "错误: 未找到 git，请先安装 Git"
+        echo "  Ubuntu/Debian: sudo apt install git"
+        echo "  CentOS/RHEL:   sudo yum install git"
+        echo "  Termux:        pkg install git"
+        exit 1
+    fi
+    echo "  ✅ git"
+
+    if ! command -v gcc >/dev/null 2>&1; then
+        echo "错误: 未找到 gcc，请先安装 GCC"
+        echo "  Ubuntu/Debian: sudo apt install gcc"
+        echo "  CentOS/RHEL:   sudo yum install gcc"
+        echo "  Termux:        pkg install gcc"
+        exit 1
+    fi
+    echo "  ✅ gcc"
+
+    if ! command -v make >/dev/null 2>&1; then
+        echo "错误: 未找到 make，请先安装 make"
+        echo "  Ubuntu/Debian: sudo apt install make"
+        echo "  CentOS/RHEL:   sudo yum install make"
+        echo "  Termux:        pkg install make"
+        exit 1
+    fi
+    echo "  ✅ make"
+    echo ""
+
+    # 克隆仓库
+    echo "克隆源码..."
+    if [ -d "$INSTALL_DIR" ]; then
+        echo "检测到已有安装，正在更新..."
+        cd "$INSTALL_DIR"
+        git pull --ff-only
+    else
+        git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
+        cd "$INSTALL_DIR"
+    fi
+
+    # 编译 VUS 编译器
+    echo ""
+    echo "编译 VUS 编译器..."
+    if make -C "$INSTALL_DIR" 2>&1; then
+        echo "  ✅ 编译成功"
+    else
+        echo "  ❌ 编译失败"
+        exit 1
+    fi
+
+    chmod +x "$INSTALL_DIR/vus"
+fi
 
 # 创建符号链接
 echo ""
@@ -407,6 +470,91 @@ case "$RUN_TESTS" in
                 echo "  ❌ 插件列表错误"
                 FAIL=$((FAIL + 1))
             fi
+        fi
+
+        # 测试 21: 编译为可执行文件并运行
+        TOTAL=$((TOTAL + 1))
+        echo "测试 $TOTAL: 编译为可执行文件并运行..."
+        BUILDDIR="$INSTALL_DIR/构建"
+        mkdir -p "$BUILDDIR"
+        if "$VUS" build --exe "$TESTS_DIR/test_hello.vus" 2>/dev/null && [ -f "$BUILDDIR/test_hello" ]; then
+            EXE_OUTPUT=$("$BUILDDIR/test_hello" 2>/dev/null)
+            if echo "$EXE_OUTPUT" | grep -q "Hello, World!"; then
+                echo "  ✅ 可执行文件输出正确: $EXE_OUTPUT"
+                PASS=$((PASS + 1))
+            else
+                echo "  ❌ 可执行文件输出错误: $EXE_OUTPUT"
+                FAIL=$((FAIL + 1))
+            fi
+        else
+            echo "  ❌ 可执行文件编译失败"
+            FAIL=$((FAIL + 1))
+        fi
+
+        # 测试 22: vus lang list 命令
+        TOTAL=$((TOTAL + 1))
+        echo "测试 $TOTAL: vus lang list 命令..."
+        if "$VUS" lang list >/dev/null 2>&1; then
+            echo "  ✅ vus lang list 执行成功"
+            PASS=$((PASS + 1))
+        else
+            echo "  ❌ vus lang list 执行失败"
+            FAIL=$((FAIL + 1))
+        fi
+
+        # 测试 23: vus vusx list 命令
+        TOTAL=$((TOTAL + 1))
+        echo "测试 $TOTAL: vus vusx list 命令..."
+        if "$VUS" vusx list >/dev/null 2>&1; then
+            echo "  ✅ vus vusx list 执行成功"
+            PASS=$((PASS + 1))
+        else
+            echo "  ❌ vus vusx list 执行失败"
+            FAIL=$((FAIL + 1))
+        fi
+
+        # 测试 24: vus init 初始化模板
+        TOTAL=$((TOTAL + 1))
+        echo "测试 $TOTAL: vus init 初始化模板..."
+        INIT_DIR=$(mktemp -d)
+        if (cd "$INIT_DIR" && echo "" | "$VUS" init) >/dev/null 2>&1; then
+            if [ -f "$INIT_DIR/vus.json" ]; then
+                echo "  ✅ vus.json 创建成功"
+                PASS=$((PASS + 1))
+            else
+                echo "  ❌ vus.json 未创建"
+                FAIL=$((FAIL + 1))
+            fi
+        else
+            echo "  ❌ vus init 执行失败"
+            FAIL=$((FAIL + 1))
+        fi
+        rm -rf "$INIT_DIR"
+
+        # 测试 25: 中文错误信息
+        TOTAL=$((TOTAL + 1))
+        echo "测试 $TOTAL: 中文错误信息..."
+        INVALID_FILE=$(mktemp /tmp/vus_test_XXXXXX.vus)
+        echo '打印("Hello" + )' > "$INVALID_FILE"
+        ERROR_OUTPUT=$("$VUS" build --c-only "$INVALID_FILE" 2>&1)
+        if echo "$ERROR_OUTPUT" | grep -qE "错误|失败"; then
+            echo "  ✅ 中文错误信息正确"
+            PASS=$((PASS + 1))
+        else
+            echo "  ❌ 未检测到中文错误信息: $ERROR_OUTPUT"
+            FAIL=$((FAIL + 1))
+        fi
+        rm -f "$INVALID_FILE"
+
+        # 测试 26: 调试模式 --debug
+        TOTAL=$((TOTAL + 1))
+        echo "测试 $TOTAL: 调试模式 (--debug)..."
+        if "$VUS" run --debug "$TESTS_DIR/test_hello.vus" >/dev/null 2>&1; then
+            echo "  ✅ 调试模式运行成功"
+            PASS=$((PASS + 1))
+        else
+            echo "  ❌ 调试模式运行失败"
+            FAIL=$((FAIL + 1))
         fi
 
         # 总结

@@ -21,10 +21,10 @@ VUS 是面向 Linux、Android Termux、嵌入式 ARM 设备的中文友好多范
 ## 一键安装
 
 ```bash
-# 方法一：一键安装脚本（推荐）
+# 方法一：一键安装脚本（推荐，自动检测架构）
 curl -fsSL https://gitee.com/rtccn_mc/vus/raw/master/install.sh | bash
 
-# 方法二：手动克隆并编译
+# 方法二：手动克隆并编译（通用，支持所有架构）
 git clone --depth 1 https://gitee.com/rtccn_mc/vus.git ~/.vus
 cd ~/.vus && make
 ln -s ~/.vus/vus ~/.local/bin/vus
@@ -33,8 +33,39 @@ ln -s ~/.vus/vus ~/.local/bin/vus
 安装后，重新打开终端或执行 `source ~/.bashrc`，然后运行：
 
 ```bash
-vus init               # 初始化项目（选择语法风格）
+vus init               # 初始化项目
 vus run main.vus       # 编译并运行
+```
+
+### ARM 设备安装（树莓派、Orange Pi、Termux）
+
+VUS 支持 ARM64（aarch64）和 ARM32（armhf）架构。安装脚本会自动检测架构并尝试下载预编译包：
+
+```bash
+# ARM64 / ARM32 通用安装（自动检测）
+curl -fsSL https://gitee.com/rtccn_mc/vus/raw/master/install.sh | bash
+
+# 如需指定安装目录
+curl -fsSL https://gitee.com/rtccn_mc/vus/raw/master/install.sh | VUS_HOME=/data/local/tmp/vus sh
+
+# 树莓派手动编译（如果预编译包不可用）
+sudo apt install git gcc make
+git clone --depth 1 https://gitee.com/rtccn_mc/vus.git ~/.vus
+cd ~/.vus && make
+ln -s ~/.vus/vus ~/.local/bin/vus
+```
+
+### 构建预编译包（开发者）
+
+```bash
+# 需要安装交叉编译工具链
+sudo apt install gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf
+
+# 构建所有架构
+bash scripts/build_release.sh v0.2
+
+# 输出在 release/ 目录
+ls -lh release/*.tar.gz
 ```
 
 ## 一键更新
