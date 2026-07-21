@@ -23,22 +23,24 @@ if ! command -v git &>/dev/null; then
 fi
 echo "  ✅ git"
 
-# 检查 Python
-if ! command -v python3 &>/dev/null; then
-    echo "错误: 未找到 python3，请先安装 Python 3"
-    echo "  Ubuntu/Debian: sudo apt install python3"
-    echo "  Termux:        pkg install python"
-    exit 1
-fi
-echo "  ✅ python3"
-
 # 检查 GCC
 if ! command -v gcc &>/dev/null; then
-    echo "  ⚠️  未找到 gcc，编译 --exe 模式需要 GCC"
+    echo "错误: 未找到 gcc，请先安装 GCC"
     echo "  Ubuntu/Debian: sudo apt install gcc"
+    echo "  CentOS/RHEL:   sudo yum install gcc"
     echo "  Termux:        pkg install gcc"
-    echo "  如果只需要 vus build --c-only，可以跳过"
+    exit 1
 fi
+echo "  ✅ gcc"
+
+# 检查 make
+if ! command -v make &>/dev/null; then
+    echo "错误: 未找到 make，请先安装 make"
+    echo "  Ubuntu/Debian: sudo apt install make"
+    echo "  CentOS/RHEL:   sudo yum install make"
+    exit 1
+fi
+echo "  ✅ make"
 echo ""
 
 # 克隆仓库
@@ -49,6 +51,17 @@ if [ -d "$INSTALL_DIR" ]; then
     git pull --ff-only
 else
     git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
+    cd "$INSTALL_DIR"
+fi
+
+# 编译 VUS 编译器
+echo ""
+echo "编译 VUS 编译器..."
+if make -C "$INSTALL_DIR" 2>&1; then
+    echo "  ✅ 编译成功"
+else
+    echo "  ❌ 编译失败"
+    exit 1
 fi
 
 # 设置可执行权限

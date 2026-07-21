@@ -19,8 +19,9 @@ VUS 是面向 Linux、Android Termux、嵌入式 ARM 设备的中文友好多范
 # 方法一：一键安装脚本（推荐）
 curl -fsSL https://gitee.com/rtccn_mc/vus/raw/master/install.sh | bash
 
-# 方法二：手动克隆
+# 方法二：手动克隆并编译
 git clone --depth 1 https://gitee.com/rtccn_mc/vus.git ~/.vus
+cd ~/.vus && make
 ln -s ~/.vus/vus ~/.local/bin/vus
 ```
 
