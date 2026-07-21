@@ -537,7 +537,7 @@ case "$RUN_TESTS" in
         # 测试 24: vus init 初始化模板
         TOTAL=$((TOTAL + 1))
         echo "测试 $TOTAL: vus init 初始化模板..."
-        INIT_DIR=$(mktemp -d)
+        INIT_DIR=$(mktemp -d /tmp/vus_init_XXXXXX 2>/dev/null || mktemp -d /tmp/vus_init_XXXXXX)
         if (cd "$INIT_DIR" && echo "" | "$VUS" init) >/dev/null 2>&1; then
             if [ -f "$INIT_DIR/vus.json" ]; then
                 echo "  ✅ vus.json 创建成功"
@@ -555,7 +555,7 @@ case "$RUN_TESTS" in
         # 测试 25: 中文错误信息
         TOTAL=$((TOTAL + 1))
         echo "测试 $TOTAL: 中文错误信息..."
-        INVALID_FILE=$(mktemp /tmp/vus_test_XXXXXX.vus)
+        INVALID_FILE=$(mktemp /tmp/vus_test_XXXXXX.vus 2>/dev/null || echo "/tmp/vus_test_$$.vus")
         echo '打印("Hello" + )' > "$INVALID_FILE"
         ERROR_OUTPUT=$("$VUS" build --c-only "$INVALID_FILE" 2>&1)
         if echo "$ERROR_OUTPUT" | grep -qE "错误|失败"; then
