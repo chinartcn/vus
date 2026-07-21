@@ -54,9 +54,9 @@ static char *read_file(const char *path, size_t *out_len) {
 /* 编译器安装目录 */
 static char g_compiler_dir[1024] = "";
 
-/* 从 argv[0] 解析编译器安装目录 */
-static int find_compiler_dir(const char *argv0) {
-    char *resolved = realpath(argv0, NULL);
+/* 通过 /proc/self/exe 解析编译器安装目录 */
+static int find_compiler_dir(void) {
+    char *resolved = realpath("/proc/self/exe", NULL);
     if (!resolved) return 0;
     char *last_slash = strrchr(resolved, '/');
     if (!last_slash) {
@@ -595,7 +595,7 @@ static void print_help(void) {
 
 int main(int argc, char *argv[]) {
     /* 解析编译器安装目录 */
-    find_compiler_dir(argv[0]);
+    find_compiler_dir();
 
     if (argc < 2) {
         print_help();
