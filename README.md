@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="vus-logo.png" alt="VUS Logo" width="256">
+</p>
+
 # VUS 编程语言
 
 > **中西合璧，天下无敌**  
