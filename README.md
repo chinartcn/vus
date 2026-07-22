@@ -22,6 +22,14 @@ VUS 是面向 Linux、Android Termux、嵌入式 ARM 设备的中文友好多范
 - **调试模式**：`vus run --debug` 支持运行时栈追踪和调试输出
 - **Python 桥接**（可选）：内联 Python 代码，无缝调用 Python 生态
 
+## 社区
+
+| 渠道 | 用途 |
+|------|------|
+| **[百度贴吧 · VUS语言吧](https://tieba.baidu.com/wxf/28312232?kw=vus%E8%AF%AD%E8%A8%80&fr=sharewise)** | 讨论交流、问题反馈、社区活动 |
+| **Gitee Issues** | Bug 报告、功能请求 |
+| **邮箱** | 私下联系（rtcn_0523@qq.com） |
+
 ## 一键安装
 
 ```bash
@@ -170,14 +178,6 @@ vus run           main.vus    # 编译并运行
 ```
 v0.1 → v0.2 → v1.0-alpha → v1.0-beta → v1.0 → ... → v1.9 → v2.0 → ... → v5.5 → v5.6 → v6.x → v7.0 → v8.0 → v9.5 → v10.0 → v11.0
 ```
-
-## 社区
-
-| 渠道 | 用途 |
-|------|------|
-| **[百度贴吧 · VUS语言吧](https://tieba.baidu.com/wxf/28312232?kw=vus%E8%AF%AD%E8%A8%80&fr=sharewise)** | 讨论交流、问题反馈、社区活动 |
-| **Gitee Issues** | Bug 报告、功能请求 |
-| **邮箱** | 私下联系（rtcn_0523@qq.com） |
 
 ## 开源协议
 
