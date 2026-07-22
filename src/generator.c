@@ -1539,23 +1539,38 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
     /* 构建 GCC 命令 */
     char cmd[8192];
     int n;
+
+    /* 检测系统是否安装了 libcurl 开发头文件 */
+    int has_curl = 0;
+    FILE *curl_check = popen("curl-config --version >/dev/null 2>&1", "r");
+    if (curl_check) {
+        has_curl = (pclose(curl_check) == 0);
+    }
+
+    const char *curl_def = has_curl ? "-DVUS_HAVE_CURL" : "";
+    const char *curl_lib = has_curl ? "-lcurl" : "";
+
     if (extra_objects && extra_objects[0]) {
         n = snprintf(cmd, sizeof(cmd),
-            "gcc %s -g -DVUS_HAVE_CURL -I\"%s\" \"%s\" \"%s\" %s -o \"%s\" -lm -lpthread -lcurl 2>&1",
+            "gcc %s -g %s -I\"%s\" \"%s\" \"%s\" %s -o \"%s\" -lm -lpthread %s 2>&1",
             opt_level,
+            curl_def,
             abs_rt_dir,
             c_source_path,
             rt_source,
             extra_objects,
-            output_path);
+            output_path,
+            curl_lib);
     } else {
         n = snprintf(cmd, sizeof(cmd),
-            "gcc %s -g -DVUS_HAVE_CURL -I\"%s\" \"%s\" \"%s\" -o \"%s\" -lm -lpthread -lcurl 2>&1",
+            "gcc %s -g %s -I\"%s\" \"%s\" \"%s\" -o \"%s\" -lm -lpthread %s 2>&1",
             opt_level,
+            curl_def,
             abs_rt_dir,
             c_source_path,
             rt_source,
-            output_path);
+            output_path,
+            curl_lib);
     }
 
     if (n >= (int)sizeof(cmd)) {
