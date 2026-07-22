@@ -79,9 +79,9 @@ if [ -n "$PKG_ARCH" ] && [ -n "$DOWNLOAD_CMD" ]; then
 
     echo "尝试下载预编译包: ${PKG_NAME}"
 
-    TMP_DIR=$(mktemp -d 2>/dev/null || mktemp -d /tmp/vus_install.XXXXXX)
+    TMP_DIR=$(mktemp -d 2>&1 || mktemp -d /tmp/vus_install.XXXXXX)
     progress "下载中..."
-    if $DOWNLOAD_CMD "$PKG_URL" > "$TMP_DIR/$PKG_NAME" 2>/dev/null && [ -s "$TMP_DIR/$PKG_NAME" ]; then
+    if $DOWNLOAD_CMD "$PKG_URL" > "$TMP_DIR/$PKG_NAME" 2>&1 && [ -s "$TMP_DIR/$PKG_NAME" ]; then
         echo "  ✅ 预编译包下载成功"
         echo ""
         echo "正在安装..."
@@ -211,12 +211,12 @@ case ":$PATH:" in
         esac
         if [ -n "$RC_FILE" ]; then
             mkdir -p "$(dirname "$RC_FILE")"
-            grep -qxF "$LINE" "$RC_FILE" 2>/dev/null || echo "$LINE" >> "$RC_FILE"
+            grep -qxF "$LINE" "$RC_FILE" 2>&1 || echo "$LINE" >> "$RC_FILE"
             echo "  ✅ 已写入 $RC_FILE"
         fi
         # 也写入 .profile 作为后备（兼容所有 POSIX shell）
         if [ "$RC_FILE" != "$HOME/.profile" ]; then
-            grep -qxF "export PATH=\"\$HOME/.local/bin:\$PATH\"" "$HOME/.profile" 2>/dev/null || \
+            grep -qxF "export PATH=\"\$HOME/.local/bin:\$PATH\"" "$HOME/.profile" 2>&1 || \
                 echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.profile"
         fi
         ;;
@@ -250,7 +250,7 @@ fi
 
 # 一键测试（仅在交互式终端中提示）
 echo ""
-if [ -e /dev/tty ] 2>/dev/null; then
+if [ -e /dev/tty ] 2>&1; then
     echo "═══════════════════════════════════════"
     echo "  是否运行一键功能测试？"
     echo "  这将执行所有测试用例验证编译器功能"
@@ -258,7 +258,7 @@ if [ -e /dev/tty ] 2>/dev/null; then
     echo "═══════════════════════════════════════"
     echo ""
     printf "运行测试? [y/N] "
-    read -r RUN_TESTS </dev/tty 2>/dev/null || RUN_TESTS="no"
+    read -r RUN_TESTS </dev/tty 2>&1 || RUN_TESTS="no"
     case "$RUN_TESTS" in
         y|Y|yes|YES)
             ;;
@@ -273,6 +273,7 @@ else
 fi
 
 if [ "$RUN_TESTS" != "no" ]; then
+        set +e
         echo ""
         echo "==== 运行 VUS 功能测试 ===="
         echo ""
@@ -308,7 +309,7 @@ if [ "$RUN_TESTS" != "no" ]; then
         # 测试 3: 基本输出
         TOTAL=$((TOTAL + 1))
         echo "测试 $TOTAL: 基本输出 (test_hello)..."
-        OUTPUT=$("$VUS" run "$TESTS_DIR/test_hello.vus" 2>/dev/null)
+        OUTPUT=$("$VUS" run "$TESTS_DIR/test_hello.vus" 2>&1)
         if echo "$OUTPUT" | grep -q "Hello, World!"; then
             echo "  ✅ 输出正确: $OUTPUT"
             PASS=$((PASS + 1))
@@ -320,7 +321,7 @@ if [ "$RUN_TESTS" != "no" ]; then
         # 测试 4: 变量
         TOTAL=$((TOTAL + 1))
         echo "测试 $TOTAL: 变量 (test_variables)..."
-        OUTPUT=$("$VUS" run "$TESTS_DIR/test_variables.vus" 2>/dev/null)
+        OUTPUT=$("$VUS" run "$TESTS_DIR/test_variables.vus" 2>&1)
         if echo "$OUTPUT" | grep -q "张三"; then
             echo "  ✅ 输出正确: $OUTPUT"
             PASS=$((PASS + 1))
@@ -332,7 +333,7 @@ if [ "$RUN_TESTS" != "no" ]; then
         # 测试 5: 四则运算
         TOTAL=$((TOTAL + 1))
         echo "测试 $TOTAL: 四则运算 (test_arithmetic)..."
-        OUTPUT=$("$VUS" run "$TESTS_DIR/test_arithmetic.vus" 2>/dev/null)
+        OUTPUT=$("$VUS" run "$TESTS_DIR/test_arithmetic.vus" 2>&1)
         if echo "$OUTPUT" | grep -q "7"; then
             echo "  ✅ 输出正确: $OUTPUT"
             PASS=$((PASS + 1))
@@ -344,7 +345,7 @@ if [ "$RUN_TESTS" != "no" ]; then
         # 测试 6: 流程控制
         TOTAL=$((TOTAL + 1))
         echo "测试 $TOTAL: 流程控制 (test_control)..."
-        OUTPUT=$("$VUS" run "$TESTS_DIR/test_control.vus" 2>/dev/null)
+        OUTPUT=$("$VUS" run "$TESTS_DIR/test_control.vus" 2>&1)
         if echo "$OUTPUT" | grep -q "大于"; then
             echo "  ✅ 输出正确: $OUTPUT"
             PASS=$((PASS + 1))
@@ -356,7 +357,7 @@ if [ "$RUN_TESTS" != "no" ]; then
         # 测试 7: 函数
         TOTAL=$((TOTAL + 1))
         echo "测试 $TOTAL: 函数定义 (test_functions)..."
-        OUTPUT=$("$VUS" run "$TESTS_DIR/test_functions.vus" 2>/dev/null)
+        OUTPUT=$("$VUS" run "$TESTS_DIR/test_functions.vus" 2>&1)
         if echo "$OUTPUT" | grep -q "30"; then
             echo "  ✅ 输出正确: $OUTPUT"
             PASS=$((PASS + 1))
@@ -368,7 +369,7 @@ if [ "$RUN_TESTS" != "no" ]; then
         # 测试 8: 比较运算符
         TOTAL=$((TOTAL + 1))
         echo "测试 $TOTAL: 比较运算符 (test_comparison)..."
-        OUTPUT=$("$VUS" run "$TESTS_DIR/test_comparison.vus" 2>/dev/null)
+        OUTPUT=$("$VUS" run "$TESTS_DIR/test_comparison.vus" 2>&1)
         if echo "$OUTPUT" | grep -q "小于"; then
             echo "  ✅ 输出正确: $OUTPUT"
             PASS=$((PASS + 1))
@@ -380,7 +381,7 @@ if [ "$RUN_TESTS" != "no" ]; then
         # 测试 9: 字符串拼接
         TOTAL=$((TOTAL + 1))
         echo "测试 $TOTAL: 字符串拼接 (test_string)..."
-        OUTPUT=$("$VUS" run "$TESTS_DIR/test_string.vus" 2>/dev/null)
+        OUTPUT=$("$VUS" run "$TESTS_DIR/test_string.vus" 2>&1)
         if echo "$OUTPUT" | grep -q "字符串相等"; then
             echo "  ✅ 输出正确: $OUTPUT"
             PASS=$((PASS + 1))
@@ -392,7 +393,7 @@ if [ "$RUN_TESTS" != "no" ]; then
         # 测试 10: 当循环
         TOTAL=$((TOTAL + 1))
         echo "测试 $TOTAL: 当循环 (test_while)..."
-        OUTPUT=$("$VUS" run "$TESTS_DIR/test_while_count.vus" 2>/dev/null)
+        OUTPUT=$("$VUS" run "$TESTS_DIR/test_while_count.vus" 2>&1)
         if echo "$OUTPUT" | grep -q "55"; then
             echo "  ✅ 输出正确: $OUTPUT"
             PASS=$((PASS + 1))
@@ -404,7 +405,7 @@ if [ "$RUN_TESTS" != "no" ]; then
         # 测试 11: 递归阶乘
         TOTAL=$((TOTAL + 1))
         echo "测试 $TOTAL: 递归阶乘 (test_factorial)..."
-        OUTPUT=$("$VUS" run "$TESTS_DIR/test_factorial.vus" 2>/dev/null)
+        OUTPUT=$("$VUS" run "$TESTS_DIR/test_factorial.vus" 2>&1)
         if echo "$OUTPUT" | grep -q "720"; then
             echo "  ✅ 输出正确: $OUTPUT"
             PASS=$((PASS + 1))
@@ -416,7 +417,7 @@ if [ "$RUN_TESTS" != "no" ]; then
         # 测试 12: 递归斐波那契
         TOTAL=$((TOTAL + 1))
         echo "测试 $TOTAL: 递归斐波那契 (test_fibonacci)..."
-        OUTPUT=$("$VUS" run "$TESTS_DIR/test_fibonacci.vus" 2>/dev/null)
+        OUTPUT=$("$VUS" run "$TESTS_DIR/test_fibonacci.vus" 2>&1)
         if echo "$OUTPUT" | grep -q "21"; then
             echo "  ✅ 输出正确: $OUTPUT"
             PASS=$((PASS + 1))
@@ -428,7 +429,7 @@ if [ "$RUN_TESTS" != "no" ]; then
         # 测试 13: 嵌套循环乘法表
         TOTAL=$((TOTAL + 1))
         echo "测试 $TOTAL: 嵌套循环 (test_nested_control)..."
-        OUTPUT=$("$VUS" run "$TESTS_DIR/test_nested_control.vus" 2>/dev/null)
+        OUTPUT=$("$VUS" run "$TESTS_DIR/test_nested_control.vus" 2>&1)
         if echo "$OUTPUT" | grep -q "9"; then
             echo "  ✅ 输出正确: 乘法表完整"
             PASS=$((PASS + 1))
@@ -440,7 +441,7 @@ if [ "$RUN_TESTS" != "no" ]; then
         # 测试 14: 综合功能
         TOTAL=$((TOTAL + 1))
         echo "测试 $TOTAL: 综合功能 (test_comprehensive)..."
-        OUTPUT=$("$VUS" run "$TESTS_DIR/test_comprehensive.vus" 2>/dev/null)
+        OUTPUT=$("$VUS" run "$TESTS_DIR/test_comprehensive.vus" 2>&1)
         if echo "$OUTPUT" | grep -q "平方"; then
             echo "  ✅ 综合功能正常"
             PASS=$((PASS + 1))
@@ -452,7 +453,7 @@ if [ "$RUN_TESTS" != "no" ]; then
         # 测试 15: 综合演示 (test_demo)
         TOTAL=$((TOTAL + 1))
         echo "测试 $TOTAL: 综合演示 (test_demo)..."
-        OUTPUT=$("$VUS" run "$TESTS_DIR/test_demo.vus" 2>/dev/null)
+        OUTPUT=$("$VUS" run "$TESTS_DIR/test_demo.vus" 2>&1)
         if echo "$OUTPUT" | grep -q "全部功能正常"; then
             echo "  ✅ 综合演示完成"
             PASS=$((PASS + 1))
@@ -464,7 +465,7 @@ if [ "$RUN_TESTS" != "no" ]; then
         # 测试 16: 示例程序
         TOTAL=$((TOTAL + 1))
         echo "测试 $TOTAL: 示例程序 (examples/hello)..."
-        OUTPUT=$("$VUS" run "$INSTALL_DIR/examples/hello.vus" 2>/dev/null)
+        OUTPUT=$("$VUS" run "$INSTALL_DIR/examples/hello.vus" 2>&1)
         if echo "$OUTPUT" | grep -q "欢迎"; then
             echo "  ✅ 示例程序正确: a + b = 30"
             PASS=$((PASS + 1))
@@ -478,7 +479,7 @@ if [ "$RUN_TESTS" != "no" ]; then
         echo "测试 $TOTAL: 编译为 C 代码..."
         BUILDDIR="$INSTALL_DIR/构建"
         mkdir -p "$BUILDDIR"
-        if "$VUS" build --c-only "$TESTS_DIR/test_hello.vus" 2>/dev/null; then
+        if "$VUS" build --c-only "$TESTS_DIR/test_hello.vus" 2>&1; then
             echo "  ✅ C 编译成功"
             PASS=$((PASS + 1))
         else
@@ -489,7 +490,7 @@ if [ "$RUN_TESTS" != "no" ]; then
         # 测试 18: 编译为可执行文件
         TOTAL=$((TOTAL + 1))
         echo "测试 $TOTAL: 编译为可执行文件..."
-        if "$VUS" build --exe "$TESTS_DIR/test_hello.vus" 2>/dev/null; then
+        if "$VUS" build --exe "$TESTS_DIR/test_hello.vus" 2>&1; then
             echo "  ✅ 可执行文件编译成功"
             PASS=$((PASS + 1))
         else
@@ -532,8 +533,8 @@ if [ "$RUN_TESTS" != "no" ]; then
         echo "测试 $TOTAL: 编译为可执行文件并运行..."
         BUILDDIR="$INSTALL_DIR/构建"
         mkdir -p "$BUILDDIR"
-        if "$VUS" build --exe "$TESTS_DIR/test_hello.vus" 2>/dev/null && [ -f "$BUILDDIR/test_hello" ]; then
-            EXE_OUTPUT=$("$BUILDDIR/test_hello" 2>/dev/null)
+        if "$VUS" build --exe "$TESTS_DIR/test_hello.vus" 2>&1 && [ -f "$BUILDDIR/test_hello" ]; then
+            EXE_OUTPUT=$("$BUILDDIR/test_hello" 2>&1)
             if echo "$EXE_OUTPUT" | grep -q "Hello, World!"; then
                 echo "  ✅ 可执行文件输出正确: $EXE_OUTPUT"
                 PASS=$((PASS + 1))
@@ -571,7 +572,7 @@ if [ "$RUN_TESTS" != "no" ]; then
         # 测试 24: vus init 初始化模板
         TOTAL=$((TOTAL + 1))
         echo "测试 $TOTAL: vus init 初始化模板..."
-        INIT_DIR=$(mktemp -d /tmp/vus_init_XXXXXX 2>/dev/null || mktemp -d /tmp/vus_init_XXXXXX)
+        INIT_DIR=$(mktemp -d /tmp/vus_init_XXXXXX 2>&1 || mktemp -d /tmp/vus_init_XXXXXX)
         if (cd "$INIT_DIR" && echo "" | "$VUS" init) >/dev/null 2>&1; then
             if [ -f "$INIT_DIR/vus.json" ]; then
                 echo "  ✅ vus.json 创建成功"
@@ -589,7 +590,7 @@ if [ "$RUN_TESTS" != "no" ]; then
         # 测试 25: 中文错误信息
         TOTAL=$((TOTAL + 1))
         echo "测试 $TOTAL: 中文错误信息..."
-        INVALID_FILE=$(mktemp /tmp/vus_test_XXXXXX.vus 2>/dev/null || echo "/tmp/vus_test_$$.vus")
+        INVALID_FILE=$(mktemp /tmp/vus_test_XXXXXX.vus 2>&1 || echo "/tmp/vus_test_$$.vus")
         echo '打印("Hello" + )' > "$INVALID_FILE"
         ERROR_OUTPUT=$("$VUS" build --c-only "$INVALID_FILE" 2>&1)
         if echo "$ERROR_OUTPUT" | grep -qE "错误|失败"; then
