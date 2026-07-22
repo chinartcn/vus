@@ -74,6 +74,17 @@ typedef enum {
     VUS_TOKEN_STRUCT,
     VUS_TOKEN_CN_STRUCT,
 
+    /* 线程关键字 */
+    VUS_TOKEN_CN_THREAD,
+    VUS_TOKEN_CN_JOIN_THREAD,
+    VUS_TOKEN_CN_THREAD_SLEEP,
+
+    /* 协程关键字 */
+    VUS_TOKEN_CN_COROUTINE,
+    VUS_TOKEN_CN_RESUME,
+    VUS_TOKEN_CN_YIELD,
+    VUS_TOKEN_CN_AWAIT,
+
     /* 类型注解关键字 */
     VUS_TOKEN_TYPE_INT,
     VUS_TOKEN_TYPE_FLOAT,

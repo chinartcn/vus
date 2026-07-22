@@ -530,6 +530,199 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
         }
         return strdup("vus_to_string(0)");
     }
+    if (strcmp(call->func_name, "睡眠") == 0) {
+        if (call->args && call->args->count > 0) {
+            char *arg = gen_expr(buf, call->args->items[0]);
+            size_t sz = strlen(arg) + 64;
+            char *result = (char *)malloc(sz);
+            snprintf(result, sz, "vus_thread_sleep(%s)", arg);
+            free(arg);
+            return result;
+        }
+        return strdup("(0)");
+    }
+
+    /* ============= TUI 插件内置函数 ============= */
+    if (strcmp(call->func_name, "tui_清屏") == 0) {
+        return strdup("vus_plugin_tui_clear(NULL)");
+    }
+    if (strcmp(call->func_name, "tui_重置") == 0) {
+        return strdup("vus_plugin_tui_reset(NULL)");
+    }
+    if (strcmp(call->func_name, "tui_设置颜色") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *fg = gen_expr(buf, call->args->items[0]);
+            char *bg = gen_expr(buf, call->args->items[1]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_tui_set_color(%s, %s)", fg, bg);
+            free(fg); free(bg);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "tui_定位") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *row = gen_expr(buf, call->args->items[0]);
+            char *col = gen_expr(buf, call->args->items[1]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_tui_locate(%s, %s)", row, col);
+            free(row); free(col);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "tui_进度条") == 0) {
+        if (call->args && call->args->count >= 3) {
+            char *cur = gen_expr(buf, call->args->items[0]);
+            char *tot = gen_expr(buf, call->args->items[1]);
+            char *wid = gen_expr(buf, call->args->items[2]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_tui_progress(%s, %s, %s)", cur, tot, wid);
+            free(cur); free(tot); free(wid);
+            return strdup(result);
+        }
+    }
+
+    /* ============= 网络插件内置函数 ============= */
+    if (strcmp(call->func_name, "网络_GET") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *url = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_http_get(%s)", url);
+            free(url);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "网络_POST") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *url = gen_expr(buf, call->args->items[0]);
+            char *data = gen_expr(buf, call->args->items[1]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_http_post(%s, %s)", url, data);
+            free(url); free(data);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "网络_下载") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *url = gen_expr(buf, call->args->items[0]);
+            char *path = gen_expr(buf, call->args->items[1]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_http_download(%s, %s)", url, path);
+            free(url); free(path);
+            return strdup(result);
+        }
+    }
+
+    /* ============= 文件操作内置函数 ============= */
+    if (strcmp(call->func_name, "文件_读取") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *arg = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_file_read(%s)", arg);
+            free(arg);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "文件_写入") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *arg1 = gen_expr(buf, call->args->items[0]);
+            char *arg2 = gen_expr(buf, call->args->items[1]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_file_write(%s, %s)", arg1, arg2);
+            free(arg1); free(arg2);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "文件_追加") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *arg1 = gen_expr(buf, call->args->items[0]);
+            char *arg2 = gen_expr(buf, call->args->items[1]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_file_append(%s, %s)", arg1, arg2);
+            free(arg1); free(arg2);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "文件_存在") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *arg = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_file_exists(%s)", arg);
+            free(arg);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "文件_删除") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *arg = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_file_delete(%s)", arg);
+            free(arg);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "文件_列表") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *arg = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_file_list(%s)", arg);
+            free(arg);
+            return strdup(result);
+        }
+    }
+
+    /* ============= 日期时间内置函数 ============= */
+    if (strcmp(call->func_name, "日期_现在") == 0) {
+        return strdup("vus_plugin_date_now(NULL)");
+    }
+    if (strcmp(call->func_name, "日期_时间戳") == 0) {
+        return strdup("vus_plugin_date_timestamp(NULL)");
+    }
+    if (strcmp(call->func_name, "日期_年") == 0) {
+        return strdup("vus_plugin_date_year(NULL)");
+    }
+    if (strcmp(call->func_name, "日期_月") == 0) {
+        return strdup("vus_plugin_date_month(NULL)");
+    }
+    if (strcmp(call->func_name, "日期_日") == 0) {
+        return strdup("vus_plugin_date_day(NULL)");
+    }
+    if (strcmp(call->func_name, "日期_时") == 0) {
+        return strdup("vus_plugin_date_hour(NULL)");
+    }
+    if (strcmp(call->func_name, "日期_分") == 0) {
+        return strdup("vus_plugin_date_minute(NULL)");
+    }
+    if (strcmp(call->func_name, "日期_秒") == 0) {
+        return strdup("vus_plugin_date_second(NULL)");
+    }
+    if (strcmp(call->func_name, "日期_格式化") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *arg = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_date_format(%s)", arg);
+            free(arg);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "日期_解析") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *arg1 = gen_expr(buf, call->args->items[0]);
+            char *arg2 = gen_expr(buf, call->args->items[1]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_date_parse(%s, %s)", arg1, arg2);
+            free(arg1); free(arg2);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "日期_从时间戳") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *arg = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_date_from_timestamp(%s)", arg);
+            free(arg);
+            return strdup(result);
+        }
+    }
 
     /* 普通函数调用 */
     char san[256];
@@ -673,6 +866,55 @@ static char *gen_expr(GenBuf *buf, VusAstNode *node) {
             for (size_t i = 0; i < nargs; i++) free(arg_exprs[i]);
             free(arg_exprs);
             return strdup(args_buf);
+        }
+
+        /* ============= 线程/协程表达式 ============= */
+        case VUS_AST_THREAD_CREATE: {
+            VusAstThreadCreate *tc = (VusAstThreadCreate *)node;
+            char *func = gen_expr(buf, tc->func);
+            char *arg = gen_expr(buf, tc->arg);
+            char result[4096];
+            snprintf(result, sizeof(result),
+                "({_VusThreadTask _task={(void(*)(void*))%s, (void*)%s};"
+                "vus_thread_create_handle(_vus_thread_run, &_task);})",
+                func, arg);
+            free(func);
+            free(arg);
+            return strdup(result);
+        }
+        case VUS_AST_THREAD_JOIN: {
+            VusAstThreadJoin *tj = (VusAstThreadJoin *)node;
+            char *thread = gen_expr(buf, tj->thread);
+            char result[1024];
+            snprintf(result, sizeof(result),
+                "vus_thread_join_handle(%s)", thread);
+            free(thread);
+            return strdup(result);
+        }
+        case VUS_AST_CORO_CREATE: {
+            VusAstCoroCreate *cc = (VusAstCoroCreate *)node;
+            char *func = gen_expr(buf, cc->func);
+            char *arg = gen_expr(buf, cc->arg);
+            char result[4096];
+            snprintf(result, sizeof(result),
+                "({_VusThreadTask _task={(void(*)(void*))%s, (void*)%s};"
+                "vus_coro_create_handle((void(*)(void*))_vus_thread_run, &_task);})",
+                func, arg);
+            free(func);
+            free(arg);
+            return strdup(result);
+        }
+        case VUS_AST_CORO_RESUME: {
+            VusAstCoroResume *cr = (VusAstCoroResume *)node;
+            char *coro = gen_expr(buf, cr->coro);
+            char result[1024];
+            snprintf(result, sizeof(result),
+                "(vus_coro_resume_handle(%s), NULL)", coro);
+            free(coro);
+            return strdup(result);
+        }
+        case VUS_AST_CORO_YIELD: {
+            return strdup("(vus_coro_yield(), NULL)");
         }
         default:
             return strdup("NULL");
@@ -1160,6 +1402,16 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config) {
         gen_emit(buf, "#include \"libvus_rt.h\"\n\n");
     }
 
+    /* 线程/协程运行时辅助 */
+    gen_emit(buf, "/* 线程/协程运行时辅助 */\n");
+    gen_emit(buf, "typedef struct { void (*func)(void*); void* arg; } _VusThreadTask;\n");
+    gen_emit(buf, "static void* _vus_thread_run(void* _arg) {\n");
+    gen_emit(buf, "    _VusThreadTask* _task = (_VusThreadTask*)_arg;\n");
+    gen_emit(buf, "    VusString* _vus_args[2] = {NULL, (VusString*)_task->arg};\n");
+    gen_emit(buf, "    _task->func(_vus_args);\n");
+    gen_emit(buf, "    return _vus_args[0];\n");
+    gen_emit(buf, "}\n\n");
+
     /* 全局变量声明 */
     if (program->statements) {
         for (size_t i = 0; i < program->statements->count; i++) {
@@ -1289,7 +1541,7 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
     int n;
     if (extra_objects && extra_objects[0]) {
         n = snprintf(cmd, sizeof(cmd),
-            "gcc %s -g -I\"%s\" \"%s\" \"%s\" %s -o \"%s\" -lm -lpthread 2>&1",
+            "gcc %s -g -DVUS_HAVE_CURL -I\"%s\" \"%s\" \"%s\" %s -o \"%s\" -lm -lpthread -lcurl 2>&1",
             opt_level,
             abs_rt_dir,
             c_source_path,
@@ -1298,7 +1550,7 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
             output_path);
     } else {
         n = snprintf(cmd, sizeof(cmd),
-            "gcc %s -g -I\"%s\" \"%s\" \"%s\" -o \"%s\" -lm -lpthread 2>&1",
+            "gcc %s -g -DVUS_HAVE_CURL -I\"%s\" \"%s\" \"%s\" -o \"%s\" -lm -lpthread -lcurl 2>&1",
             opt_level,
             abs_rt_dir,
             c_source_path,

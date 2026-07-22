@@ -354,6 +354,59 @@ VusAstAccess *vus_ast_access_new(VusAstNode *obj, const char *member, int line, 
     return node;
 }
 
+/* ============ 线程/协程节点创建函数 ============ */
+
+VusAstThreadCreate *vus_ast_thread_create_new(VusAstNode *func, VusAstNode *arg, int line, int col) {
+    VusAstThreadCreate *node = calloc(1, sizeof(VusAstThreadCreate));
+    if (!node) return NULL;
+    node->type = VUS_AST_THREAD_CREATE;
+    node->line = line;
+    node->column = col;
+    node->func = func;
+    node->arg = arg;
+    return node;
+}
+
+VusAstThreadJoin *vus_ast_thread_join_new(VusAstNode *thread, int line, int col) {
+    VusAstThreadJoin *node = calloc(1, sizeof(VusAstThreadJoin));
+    if (!node) return NULL;
+    node->type = VUS_AST_THREAD_JOIN;
+    node->line = line;
+    node->column = col;
+    node->thread = thread;
+    return node;
+}
+
+VusAstCoroCreate *vus_ast_coro_create_new(VusAstNode *func, VusAstNode *arg, int line, int col) {
+    VusAstCoroCreate *node = calloc(1, sizeof(VusAstCoroCreate));
+    if (!node) return NULL;
+    node->type = VUS_AST_CORO_CREATE;
+    node->line = line;
+    node->column = col;
+    node->func = func;
+    node->arg = arg;
+    return node;
+}
+
+VusAstCoroResume *vus_ast_coro_resume_new(VusAstNode *coro, int line, int col) {
+    VusAstCoroResume *node = calloc(1, sizeof(VusAstCoroResume));
+    if (!node) return NULL;
+    node->type = VUS_AST_CORO_RESUME;
+    node->line = line;
+    node->column = col;
+    node->coro = coro;
+    return node;
+}
+
+VusAstCoroYield *vus_ast_coro_yield_new(int line, int col) {
+    VusAstCoroYield *node = calloc(1, sizeof(VusAstCoroYield));
+    if (!node) return NULL;
+    node->type = VUS_AST_CORO_YIELD;
+    node->line = line;
+    node->column = col;
+    return node;
+}
+
 /* ============ AST 节点释放 ============ */
 
 void vus_ast_node_free(VusAstNode *node) {
@@ -508,6 +561,31 @@ void vus_ast_node_free(VusAstNode *node) {
         free(n->member);
         break;
     }
+    /* 线程/协程节点释放 */
+    case VUS_AST_THREAD_CREATE: {
+        VusAstThreadCreate *n = (VusAstThreadCreate *)node;
+        vus_ast_node_free(n->func);
+        vus_ast_node_free(n->arg);
+        break;
+    }
+    case VUS_AST_THREAD_JOIN: {
+        VusAstThreadJoin *n = (VusAstThreadJoin *)node;
+        vus_ast_node_free(n->thread);
+        break;
+    }
+    case VUS_AST_CORO_CREATE: {
+        VusAstCoroCreate *n = (VusAstCoroCreate *)node;
+        vus_ast_node_free(n->func);
+        vus_ast_node_free(n->arg);
+        break;
+    }
+    case VUS_AST_CORO_RESUME: {
+        VusAstCoroResume *n = (VusAstCoroResume *)node;
+        vus_ast_node_free(n->coro);
+        break;
+    }
+    case VUS_AST_CORO_YIELD:
+        break;
     case VUS_AST_IMPORT:
     case VUS_AST_FROM_IMPORT:
         /* 由 parser 内部管理，直接释放节点本身 */

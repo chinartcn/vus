@@ -109,6 +109,17 @@ const char *vus_token_type_name(VusTokenType type)
     case VUS_TOKEN_STRUCT:       return "struct";
     case VUS_TOKEN_CN_STRUCT:    return "结构";
 
+    /* 线程关键字 */
+    case VUS_TOKEN_CN_THREAD:       return "线程";
+    case VUS_TOKEN_CN_JOIN_THREAD:  return "等待线程";
+    case VUS_TOKEN_CN_THREAD_SLEEP: return "睡眠";
+
+    /* 协程关键字 */
+    case VUS_TOKEN_CN_COROUTINE:    return "协程";
+    case VUS_TOKEN_CN_RESUME:       return "恢复";
+    case VUS_TOKEN_CN_YIELD:        return "让出";
+    case VUS_TOKEN_CN_AWAIT:        return "等待";
+
     /* 类型关键字 */
     case VUS_TOKEN_TYPE_INT:     return "整型";
     case VUS_TOKEN_TYPE_FLOAT:   return "浮点型";
@@ -228,6 +239,17 @@ static const KeywordEntry s_keywords[] = {
     {"否则如果", 12, VUS_TOKEN_CN_ELIF},
     {"浮点型",   9, VUS_TOKEN_TYPE_FLOAT},
     {"结构",     6, VUS_TOKEN_CN_STRUCT},
+
+    /* 线程关键字 */
+    {"线程",     6, VUS_TOKEN_CN_THREAD},
+    {"等待线程", 12, VUS_TOKEN_CN_JOIN_THREAD},
+    {"睡眠",     6, VUS_TOKEN_CN_THREAD_SLEEP},
+
+    /* 协程关键字 */
+    {"协程",     6, VUS_TOKEN_CN_COROUTINE},
+    {"恢复",     6, VUS_TOKEN_CN_RESUME},
+    {"让出",     6, VUS_TOKEN_CN_YIELD},
+    {"等待",     6, VUS_TOKEN_CN_AWAIT},
 };
 
 #define KEYWORD_COUNT (sizeof(s_keywords) / sizeof(s_keywords[0]))

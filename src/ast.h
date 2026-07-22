@@ -47,6 +47,13 @@ typedef enum {
     VUS_AST_STRUCT_DEF,
     VUS_AST_STRUCT_INSTANTIATE,
     VUS_AST_ACCESS,
+
+    /* 线程/协程相关 */
+    VUS_AST_THREAD_CREATE,
+    VUS_AST_THREAD_JOIN,
+    VUS_AST_CORO_CREATE,
+    VUS_AST_CORO_RESUME,
+    VUS_AST_CORO_YIELD,
 } VusAstNodeType;
 
 /* ============ 前向声明 ============ */
@@ -314,6 +321,49 @@ typedef struct {
     int            is_optional; /* 0=普通访问, 1=可选链 */
 } VusAstAccess;
 
+/* ============ 线程/协程节点类型 ============ */
+
+/* ThreadCreate — 创建线程 */
+typedef struct {
+    VusAstNodeType type;   /* VUS_AST_THREAD_CREATE */
+    int            line;
+    int            column;
+    VusAstNode    *func;   /* 函数表达式 */
+    VusAstNode    *arg;    /* 参数表达式 */
+} VusAstThreadCreate;
+
+/* ThreadJoin — 等待线程 */
+typedef struct {
+    VusAstNodeType type;   /* VUS_AST_THREAD_JOIN */
+    int            line;
+    int            column;
+    VusAstNode    *thread; /* 线程句柄表达式 */
+} VusAstThreadJoin;
+
+/* CoroCreate — 创建协程 */
+typedef struct {
+    VusAstNodeType type;   /* VUS_AST_CORO_CREATE */
+    int            line;
+    int            column;
+    VusAstNode    *func;   /* 函数表达式 */
+    VusAstNode    *arg;    /* 参数表达式 */
+} VusAstCoroCreate;
+
+/* CoroResume — 恢复协程 */
+typedef struct {
+    VusAstNodeType type;   /* VUS_AST_CORO_RESUME */
+    int            line;
+    int            column;
+    VusAstNode    *coro;   /* 协程句柄表达式 */
+} VusAstCoroResume;
+
+/* CoroYield — 让出协程（无参数） */
+typedef struct {
+    VusAstNodeType type;   /* VUS_AST_CORO_YIELD */
+    int            line;
+    int            column;
+} VusAstCoroYield;
+
 /* ============ AST 节点创建函数 ============ */
 
 VusAstProgram    *vus_ast_program_new(VusAstList *stmts);
@@ -342,6 +392,13 @@ VusAstGlobalDecl *vus_ast_global_new(const char *name, int line, int col);
 VusAstStructDef  *vus_ast_struct_def_new(const char *name, VusAstList *fields, int line, int col);
 VusAstStructInst *vus_ast_struct_inst_new(const char *name, VusAstList *args, int line, int col);
 VusAstAccess     *vus_ast_access_new(VusAstNode *obj, const char *member, int line, int col);
+
+/* 线程/协程节点创建函数 */
+VusAstThreadCreate *vus_ast_thread_create_new(VusAstNode *func, VusAstNode *arg, int line, int col);
+VusAstThreadJoin   *vus_ast_thread_join_new(VusAstNode *thread, int line, int col);
+VusAstCoroCreate   *vus_ast_coro_create_new(VusAstNode *func, VusAstNode *arg, int line, int col);
+VusAstCoroResume   *vus_ast_coro_resume_new(VusAstNode *coro, int line, int col);
+VusAstCoroYield    *vus_ast_coro_yield_new(int line, int col);
 
 /* 释放整个 AST 树 */
 void vus_ast_node_free(VusAstNode *node);

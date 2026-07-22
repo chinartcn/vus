@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include "libvus_rt.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -473,6 +474,70 @@ void vus_thread_detach(VusThread* thread) {
     thread->detached = 1;
 }
 
+/* ============ 线程/协程句柄接口 ============ */
+/* 使用全局句柄注册表，避免指针类型转换问题 */
+
+static void* vus_thread_handles[VUS_MAX_HANDLES];
+static int vus_thread_handle_count = 0;
+static void* vus_coro_handles[VUS_MAX_HANDLES];
+static int vus_coro_handle_count = 0;
+
+VusString* vus_thread_create_handle(void* (*func)(void*), void* arg) {
+    VusThread* thread = vus_thread_create(func, arg);
+    if (!thread) return vus_string_new("-1");
+    int idx = vus_thread_handle_count++;
+    if (idx >= VUS_MAX_HANDLES) {
+        vus_thread_join(thread);
+        free(thread);
+        return vus_string_new("-1");
+    }
+    vus_thread_handles[idx] = thread;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%d", idx);
+    return vus_string_new(buf);
+}
+
+void* vus_thread_join_handle(VusString* handle) {
+    if (!handle) return NULL;
+    int idx = atoi(handle->data);
+    if (idx < 0 || idx >= vus_thread_handle_count || !vus_thread_handles[idx]) {
+        return NULL;
+    }
+    VusThread* thread = (VusThread*)vus_thread_handles[idx];
+    void* result = vus_thread_join(thread);
+    free(thread);
+    vus_thread_handles[idx] = NULL;
+    return result;
+}
+
+VusString* vus_coro_create_handle(void (*func)(void*), void* arg) {
+    VusCoroutine* coro = vus_coro_create(func, arg);
+    if (!coro) return vus_string_new("-1");
+    int idx = vus_coro_handle_count++;
+    if (idx >= VUS_MAX_HANDLES) {
+        free(coro);
+        return vus_string_new("-1");
+    }
+    vus_coro_handles[idx] = coro;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%d", idx);
+    return vus_string_new(buf);
+}
+
+void vus_coro_resume_handle(VusString* handle) {
+    if (!handle) return;
+    int idx = atoi(handle->data);
+    if (idx < 0 || idx >= vus_coro_handle_count || !vus_coro_handles[idx]) {
+        return;
+    }
+    VusCoroutine* coro = (VusCoroutine*)vus_coro_handles[idx];
+    vus_coro_resume(coro);
+    if (vus_coro_is_done(coro)) {
+        free(coro);
+        vus_coro_handles[idx] = NULL;
+    }
+}
+
 // ============ 协程实现 ============
 // 使用 ucontext 实现轻量级协程
 
@@ -560,4 +625,382 @@ void vus_coro_yield(void) {
 
 int vus_coro_is_done(VusCoroutine* coro) {
     return !coro || coro->state == CORO_DONE;
+}
+
+/* ============ 插件运行时函数实现 ============ */
+
+/* ---- TUI（ANSI 转义码） ---- */
+
+VusString* vus_plugin_tui_clear(VusString* dummy) {
+    (void)dummy;
+    printf("\033[2J\033[H");
+    fflush(stdout);
+    return vus_string_new("");
+}
+
+VusString* vus_plugin_tui_set_color(VusString* fg, VusString* bg) {
+    const char* c_fg = fg ? vus_string_cstr(fg) : "37";
+    const char* c_bg = bg ? vus_string_cstr(bg) : "40";
+    printf("\033[38;5;%sm\033[48;5;%sm", c_fg, c_bg);
+    fflush(stdout);
+    return vus_string_new("");
+}
+
+VusString* vus_plugin_tui_locate(VusString* row, VusString* col) {
+    const char* c_row = row ? vus_string_cstr(row) : "1";
+    const char* c_col = col ? vus_string_cstr(col) : "1";
+    printf("\033[%s;%sH", c_row, c_col);
+    fflush(stdout);
+    return vus_string_new("");
+}
+
+VusString* vus_plugin_tui_progress(VusString* current, VusString* total, VusString* width) {
+    int c = current ? atoi(vus_string_cstr(current)) : 0;
+    int t = total ? atoi(vus_string_cstr(total)) : 100;
+    int w = width ? atoi(vus_string_cstr(width)) : 20;
+    if (t <= 0) t = 1;
+    if (w <= 0) w = 20;
+    int pct = (c * 100) / t;
+    int bar_w = (c * w) / t;
+    printf("\033[?25l[");  /* hide cursor */
+    for (int i = 0; i < w; i++) {
+        putchar(i < bar_w ? '=' : ' ');
+    }
+    printf("] %d%%\r", pct);
+    fflush(stdout);
+    if (c >= t) {
+        printf("\033[?25h\n");  /* show cursor, newline */
+    }
+    return vus_string_new("");
+}
+
+VusString* vus_plugin_tui_reset(VusString* dummy) {
+    (void)dummy;
+    printf("\033[0m");
+    fflush(stdout);
+    return vus_string_new("");
+}
+
+/* ---- 网络（libcurl） ---- */
+
+#ifdef VUS_HAVE_CURL
+#include <curl/curl.h>
+
+struct vus_mem_buf {
+    char* data;
+    size_t size;
+};
+
+static size_t vus_curl_write_cb(void* ptr, size_t size, size_t nmemb, void* userdata) {
+    size_t total = size * nmemb;
+    struct vus_mem_buf* buf = (struct vus_mem_buf*)userdata;
+    char* new_data = (char*)realloc(buf->data, buf->size + total + 1);
+    if (!new_data) return 0;
+    buf->data = new_data;
+    memcpy(buf->data + buf->size, ptr, total);
+    buf->size += total;
+    buf->data[buf->size] = '\0';
+    return total;
+}
+
+static CURL* vus_curl_easy(const char* url) {
+    CURL* curl = curl_easy_init();
+    if (!curl) return NULL;
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "VUS/1.0");
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    return curl;
+}
+#endif
+
+VusString* vus_plugin_http_get(VusString* url) {
+#ifdef VUS_HAVE_CURL
+    if (!url) return vus_string_new("");
+    const char* c_url = vus_string_cstr(url);
+    CURL* curl = vus_curl_easy(c_url);
+    if (!curl) return vus_string_new("");
+    struct vus_mem_buf buf = {NULL, 0};
+    curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, vus_curl_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
+    CURLcode res = curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+    if (res != CURLE_OK) {
+        free(buf.data);
+        return vus_string_new("");
+    }
+    VusString* result = vus_string_new(buf.data ? buf.data : "");
+    free(buf.data);
+    return result;
+#else
+    (void)url;
+    return vus_string_new("");
+#endif
+}
+
+VusString* vus_plugin_http_post(VusString* url, VusString* data) {
+#ifdef VUS_HAVE_CURL
+    if (!url) return vus_string_new("");
+    const char* c_url = vus_string_cstr(url);
+    const char* c_data = data ? vus_string_cstr(data) : "";
+    CURL* curl = vus_curl_easy(c_url);
+    if (!curl) return vus_string_new("");
+    struct vus_mem_buf buf = {NULL, 0};
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, c_data);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(c_data));
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, vus_curl_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
+    CURLcode res = curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+    if (res != CURLE_OK) {
+        free(buf.data);
+        return vus_string_new("");
+    }
+    VusString* result = vus_string_new(buf.data ? buf.data : "");
+    free(buf.data);
+    return result;
+#else
+    (void)url; (void)data;
+    return vus_string_new("");
+#endif
+}
+
+VusString* vus_plugin_http_download(VusString* url, VusString* filepath) {
+#ifdef VUS_HAVE_CURL
+    if (!url || !filepath) return vus_string_new("-1");
+    const char* c_url = vus_string_cstr(url);
+    const char* c_path = vus_string_cstr(filepath);
+    CURL* curl = vus_curl_easy(c_url);
+    if (!curl) return vus_string_new("-1");
+    FILE* fp = fopen(c_path, "wb");
+    if (!fp) { curl_easy_cleanup(curl); return vus_string_new("-1"); }
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, NULL);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+    CURLcode res = curl_easy_perform(curl);
+    fclose(fp);
+    curl_easy_cleanup(curl);
+    return vus_string_new(res == CURLE_OK ? "0" : "-1");
+#else
+    (void)url; (void)filepath;
+    return vus_string_new("-1");
+#endif
+}
+
+/* ---- 文件操作 ---- */
+
+#include <sys/stat.h>
+#include <dirent.h>
+#include <errno.h>
+
+VusString* vus_plugin_file_read(VusString* path) {
+    if (!path) return vus_string_new("");
+    const char* c_path = vus_string_cstr(path);
+    FILE* fp = fopen(c_path, "rb");
+    if (!fp) return vus_string_new("");
+    if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return vus_string_new(""); }
+    long sz = ftell(fp);
+    if (sz < 0) { fclose(fp); return vus_string_new(""); }
+    rewind(fp);
+    char* buf = (char*)malloc((size_t)sz + 1);
+    if (!buf) { fclose(fp); return vus_string_new(""); }
+    size_t nread = fread(buf, 1, (size_t)sz, fp);
+    fclose(fp);
+    if ((long)nread != sz) { free(buf); return vus_string_new(""); }
+    buf[sz] = '\0';
+    VusString* result = vus_string_new_len(buf, (int)sz);
+    free(buf);
+    return result;
+}
+
+VusString* vus_plugin_file_write(VusString* path, VusString* content) {
+    if (!path || !content) return vus_string_new("-1");
+    const char* c_path = vus_string_cstr(path);
+    const char* c_data = vus_string_cstr(content);
+    FILE* fp = fopen(c_path, "wb");
+    if (!fp) return vus_string_new("-1");
+    size_t len = strlen(c_data);
+    size_t written = fwrite(c_data, 1, len, fp);
+    fclose(fp);
+    return vus_string_new(written == len ? "0" : "-1");
+}
+
+VusString* vus_plugin_file_append(VusString* path, VusString* content) {
+    if (!path || !content) return vus_string_new("-1");
+    const char* c_path = vus_string_cstr(path);
+    const char* c_data = vus_string_cstr(content);
+    FILE* fp = fopen(c_path, "ab");
+    if (!fp) return vus_string_new("-1");
+    size_t len = strlen(c_data);
+    size_t written = fwrite(c_data, 1, len, fp);
+    fclose(fp);
+    return vus_string_new(written == len ? "0" : "-1");
+}
+
+VusString* vus_plugin_file_exists(VusString* path) {
+    if (!path) return vus_string_new("0");
+    const char* c_path = vus_string_cstr(path);
+    struct stat st;
+    return vus_string_new(stat(c_path, &st) == 0 ? "1" : "0");
+}
+
+VusString* vus_plugin_file_delete(VusString* path) {
+    if (!path) return vus_string_new("-1");
+    const char* c_path = vus_string_cstr(path);
+    return vus_string_new(remove(c_path) == 0 ? "0" : "-1");
+}
+
+VusString* vus_plugin_file_list(VusString* path) {
+    if (!path) return vus_string_new("");
+    const char* c_path = vus_string_cstr(path);
+    DIR* dir = opendir(c_path);
+    if (!dir) return vus_string_new("");
+    size_t total = 0;
+    struct dirent* entry;
+    int count = 0;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        total += strlen(entry->d_name) + 1;
+        count++;
+    }
+    if (count == 0) { closedir(dir); return vus_string_new(""); }
+    rewinddir(dir);
+    char* list = (char*)malloc(total + 1);
+    if (!list) { closedir(dir); return vus_string_new(""); }
+    char* ptr = list;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        size_t len = strlen(entry->d_name);
+        memcpy(ptr, entry->d_name, len);
+        ptr += len;
+        *ptr++ = '\n';
+    }
+    *ptr = '\0';
+    closedir(dir);
+    VusString* result = vus_string_new(list);
+    free(list);
+    return result;
+}
+
+/* ---- 日期时间 ---- */
+
+#include <time.h>
+
+VusString* vus_plugin_date_now(VusString* dummy) {
+    (void)dummy;
+    time_t t = time(NULL);
+    struct tm* tm_info = localtime(&t);
+    if (!tm_info) return vus_string_new("");
+    char buf[20];
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", tm_info);
+    return vus_string_new(buf);
+}
+
+VusString* vus_plugin_date_format(VusString* fmt) {
+    if (!fmt) return vus_string_new("");
+    const char* c_fmt = vus_string_cstr(fmt);
+    time_t t = time(NULL);
+    struct tm* tm_info = localtime(&t);
+    if (!tm_info) return vus_string_new("");
+    char buf[256];
+    size_t ret = strftime(buf, sizeof(buf), c_fmt, tm_info);
+    if (ret == 0) return vus_string_new("");
+    return vus_string_new(buf);
+}
+
+VusString* vus_plugin_date_parse(VusString* str, VusString* fmt) {
+    if (!str || !fmt) return vus_string_new("");
+    const char* c_str = vus_string_cstr(str);
+    const char* c_fmt = vus_string_cstr(fmt);
+    struct tm tm_val;
+    memset(&tm_val, 0, sizeof(tm_val));
+    const char* ret = strptime(c_str, c_fmt, &tm_val);
+    if (!ret) return vus_string_new("");
+    time_t t = mktime(&tm_val);
+    if (t == (time_t)-1) return vus_string_new("");
+    struct tm* norm = localtime(&t);
+    if (!norm) return vus_string_new("");
+    char buf[20];
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", norm);
+    return vus_string_new(buf);
+}
+
+VusString* vus_plugin_date_timestamp(VusString* dummy) {
+    (void)dummy;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%lld", (long long)time(NULL));
+    return vus_string_new(buf);
+}
+
+VusString* vus_plugin_date_from_timestamp(VusString* ts) {
+    if (!ts) return vus_string_new("");
+    long long t_val = atoll(vus_string_cstr(ts));
+    time_t t = (time_t)t_val;
+    struct tm* tm_info = localtime(&t);
+    if (!tm_info) return vus_string_new("");
+    char buf[20];
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", tm_info);
+    return vus_string_new(buf);
+}
+
+static struct tm* vus_get_tm(void) {
+    time_t t = time(NULL);
+    return localtime(&t);
+}
+
+VusString* vus_plugin_date_year(VusString* dummy) {
+    (void)dummy;
+    struct tm* tm_info = vus_get_tm();
+    if (!tm_info) return vus_string_new("0");
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%d", tm_info->tm_year + 1900);
+    return vus_string_new(buf);
+}
+
+VusString* vus_plugin_date_month(VusString* dummy) {
+    (void)dummy;
+    struct tm* tm_info = vus_get_tm();
+    if (!tm_info) return vus_string_new("0");
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%d", tm_info->tm_mon + 1);
+    return vus_string_new(buf);
+}
+
+VusString* vus_plugin_date_day(VusString* dummy) {
+    (void)dummy;
+    struct tm* tm_info = vus_get_tm();
+    if (!tm_info) return vus_string_new("0");
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%d", tm_info->tm_mday);
+    return vus_string_new(buf);
+}
+
+VusString* vus_plugin_date_hour(VusString* dummy) {
+    (void)dummy;
+    struct tm* tm_info = vus_get_tm();
+    if (!tm_info) return vus_string_new("0");
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%d", tm_info->tm_hour);
+    return vus_string_new(buf);
+}
+
+VusString* vus_plugin_date_minute(VusString* dummy) {
+    (void)dummy;
+    struct tm* tm_info = vus_get_tm();
+    if (!tm_info) return vus_string_new("0");
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%d", tm_info->tm_min);
+    return vus_string_new(buf);
+}
+
+VusString* vus_plugin_date_second(VusString* dummy) {
+    (void)dummy;
+    struct tm* tm_info = vus_get_tm();
+    if (!tm_info) return vus_string_new("0");
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%d", tm_info->tm_sec);
+    return vus_string_new(buf);
 }

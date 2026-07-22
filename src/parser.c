@@ -1558,6 +1558,110 @@ static VusAstNode *parse_primary(VusParser *parser) {
             return (VusAstNode*)node;
         }
 
+        /* ===== 线程/协程表达式 ===== */
+        case VUS_TOKEN_CN_THREAD:
+        case VUS_TOKEN_CN_JOIN_THREAD:
+        case VUS_TOKEN_CN_COROUTINE:
+        case VUS_TOKEN_CN_RESUME: {
+            /* 这些关键字作为表达式处理：线程(func, arg)、等待线程(t)、协程(func, arg)、恢复(c) */
+            VusTokenType ktype = token->type;
+            int kw_line = token->line;
+            int kw_col = token->column;
+            parser_advance(parser); /* 消耗关键字 */
+
+            /* 期望左括号 */
+            parser_expect(parser, VUS_TOKEN_LPAREN);
+            if (parser->error) return NULL;
+
+            VusAstNode *expr_result = NULL;
+
+            switch (ktype) {
+                case VUS_TOKEN_CN_THREAD: {
+                    /* 线程(func, arg) */
+                    VusAstNode *func = parse_expr(parser);
+                    if (!func) return NULL;
+                    parser_expect(parser, VUS_TOKEN_COMMA);
+                    if (parser->error) { vus_ast_node_free(func); return NULL; }
+                    VusAstNode *arg = parse_expr(parser);
+                    if (!arg) { vus_ast_node_free(func); return NULL; }
+                    parser_expect(parser, VUS_TOKEN_RPAREN);
+                    if (parser->error) { vus_ast_node_free(func); vus_ast_node_free(arg); return NULL; }
+                    expr_result = (VusAstNode*)vus_ast_thread_create_new(func, arg, kw_line, kw_col);
+                    break;
+                }
+                case VUS_TOKEN_CN_JOIN_THREAD: {
+                    /* 等待线程(t) */
+                    VusAstNode *thread = parse_expr(parser);
+                    if (!thread) return NULL;
+                    parser_expect(parser, VUS_TOKEN_RPAREN);
+                    if (parser->error) { vus_ast_node_free(thread); return NULL; }
+                    expr_result = (VusAstNode*)vus_ast_thread_join_new(thread, kw_line, kw_col);
+                    break;
+                }
+                case VUS_TOKEN_CN_COROUTINE: {
+                    /* 协程(func, arg) */
+                    VusAstNode *func = parse_expr(parser);
+                    if (!func) return NULL;
+                    parser_expect(parser, VUS_TOKEN_COMMA);
+                    if (parser->error) { vus_ast_node_free(func); return NULL; }
+                    VusAstNode *arg = parse_expr(parser);
+                    if (!arg) { vus_ast_node_free(func); return NULL; }
+                    parser_expect(parser, VUS_TOKEN_RPAREN);
+                    if (parser->error) { vus_ast_node_free(func); vus_ast_node_free(arg); return NULL; }
+                    expr_result = (VusAstNode*)vus_ast_coro_create_new(func, arg, kw_line, kw_col);
+                    break;
+                }
+                case VUS_TOKEN_CN_RESUME: {
+                    /* 恢复(c) */
+                    VusAstNode *coro = parse_expr(parser);
+                    if (!coro) return NULL;
+                    parser_expect(parser, VUS_TOKEN_RPAREN);
+                    if (parser->error) { vus_ast_node_free(coro); return NULL; }
+                    expr_result = (VusAstNode*)vus_ast_coro_resume_new(coro, kw_line, kw_col);
+                    break;
+                }
+                default:
+                    break;
+            }
+
+            return expr_result;
+        }
+
+        case VUS_TOKEN_CN_YIELD: {
+            /* 让出() — 无参数表达式 */
+            int kw_line = token->line;
+            int kw_col = token->column;
+            parser_advance(parser); /* 消耗 让出 */
+
+            /* 期望左括号和右括号 */
+            parser_expect(parser, VUS_TOKEN_LPAREN);
+            if (parser->error) return NULL;
+            parser_expect(parser, VUS_TOKEN_RPAREN);
+            if (parser->error) return NULL;
+
+            return (VusAstNode*)vus_ast_coro_yield_new(kw_line, kw_col);
+        }
+
+        case VUS_TOKEN_CN_THREAD_SLEEP: {
+            /* 睡眠(ms) — 转换为 vus_thread_sleep(ms) */
+            int kw_line = token->line;
+            int kw_col = token->column;
+            parser_advance(parser); /* 消耗 睡眠 */
+
+            parser_expect(parser, VUS_TOKEN_LPAREN);
+            if (parser->error) return NULL;
+            VusAstNode *ms = parse_expr(parser);
+            if (!ms) return NULL;
+            parser_expect(parser, VUS_TOKEN_RPAREN);
+            if (parser->error) { vus_ast_node_free(ms); return NULL; }
+
+            /* 用函数调用包装：睡眠(ms) -> 调用 vus_thread_sleep */
+            /* 实际上，使用函数调用并将结果丢弃 */
+            VusAstList *args = vus_ast_list_new();
+            vus_ast_list_push(args, ms);
+            return (VusAstNode*)vus_ast_call_new("睡眠", args, NULL, kw_line, kw_col);
+        }
+
         default:
             parser_set_error(parser, "意外的 Token: %s（第 %d 行第 %d 列）",
                              vus_token_type_name(token->type), token->line, token->column);
@@ -2074,6 +2178,54 @@ static void vus_ast_print_node(VusAstNode *node, int indent) {
             print_indent(indent);
             printf("Access: %s%s\n", ac->member, ac->is_optional ? " (可选)" : "");
             vus_ast_print_node(ac->object, indent + 1);
+            break;
+        }
+
+        case VUS_AST_THREAD_CREATE: {
+            VusAstThreadCreate *tc = (VusAstThreadCreate*)node;
+            print_indent(indent);
+            printf("ThreadCreate\n");
+            print_indent(indent + 1);
+            printf("Func:\n");
+            vus_ast_print_node(tc->func, indent + 2);
+            print_indent(indent + 1);
+            printf("Arg:\n");
+            vus_ast_print_node(tc->arg, indent + 2);
+            break;
+        }
+
+        case VUS_AST_THREAD_JOIN: {
+            VusAstThreadJoin *tj = (VusAstThreadJoin*)node;
+            print_indent(indent);
+            printf("ThreadJoin\n");
+            vus_ast_print_node(tj->thread, indent + 1);
+            break;
+        }
+
+        case VUS_AST_CORO_CREATE: {
+            VusAstCoroCreate *cc = (VusAstCoroCreate*)node;
+            print_indent(indent);
+            printf("CoroCreate\n");
+            print_indent(indent + 1);
+            printf("Func:\n");
+            vus_ast_print_node(cc->func, indent + 2);
+            print_indent(indent + 1);
+            printf("Arg:\n");
+            vus_ast_print_node(cc->arg, indent + 2);
+            break;
+        }
+
+        case VUS_AST_CORO_RESUME: {
+            VusAstCoroResume *cr = (VusAstCoroResume*)node;
+            print_indent(indent);
+            printf("CoroResume\n");
+            vus_ast_print_node(cr->coro, indent + 1);
+            break;
+        }
+
+        case VUS_AST_CORO_YIELD: {
+            print_indent(indent);
+            printf("CoroYield\n");
             break;
         }
 

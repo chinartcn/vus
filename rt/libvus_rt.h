@@ -138,6 +138,13 @@ VusThread* vus_thread_create(void* (*func)(void*), void* arg);
 void* vus_thread_join(VusThread* thread);
 void vus_thread_detach(VusThread* thread);
 
+/* 线程/协程句柄接口（返回 VusString* 句柄，避免指针类型转换问题） */
+#define VUS_MAX_HANDLES 64
+VusString* vus_thread_create_handle(void* (*func)(void*), void* arg);
+void* vus_thread_join_handle(VusString* handle);
+VusString* vus_coro_create_handle(void (*func)(void*), void* arg);
+void vus_coro_resume_handle(VusString* handle);
+
 // ============ 异步 / 协程支持 ============
 // 使用 ucontext 实现轻量级协程
 typedef struct VusCoroutine VusCoroutine;
@@ -146,5 +153,40 @@ VusCoroutine* vus_coro_create(void (*func)(void*), void* arg);
 void vus_coro_resume(VusCoroutine* coro);
 void vus_coro_yield(void);
 int vus_coro_is_done(VusCoroutine* coro);
+
+// ============ 插件运行时函数（VusString* 接口） ============
+
+/* TUI（使用 ANSI 转义码） */
+VusString* vus_plugin_tui_clear(VusString* dummy);
+VusString* vus_plugin_tui_set_color(VusString* fg, VusString* bg);
+VusString* vus_plugin_tui_locate(VusString* row, VusString* col);
+VusString* vus_plugin_tui_progress(VusString* current, VusString* total, VusString* width);
+VusString* vus_plugin_tui_reset(VusString* dummy);
+
+/* 网络（基于 libcurl） */
+VusString* vus_plugin_http_get(VusString* url);
+VusString* vus_plugin_http_post(VusString* url, VusString* data);
+VusString* vus_plugin_http_download(VusString* url, VusString* filepath);
+
+/* 文件操作 */
+VusString* vus_plugin_file_read(VusString* path);
+VusString* vus_plugin_file_write(VusString* path, VusString* content);
+VusString* vus_plugin_file_append(VusString* path, VusString* content);
+VusString* vus_plugin_file_exists(VusString* path);
+VusString* vus_plugin_file_delete(VusString* path);
+VusString* vus_plugin_file_list(VusString* path);
+
+/* 日期时间 */
+VusString* vus_plugin_date_now(VusString* dummy);
+VusString* vus_plugin_date_format(VusString* fmt);
+VusString* vus_plugin_date_parse(VusString* str, VusString* fmt);
+VusString* vus_plugin_date_timestamp(VusString* dummy);
+VusString* vus_plugin_date_from_timestamp(VusString* ts);
+VusString* vus_plugin_date_year(VusString* dummy);
+VusString* vus_plugin_date_month(VusString* dummy);
+VusString* vus_plugin_date_day(VusString* dummy);
+VusString* vus_plugin_date_hour(VusString* dummy);
+VusString* vus_plugin_date_minute(VusString* dummy);
+VusString* vus_plugin_date_second(VusString* dummy);
 
 #endif // VUS_RT_H

@@ -157,27 +157,42 @@ static const char *gen_java_wrapper(const char *pkg_name) {
 
 /* 生成 C JNI 桥接代码 */
 static const char *gen_jni_bridge(const char *pkg_name) {
-    static char buf[4096];
-    char cls_path[512];
-    /* 将 com.example.app 转为 com/example/app */
+    static char buf[8192];
+    /* 生成 JNI 函数名：将 com.example.app 转为 com_example_app */
+    char jni_cls[512];
+    int j = 0;
     for (int i = 0; pkg_name[i]; i++) {
-        cls_path[i] = (pkg_name[i] == '.') ? '/' : pkg_name[i];
-        cls_path[i + 1] = '\0';
+        jni_cls[j++] = (pkg_name[i] == '.') ? '_' : pkg_name[i];
     }
+    jni_cls[j] = '\0';
     snprintf(buf, sizeof(buf),
         "#include <jni.h>\n"
+        "#include <stdio.h>\n"
+        "#include <stdlib.h>\n"
         "#include <string.h>\n\n"
+        "/* libvus_rt 头文件 */\n"
+        "#include \"libvus_rt.h\"\n\n"
         "/* VUS 编译后的主函数声明 */\n"
-        "extern int main(void);\n\n"
+        "extern int vus_main(void);\n\n"
         "JNIEXPORT jstring JNICALL\n"
         "Java_%s_MainActivity_runVus(JNIEnv *env, jobject thiz) {\n"
-        "    /* 重定向 stdout 到字符串缓冲区 */\n"
-        "    char buf[4096] = {0};\n"
-        "    /* 调用 VUS 生成的 main 函数 */\n"
-        "    main();\n"
-        "    return (*env)->NewStringUTF(env, buf);\n"
+        "    (void)thiz;\n"
+        "    /* 使用内存缓冲区捕获 stdout 输出 */\n"
+        "    char vus_cap_buf[65536] = {0};\n"
+        "    FILE* vus_cap = fmemopen(vus_cap_buf, sizeof(vus_cap_buf) - 1, \"w\");\n"
+        "    if (vus_cap) {\n"
+        "        FILE* vus_old = stdout;\n"
+        "        stdout = vus_cap;\n"
+        "        vus_main();\n"
+        "        fflush(vus_cap);\n"
+        "        fclose(vus_cap);\n"
+        "        stdout = vus_old;\n"
+        "    } else {\n"
+        "        vus_main();\n"
+        "    }\n"
+        "    return (*env)->NewStringUTF(env, vus_cap_buf);\n"
         "}\n",
-        cls_path);
+        jni_cls);
     return buf;
 }
 
@@ -187,9 +202,9 @@ static const char *gen_android_mk(void) {
         "LOCAL_PATH := $(call my-dir)\n"
         "include $(CLEAR_VARS)\n\n"
         "LOCAL_MODULE := vus_app\n"
-        "LOCAL_SRC_FILES := vus_app.c jni_bridge.c\n"
-        "LOCAL_LDLIBS := -llog\n"
-        "LOCAL_CFLAGS := -O2 -std=c11\n\n"
+        "LOCAL_SRC_FILES := vus_app.c libvus_rt.c jni_bridge.c\n"
+        "LOCAL_LDLIBS := -llog -lm\n"
+        "LOCAL_CFLAGS := -O2 -std=c11 -DVUS_HAVE_CURL\n\n"
         "include $(BUILD_SHARED_LIBRARY)\n";
 }
 
@@ -264,7 +279,7 @@ VusApkResult vus_compile_to_apk(const char *file, VusConfig *config,
     }
     ensure_dir(java_pkg_dir);
 
-    /* 5. 复制 VUS 生成的 C 代码到 jni/ 目录 */
+    /* 5. 复制 VUS 生成的 C 代码到 jni/ 目录，并将 main 函数重命名为 vus_main */
     char vus_c_path[1024];
     snprintf(vus_c_path, sizeof(vus_c_path), "%s/vus_app.c", jni_dir);
     {
@@ -281,13 +296,64 @@ VusApkResult vus_compile_to_apk(const char *file, VusConfig *config,
                      "无法写入: %s", vus_c_path);
             return result;
         }
-        char buf[4096];
+        char buf[8192];
         size_t n;
-        while ((n = fread(buf, 1, sizeof(buf), src)) > 0) {
-            fwrite(buf, 1, n, dst);
+        while ((n = fread(buf, 1, sizeof(buf) - 1, src)) > 0) {
+            buf[n] = '\0';
+            /* 将 int main(void) 替换为 int vus_main(void) */
+            char *p = buf;
+            char *q;
+            while ((q = strstr(p, "int main(void)")) != NULL) {
+                fwrite(p, 1, q - p, dst);
+                fputs("int vus_main(void)", dst);
+                p = q + 14;
+            }
+            /* 也处理 int main(int argc, char** argv) 的情况 */
+            while ((q = strstr(p, "int main(int argc")) != NULL) {
+                fwrite(p, 1, q - p, dst);
+                fputs("int vus_main(int argc", dst);
+                p = q + 14;
+            }
+            fwrite(p, 1, strlen(p), dst);
         }
         fclose(src);
         fclose(dst);
+    }
+
+    /* 5a. 复制 libvus_rt.h 和 libvus_rt.c 到 jni/ 目录 */
+    {
+        char rt_h_src[1024], rt_c_src[1024];
+        char rt_h_dst[1024], rt_c_dst[1024];
+        snprintf(rt_h_src, sizeof(rt_h_src), "%s/libvus_rt.h", config->rt_dir);
+        snprintf(rt_c_src, sizeof(rt_c_src), "%s/libvus_rt.c", config->rt_dir);
+        snprintf(rt_h_dst, sizeof(rt_h_dst), "%s/libvus_rt.h", jni_dir);
+        snprintf(rt_c_dst, sizeof(rt_c_dst), "%s/libvus_rt.c", jni_dir);
+        /* 复制 libvus_rt.h */
+        FILE *src = fopen(rt_h_src, "r");
+        if (src) {
+            FILE *dst = fopen(rt_h_dst, "w");
+            if (dst) {
+                char copy_buf[4096];
+                size_t n;
+                while ((n = fread(copy_buf, 1, sizeof(copy_buf), src)) > 0)
+                    fwrite(copy_buf, 1, n, dst);
+                fclose(dst);
+            }
+            fclose(src);
+        }
+        /* 复制 libvus_rt.c */
+        src = fopen(rt_c_src, "r");
+        if (src) {
+            FILE *dst = fopen(rt_c_dst, "w");
+            if (dst) {
+                char copy_buf[4096];
+                size_t n;
+                while ((n = fread(copy_buf, 1, sizeof(copy_buf), src)) > 0)
+                    fwrite(copy_buf, 1, n, dst);
+                fclose(dst);
+            }
+            fclose(src);
+        }
     }
 
     /* 6. 生成 JNI 桥接代码 */
