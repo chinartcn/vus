@@ -179,8 +179,11 @@ ln -sf "$INSTALL_DIR/vus" "$TARGET_DIR/vus"
 echo "  ✅ 已创建符号链接: $TARGET_DIR/vus"
 
 # 自动将 TARGET_DIR 加入 PATH（如果尚未在 PATH 中）
+REFRESH_CMD=""
 case ":$PATH:" in
-    *":$TARGET_DIR:"*) ;;
+    *":$TARGET_DIR:"*)
+        echo "  ✅ $TARGET_DIR 已在 PATH 中"
+        ;;
     *)
         # 检测当前 shell 并写入对应的配置文件
         LINE="export PATH=\"\$HOME/.local/bin:\$PATH\""
@@ -216,8 +219,6 @@ case ":$PATH:" in
             grep -qxF "export PATH=\"\$HOME/.local/bin:\$PATH\"" "$HOME/.profile" 2>/dev/null || \
                 echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.profile"
         fi
-        echo "  ⚠️  请执行以下命令刷新 PATH，或重新打开终端："
-        echo "     $REFRESH_CMD"
         ;;
 esac
 
@@ -227,7 +228,14 @@ echo "验证安装..."
 if "$INSTALL_DIR/vus" --help >/dev/null 2>&1; then
     echo "  ✅ VUS 安装成功！"
     echo ""
-    echo "快速开始（执行上方刷新命令后）："
+    if [ -n "$REFRESH_CMD" ]; then
+        echo "  ⚠️  请执行以下命令刷新 PATH，或重新打开终端："
+        echo "     $REFRESH_CMD"
+        echo ""
+        echo "快速开始（执行上方刷新命令后）："
+    else
+        echo "快速开始："
+    fi
     echo "  vus init               # 初始化项目"
     echo "  vus run main.vus       # 编译并运行"
     echo "  vus build --c-only     # 仅编译为 C 代码"
@@ -242,7 +250,7 @@ fi
 
 # 一键测试（仅在交互式终端中提示）
 echo ""
-if [ -t 0 ]; then
+if [ -e /dev/tty ] 2>/dev/null; then
     echo "═══════════════════════════════════════"
     echo "  是否运行一键功能测试？"
     echo "  这将执行所有测试用例验证编译器功能"
@@ -250,7 +258,7 @@ if [ -t 0 ]; then
     echo "═══════════════════════════════════════"
     echo ""
     printf "运行测试? [y/N] "
-    read -r RUN_TESTS
+    read -r RUN_TESTS </dev/tty 2>/dev/null || RUN_TESTS="no"
     case "$RUN_TESTS" in
         y|Y|yes|YES)
             ;;
