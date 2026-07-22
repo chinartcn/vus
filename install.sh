@@ -240,22 +240,31 @@ else
     exit 1
 fi
 
-# 一键测试
+# 一键测试（仅在交互式终端中提示）
 echo ""
-echo "═══════════════════════════════════════"
-echo "  是否运行一键功能测试？"
-echo "  这将执行所有测试用例验证编译器功能"
-echo "  需要约 30-60 秒"
-echo "═══════════════════════════════════════"
-echo ""
-printf "运行测试? [Y/n] "
-read -r RUN_TESTS </dev/tty 2>/dev/null || RUN_TESTS="y"
-case "$RUN_TESTS" in
-    n|N|no|NO)
-        echo "跳过测试。"
-        echo "可以随时手动运行: $INSTALL_DIR/vus test"
-        ;;
-    *)
+if [ -t 0 ]; then
+    echo "═══════════════════════════════════════"
+    echo "  是否运行一键功能测试？"
+    echo "  这将执行所有测试用例验证编译器功能"
+    echo "  需要约 30-60 秒"
+    echo "═══════════════════════════════════════"
+    echo ""
+    printf "运行测试? [y/N] "
+    read -r RUN_TESTS
+    case "$RUN_TESTS" in
+        y|Y|yes|YES)
+            ;;
+        *)
+            echo "跳过测试。"
+            echo "可以随时手动运行: $INSTALL_DIR/vus test"
+            RUN_TESTS="no"
+            ;;
+    esac
+else
+    RUN_TESTS="no"
+fi
+
+if [ "$RUN_TESTS" != "no" ]; then
         echo ""
         echo "==== 运行 VUS 功能测试 ===="
         echo ""
@@ -607,5 +616,5 @@ case "$RUN_TESTS" in
             echo "  ⚠️  部分测试失败，请检查输出"
         fi
         echo ""
-        ;;
-esac
+    fi
+    echo ""
