@@ -32,7 +32,7 @@ build_target() {
     ar rcs "$build_dir/libvus_rt.a" "$build_dir/libvus_rt.o"
     
     # 编译编译器
-    for src in main token lexer parser generator config ast vus_abi vus_plugin vus_lang vus_vusx; do
+    for src in main token lexer parser generator config ast vus_abi vus_plugin vus_lang vus_vusx vus_apk; do
         $cc -Wall -Wextra -g -O2 -std=c11 -Wno-format-truncation -I"$SCRIPT_DIR/src" -c -o "$build_dir/${src}.o" "$SCRIPT_DIR/src/${src}.c"
     done
     
@@ -82,6 +82,7 @@ INSTALL_EOF
     
     # 生成校验和
     sha256sum "${pkg_name}.tar.gz" > "${pkg_name}.tar.gz.sha256"
+    md5sum "${pkg_name}.tar.gz" | awk '{print $1}' > "${pkg_name}.tar.gz.md5"
     
     echo "  ✅ ${pkg_name}.tar.gz"
     echo ""
@@ -109,8 +110,11 @@ fi
 
 # 生成总校验和
 cd "$RELEASE_DIR"
-echo "==== 校验和 ===="
-cat *.sha256 2>/dev/null || echo "(无校验和文件)"
+echo "==== MD5 校验和 ===="
+cat *.md5 2>/dev/null || echo "(无 MD5 校验和文件)"
+echo ""
+echo "==== SHA256 校验和 ===="
+cat *.sha256 2>/dev/null || echo "(无 SHA256 校验和文件)"
 echo ""
 echo "==== 构建完成 ===="
 echo "发布目录: $RELEASE_DIR"

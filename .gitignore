@@ -4,6 +4,8 @@
 # 构建产物
 构建/
 build/
+build-*/
+release/
 /vus
 *.o
 *.a

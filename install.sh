@@ -84,6 +84,28 @@ if [ -n "$PKG_ARCH" ] && [ -n "$DOWNLOAD_CMD" ]; then
     if $DOWNLOAD_CMD "$PKG_URL" > "$TMP_DIR/$PKG_NAME" 2>&1 && [ -s "$TMP_DIR/$PKG_NAME" ]; then
         echo "  ✅ 预编译包下载成功"
         echo ""
+
+        # MD5 校验
+        PKG_MD5_URL="${PKG_URL}.md5"
+        EXPECTED_MD5=""
+        if $DOWNLOAD_CMD "$PKG_MD5_URL" > "$TMP_DIR/$PKG_NAME.md5" 2>&1 && [ -s "$TMP_DIR/$PKG_NAME.md5" ]; then
+            EXPECTED_MD5=$(cat "$TMP_DIR/$PKG_NAME.md5" | tr -d ' \t\n\r')
+            COMPUTED_MD5=$(md5sum "$TMP_DIR/$PKG_NAME" 2>&1 | awk '{print $1}')
+            if [ "$COMPUTED_MD5" = "$EXPECTED_MD5" ]; then
+                echo "  ✅ MD5 校验通过: $COMPUTED_MD5"
+            else
+                echo "  ❌ MD5 校验失败:"
+                echo "     期望: $EXPECTED_MD5"
+                echo "     实际: $COMPUTED_MD5"
+                echo "     文件可能已损坏或被篡改，切换到源码编译"
+                rm -rf "$TMP_DIR"
+                INSTALL_FROM_SOURCE=1
+            fi
+        else
+            echo "  ⚠️  未找到 MD5 校验文件，跳过校验"
+        fi
+
+        if [ "$INSTALL_FROM_SOURCE" -eq 0 ]; then
         echo "正在安装..."
 
         mkdir -p "$INSTALL_DIR"
@@ -98,6 +120,7 @@ if [ -n "$PKG_ARCH" ] && [ -n "$DOWNLOAD_CMD" ]; then
         rm -rf "$TMP_DIR"
 
         echo "  ✅ 预编译包安装完成"
+        fi
     else
         rm -rf "$TMP_DIR"
         echo "  ⚠️  预编译包下载失败，切换到源码编译"
