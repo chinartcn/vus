@@ -54,6 +54,9 @@ typedef enum {
     VUS_AST_CORO_CREATE,
     VUS_AST_CORO_RESUME,
     VUS_AST_CORO_YIELD,
+
+    /* 下标访问 */
+    VUS_AST_SUBSCRIPT,
 } VusAstNodeType;
 
 /* ============ 前向声明 ============ */
@@ -192,6 +195,7 @@ typedef struct {
     char          *target;
     char          *type_annotation;  /* 可为 NULL */
     VusAstNode    *value;
+    int            is_local;   /* 1=函数内局部变量, 0=全局变量 */
 } VusAstAssign;
 
 /* ExprStmt — 表达式语句 */
@@ -364,6 +368,17 @@ typedef struct {
     int            column;
 } VusAstCoroYield;
 
+/* ============ 下标访问节点类型 ============ */
+
+/* Subscript — 下标访问，如 list[0] 或 dict["key"] */
+typedef struct {
+    VusAstNodeType type;   /* VUS_AST_SUBSCRIPT */
+    int            line;
+    int            column;
+    VusAstNode    *object;  /* 下标左侧表达式 */
+    VusAstNode    *index;   /* 下标索引表达式 */
+} VusAstSubscript;
+
 /* ============ AST 节点创建函数 ============ */
 
 VusAstProgram    *vus_ast_program_new(VusAstList *stmts);
@@ -377,6 +392,7 @@ VusAstWhile      *vus_ast_while_new(VusAstNode *cond, VusAstList *body, int line
 VusAstTry        *vus_ast_try_new(VusAstList *try_body, int line, int col);
 VusAstReturn     *vus_ast_return_new(VusAstNode *val, int line, int col);
 VusAstAssign     *vus_ast_assign_new(const char *target, const char *type_ann, VusAstNode *val, int line, int col);
+VusAstAssign     *vus_ast_assign_local_new(const char *target, const char *type_ann, VusAstNode *val, int line, int col);
 VusAstExprStmt   *vus_ast_expr_stmt_new(VusAstNode *expr, int line, int col);
 VusAstBinaryOp   *vus_ast_binary_new(const char *op, VusAstNode *left, VusAstNode *right, int line, int col);
 VusAstUnaryOp    *vus_ast_unary_new(const char *op, VusAstNode *operand, int line, int col);
@@ -399,6 +415,9 @@ VusAstThreadJoin   *vus_ast_thread_join_new(VusAstNode *thread, int line, int co
 VusAstCoroCreate   *vus_ast_coro_create_new(VusAstNode *func, VusAstNode *arg, int line, int col);
 VusAstCoroResume   *vus_ast_coro_resume_new(VusAstNode *coro, int line, int col);
 VusAstCoroYield    *vus_ast_coro_yield_new(int line, int col);
+
+/* 下标访问节点创建函数 */
+VusAstSubscript   *vus_ast_subscript_new(VusAstNode *obj, VusAstNode *idx, int line, int col);
 
 /* 释放整个 AST 树 */
 void vus_ast_node_free(VusAstNode *node);

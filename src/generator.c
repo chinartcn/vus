@@ -470,6 +470,12 @@ static char *gen_expr_unary(GenBuf *buf, VusAstUnaryOp *un) {
         snprintf(result, sz,
             "vus_string_new((strcmp(vus_string_cstr(%s), \"true\") == 0) ? \"false\" : \"true\")",
             operand);
+    } else if (strcmp(un->op, "~") == 0) {
+        size_t sz = strlen(operand) + 128;
+        result = (char *)malloc(sz);
+        snprintf(result, sz,
+            "vus_to_string(~vus_to_int(%s, &_err))",
+            operand);
     } else if (strcmp(un->op, "-") == 0) {
         size_t sz = strlen(operand) + 128;
         result = (char *)malloc(sz);
@@ -916,6 +922,19 @@ static char *gen_expr(GenBuf *buf, VusAstNode *node) {
         case VUS_AST_CORO_YIELD: {
             return strdup("(vus_coro_yield(), NULL)");
         }
+        case VUS_AST_SUBSCRIPT: {
+            VusAstSubscript *sub = (VusAstSubscript *)node;
+            char *obj = gen_expr(buf, sub->object);
+            char *idx = gen_expr(buf, sub->index);
+            /* 生成 vus_list_get / vus_list_set 调用 */
+            char result[4096];
+            snprintf(result, sizeof(result),
+                "vus_list_get((VusList*)(%s), vus_to_int(%s, &_err))",
+                obj, idx);
+            free(obj);
+            free(idx);
+            return strdup(result);
+        }
         default:
             return strdup("NULL");
     }
@@ -931,11 +950,19 @@ static void gen_stmt_assign(GenBuf *buf, VusAstAssign *assign) {
 
     char *val = gen_expr(buf, assign->value);
 
-    /* 使用临时变量避免重复计算（如 x = x + 1 时 vus_x 可能被释放） */
-    gen_emit_linef(buf, "{ VusString* _tmp = %s;", val);
-    gen_emit_linef(buf, "vus_ref(_tmp);");
-    gen_emit_linef(buf, "vus_unref(vus_%s);", san);
-    gen_emit_linef(buf, "vus_%s = _tmp; }", san);
+    if (assign->is_local) {
+        /* 局部变量：直接赋值，变量已在函数顶部声明 */
+        gen_emit_linef(buf, "{ VusString* _tmp = %s;", val);
+        gen_emit_linef(buf, "vus_ref(_tmp);");
+        gen_emit_linef(buf, "vus_unref(vus_%s);", san);
+        gen_emit_linef(buf, "vus_%s = _tmp; }", san);
+    } else {
+        /* 全局变量 */
+        gen_emit_linef(buf, "{ VusString* _tmp = %s;", val);
+        gen_emit_linef(buf, "vus_ref(_tmp);");
+        gen_emit_linef(buf, "vus_unref(vus_%s);", san);
+        gen_emit_linef(buf, "vus_%s = _tmp; }", san);
+    }
 
     free(val);
 }
@@ -1109,37 +1136,79 @@ static void gen_stmt_global_decl(GenBuf *buf, VusAstGlobalDecl *gd) {
 }
 
 static void gen_stmt_try(GenBuf *buf, VusAstTry *try_stmt) {
-    /* 简单的 try-catch 实现：使用错误码链 */
+    /* try-catch 实现：使用 setjmp/longjmp 风格，保存/恢复错误状态 */
     gen_emit_line(buf, "{");
     buf->indent++;
-    gen_emit_line(buf, "VusError* _vus_err = NULL;");
+    gen_emit_line(buf, "VusError* _saved_err = _vus_err;");
+    gen_emit_line(buf, "_vus_err = NULL;");
     gen_emit_line(buf, "int _vus_caught = 0;");
 
-    /* try 块 */
+    /* try 块 — 用 do-while(0) 包裹，使 throw 能用 break 跳出 */
     gen_emit_line(buf, "/* try block */");
+    gen_emit_line(buf, "do {");
+    buf->indent++;
     if (try_stmt->try_body) {
         for (size_t i = 0; i < try_stmt->try_body->count; i++) {
             gen_statement(buf, try_stmt->try_body->items[i]);
         }
     }
+    buf->indent--;
+    gen_emit_line(buf, "} while(0);");
 
-    /* 简单的 except 块 */
+    /* except 块 */
     if (try_stmt->except_bodies && try_stmt->except_bodies->count > 0) {
-        /* 使用最后一条 except 作为兜底 */
-        VusAstList *last_body = NULL;
+        gen_emit_line(buf, "if (_vus_err && !_vus_caught) {");
+        buf->indent++;
+        /* 遍历所有 except 子句 */
         for (size_t i = 0; i < try_stmt->except_bodies->count; i++) {
-            last_body = (VusAstList *)try_stmt->except_bodies->items[i];
-        }
-        if (last_body) {
-            gen_emit_line(buf, "if (_vus_err) {");
+            VusAstIdentifier *et = (VusAstIdentifier *)try_stmt->except_types->items[i];
+            VusAstList *body = (VusAstList *)try_stmt->except_bodies->items[i];
+            if (!body) continue;
+
+            if (et && et->name && et->name[0]) {
+                /* 带类型匹配的 except */
+                if (i == 0) {
+                    gen_emit_linef(buf, "if (strcmp(_vus_err->msg, \"%s\") == 0) {", et->name);
+                } else {
+                    gen_emit_linef(buf, "} else if (strcmp(_vus_err->msg, \"%s\") == 0) {", et->name);
+                }
+            } else {
+                /* 通配 except（无类型或空类型名） */
+                if (i == 0) {
+                    gen_emit_line(buf, "{");
+                } else {
+                    gen_emit_line(buf, "} else {");
+                }
+            }
             buf->indent++;
             gen_emit_line(buf, "vus_error_print(_vus_err);");
             gen_emit_line(buf, "vus_error_free(_vus_err);");
             gen_emit_line(buf, "_vus_err = NULL;");
-            buf->indent--;
+            gen_emit_line(buf, "_vus_caught = 1;");
+            for (size_t j = 0; j < body->count; j++) {
+                gen_statement(buf, body->items[j]);
+            }
             gen_emit_line(buf, "}");
+            buf->indent--;
         }
+        buf->indent--;
+        gen_emit_line(buf, "}");
+        /* 如果所有 except 都不匹配，恢复错误 */
+        gen_emit_line(buf, "if (!_vus_caught && _vus_err) {");
+        buf->indent++;
+        gen_emit_line(buf, "/* 未捕获的异常，恢复错误状态 */");
+        gen_emit_line(buf, "vus_error_push(&_saved_err, _vus_err);");
+        gen_emit_line(buf, "_vus_err = _saved_err;");
+        buf->indent--;
+        gen_emit_line(buf, "}");
     }
+
+    /* 恢复原始错误状态（如果没有新的错误） */
+    gen_emit_line(buf, "if (!_vus_err) {");
+    buf->indent++;
+    gen_emit_line(buf, "_vus_err = _saved_err;");
+    buf->indent--;
+    gen_emit_line(buf, "}");
 
     buf->indent--;
     gen_emit_line(buf, "}");
@@ -1149,6 +1218,7 @@ static void gen_stmt_throw(GenBuf *buf, VusAstThrow *thr) {
     char *val = gen_expr(buf, thr->value);
     gen_emit_linef(buf, "_vus_err = vus_error_new(1, vus_string_cstr(%s), __LINE__, __func__);", val);
     gen_emit_linef(buf, "vus_unref(%s);", val);
+    gen_emit_line(buf, "break;");
     free(val);
 }
 
@@ -1201,6 +1271,75 @@ static void gen_statement(GenBuf *buf, VusAstNode *node) {
 }
 
 /* ============ 函数定义生成 ============ */
+
+/* 递归扫描 AST 节点，收集局部变量名 */
+static void gen_collect_locals(VusAstNode *node, VusAstList *locals) {
+    if (!node) return;
+    if (node->type == VUS_AST_ASSIGN) {
+        VusAstAssign *assign = (VusAstAssign *)node;
+        if (assign->is_local) {
+            /* 检查是否已收集 */
+            for (size_t i = 0; i < locals->count; i++) {
+                VusAstIdentifier *id = (VusAstIdentifier *)locals->items[i];
+                if (strcmp(id->name, assign->target) == 0) return;
+            }
+            VusAstIdentifier *id = vus_ast_ident_new(assign->target, 0, 0);
+            vus_ast_list_push(locals, (VusAstNode *)id);
+        }
+    } else if (node->type == VUS_AST_IF) {
+        VusAstIf *ifn = (VusAstIf *)node;
+        if (ifn->then_body) {
+            for (size_t i = 0; i < ifn->then_body->count; i++)
+                gen_collect_locals(ifn->then_body->items[i], locals);
+        }
+        if (ifn->elif_bodies) {
+            for (size_t i = 0; i < ifn->elif_bodies->count; i++) {
+                VusAstList *body = (VusAstList *)ifn->elif_bodies->items[i];
+                if (body) {
+                    for (size_t j = 0; j < body->count; j++)
+                        gen_collect_locals(body->items[j], locals);
+                }
+            }
+        }
+        if (ifn->else_body) {
+            for (size_t i = 0; i < ifn->else_body->count; i++)
+                gen_collect_locals(ifn->else_body->items[i], locals);
+        }
+    } else if (node->type == VUS_AST_FOR_RANGE) {
+        VusAstForRange *fr = (VusAstForRange *)node;
+        if (fr->body) {
+            for (size_t i = 0; i < fr->body->count; i++)
+                gen_collect_locals(fr->body->items[i], locals);
+        }
+    } else if (node->type == VUS_AST_FOR_EACH) {
+        VusAstForEach *fe = (VusAstForEach *)node;
+        if (fe->body) {
+            for (size_t i = 0; i < fe->body->count; i++)
+                gen_collect_locals(fe->body->items[i], locals);
+        }
+    } else if (node->type == VUS_AST_WHILE) {
+        VusAstWhile *wl = (VusAstWhile *)node;
+        if (wl->body) {
+            for (size_t i = 0; i < wl->body->count; i++)
+                gen_collect_locals(wl->body->items[i], locals);
+        }
+    } else if (node->type == VUS_AST_TRY) {
+        VusAstTry *tryn = (VusAstTry *)node;
+        if (tryn->try_body) {
+            for (size_t i = 0; i < tryn->try_body->count; i++)
+                gen_collect_locals(tryn->try_body->items[i], locals);
+        }
+        if (tryn->except_bodies) {
+            for (size_t i = 0; i < tryn->except_bodies->count; i++) {
+                VusAstList *body = (VusAstList *)tryn->except_bodies->items[i];
+                if (body) {
+                    for (size_t j = 0; j < body->count; j++)
+                        gen_collect_locals(body->items[j], locals);
+                }
+            }
+        }
+    }
+}
 
 static void gen_function(GenBuf *buf, VusAstFunctionDef *func) {
     char san[256];
@@ -1255,6 +1394,22 @@ static void gen_function(GenBuf *buf, VusAstFunctionDef *func) {
     /* 返回值变量 */
     gen_emit_line(buf, "VusString* _vus_result = NULL;");
     gen_emit_line(buf, "int _err = 0;");
+    gen_emit_line(buf, "VusError* _vus_err = NULL;");
+
+    /* 扫描函数体中的局部变量，在函数顶部声明 */
+    if (func->body) {
+        VusAstList *locals = vus_ast_list_new();
+        for (size_t i = 0; i < func->body->count; i++) {
+            gen_collect_locals(func->body->items[i], locals);
+        }
+        for (size_t i = 0; i < locals->count; i++) {
+            VusAstIdentifier *id = (VusAstIdentifier *)locals->items[i];
+            char lsan[256];
+            gen_sanitize_name(id->name, lsan, sizeof(lsan));
+            gen_emit_linef(buf, "VusString* vus_%s = NULL;", lsan);
+        }
+        vus_ast_list_free(locals);
+    }
 
     /* 栈追踪：记录函数调用 */
     gen_emit_linef(buf, "vus_stack_push(\"%s\");", func->name);

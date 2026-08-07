@@ -1042,7 +1042,9 @@ int main(int argc, char *argv[]) {
 
             /* 清理 */
             snprintf(cmd, sizeof(cmd), "rm -rf \"%s\" \"%s\"", extract_dir, tmp_path);
-            system(cmd);
+            if (system(cmd) != 0) {
+                /* 忽略清理失败 */
+            }
         }
 
         return 0;

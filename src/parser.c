@@ -76,6 +76,11 @@ static VusAstNode *parse_multiplicative(VusParser *parser);
 static VusAstNode *parse_unary(VusParser *parser);
 static VusAstNode *parse_primary(VusParser *parser);
 static VusAstList *parse_call_args(VusParser *parser);
+/* 位运算 */
+static VusAstNode *parse_bitwise_or(VusParser *parser);
+static VusAstNode *parse_bitwise_xor(VusParser *parser);
+static VusAstNode *parse_bitwise_and(VusParser *parser);
+static VusAstNode *parse_shift(VusParser *parser);
 
 /* ==================================================================
  * 辅助函数实现
@@ -330,11 +335,15 @@ static VusAstNode *parse_function_def(VusParser *parser) {
     VusToken *indent = parser_expect(parser, VUS_TOKEN_INDENT);
     if (!indent) { free(name); vus_ast_list_free(type_params); vus_ast_list_free(params); return NULL; }
 
+    parser->in_function = 1;  /* 进入函数体作用域 */
+
     body = parse_statements(parser);
     if (parser->error) { free(name); vus_ast_list_free(type_params); vus_ast_list_free(params); vus_ast_list_free(body); return NULL; }
 
     parser_expect(parser, VUS_TOKEN_DEDENT);
     if (parser->error) { free(name); vus_ast_list_free(type_params); vus_ast_list_free(params); vus_ast_list_free(body); return NULL; }
+
+    parser->in_function = 0;  /* 退出函数体作用域 */
 
     VusAstFunctionDef *node = vus_ast_func_def_new(name, type_params, params, body, line, col);
     free(name);
@@ -1073,7 +1082,12 @@ static VusAstNode *parse_assign_or_expr(VusParser *parser) {
             VusAstNode *value = parse_expr(parser);
             if (!value) { free(target); free(type_ann); return NULL; }
 
-            VusAstAssign *node = vus_ast_assign_new(target, type_ann, value, line, col);
+            VusAstAssign *node;
+            if (parser->in_function) {
+                node = vus_ast_assign_local_new(target, type_ann, value, line, col);
+            } else {
+                node = vus_ast_assign_new(target, type_ann, value, line, col);
+            }
             free(target);
             free(type_ann);
             return (VusAstNode*)node;
@@ -1107,14 +1121,8 @@ static VusAstNode *parse_logical_or(VusParser *parser) {
         if (!token) break;
 
         const char *op = NULL;
-        if (token->type == VUS_TOKEN_OR || token->type == VUS_TOKEN_CN_OR ||
-            token->type == VUS_TOKEN_BIT_OR) {
-            if (token->type == VUS_TOKEN_BIT_OR) {
-                /* 位或 | 不在 logical_or 中处理，但保留 */
-            }
-            if (token->type == VUS_TOKEN_OR || token->type == VUS_TOKEN_CN_OR) {
-                op = "or";
-            }
+        if (token->type == VUS_TOKEN_OR || token->type == VUS_TOKEN_CN_OR) {
+            op = "or";
         }
 
         if (!op) break;
@@ -1131,10 +1139,10 @@ static VusAstNode *parse_logical_or(VusParser *parser) {
 }
 
 /*
- * logical_and  → comparison (("and"|"和") comparison)*
+ * logical_and  → bitwise_or (("and"|"和") bitwise_or)*
  */
 static VusAstNode *parse_logical_and(VusParser *parser) {
-    VusAstNode *left = parse_comparison(parser);
+    VusAstNode *left = parse_bitwise_or(parser);
     if (!left) return NULL;
 
     while (1) {
@@ -1149,7 +1157,7 @@ static VusAstNode *parse_logical_and(VusParser *parser) {
         if (!op) break;
 
         parser_advance(parser);
-        VusAstNode *right = parse_comparison(parser);
+        VusAstNode *right = parse_bitwise_or(parser);
         if (!right) return NULL;
 
         VusAstBinaryOp *node = vus_ast_binary_new(op, left, right, token->line, token->column);
@@ -1160,10 +1168,79 @@ static VusAstNode *parse_logical_and(VusParser *parser) {
 }
 
 /*
- * comparison  → concat (("=="|"!="|"<"|">"|"<="|">=") concat)*
+ * bitwise_or  → bitwise_xor (("|") bitwise_xor)*
+ */
+static VusAstNode *parse_bitwise_or(VusParser *parser) {
+    VusAstNode *left = parse_bitwise_xor(parser);
+    if (!left) return NULL;
+
+    while (1) {
+        VusToken *token = parser_peek(parser);
+        if (!token) break;
+        if (token->type != VUS_TOKEN_BIT_OR) break;
+
+        parser_advance(parser);
+        VusAstNode *right = parse_bitwise_xor(parser);
+        if (!right) return NULL;
+
+        VusAstBinaryOp *node = vus_ast_binary_new("|", left, right, token->line, token->column);
+        left = (VusAstNode*)node;
+    }
+
+    return left;
+}
+
+/*
+ * bitwise_xor  → bitwise_and (("^") bitwise_and)*
+ */
+static VusAstNode *parse_bitwise_xor(VusParser *parser) {
+    VusAstNode *left = parse_bitwise_and(parser);
+    if (!left) return NULL;
+
+    while (1) {
+        VusToken *token = parser_peek(parser);
+        if (!token) break;
+        if (token->type != VUS_TOKEN_BIT_XOR) break;
+
+        parser_advance(parser);
+        VusAstNode *right = parse_bitwise_and(parser);
+        if (!right) return NULL;
+
+        VusAstBinaryOp *node = vus_ast_binary_new("^", left, right, token->line, token->column);
+        left = (VusAstNode*)node;
+    }
+
+    return left;
+}
+
+/*
+ * bitwise_and  → comparison (("&") comparison)*
+ */
+static VusAstNode *parse_bitwise_and(VusParser *parser) {
+    VusAstNode *left = parse_comparison(parser);
+    if (!left) return NULL;
+
+    while (1) {
+        VusToken *token = parser_peek(parser);
+        if (!token) break;
+        if (token->type != VUS_TOKEN_BIT_AND) break;
+
+        parser_advance(parser);
+        VusAstNode *right = parse_comparison(parser);
+        if (!right) return NULL;
+
+        VusAstBinaryOp *node = vus_ast_binary_new("&", left, right, token->line, token->column);
+        left = (VusAstNode*)node;
+    }
+
+    return left;
+}
+
+/*
+ * comparison  → shift (("=="|"!="|"<"|">"|"<="|">=") shift)*
  */
 static VusAstNode *parse_comparison(VusParser *parser) {
-    VusAstNode *left = parse_concat(parser);
+    VusAstNode *left = parse_shift(parser);
     if (!left) return NULL;
 
     while (1) {
@@ -1179,6 +1256,37 @@ static VusAstNode *parse_comparison(VusParser *parser) {
             case VUS_TOKEN_LE:  op = "<="; break;
             case VUS_TOKEN_GE:  op = ">="; break;
             default: break;
+        }
+
+        if (!op) break;
+
+        parser_advance(parser);
+        VusAstNode *right = parse_shift(parser);
+        if (!right) return NULL;
+
+        VusAstBinaryOp *node = vus_ast_binary_new(op, left, right, token->line, token->column);
+        left = (VusAstNode*)node;
+    }
+
+    return left;
+}
+
+/*
+ * shift  → concat (("<<"|">>") concat)*
+ */
+static VusAstNode *parse_shift(VusParser *parser) {
+    VusAstNode *left = parse_concat(parser);
+    if (!left) return NULL;
+
+    while (1) {
+        VusToken *token = parser_peek(parser);
+        if (!token) break;
+
+        const char *op = NULL;
+        if (token->type == VUS_TOKEN_SHL) {
+            op = "<<";
+        } else if (token->type == VUS_TOKEN_SHR) {
+            op = ">>";
         }
 
         if (!op) break;
@@ -1280,7 +1388,7 @@ static VusAstNode *parse_multiplicative(VusParser *parser) {
 }
 
 /*
- * unary → ("-"|"not"|"非"|"!") unary | primary
+ * unary → ("-"|"not"|"非"|"!"|"~") unary | primary
  */
 static VusAstNode *parse_unary(VusParser *parser) {
     VusToken *token = parser_peek(parser);
@@ -1288,9 +1396,10 @@ static VusAstNode *parse_unary(VusParser *parser) {
 
     const char *op = NULL;
     switch (token->type) {
-        case VUS_TOKEN_MINUS:    op = "-";   break;
-        case VUS_TOKEN_NOT:      op = "not"; break;
-        case VUS_TOKEN_CN_NOT:   op = "not"; break;
+        case VUS_TOKEN_MINUS:    op = "-";    break;
+        case VUS_TOKEN_NOT:      op = "not";  break;
+        case VUS_TOKEN_CN_NOT:   op = "not";  break;
+        case VUS_TOKEN_BIT_NOT:  op = "~";    break;
         default: break;
     }
 
@@ -1413,6 +1522,17 @@ static VusAstNode *parse_primary(VusParser *parser) {
                     VusAstAccess *access = vus_ast_access_new(expr, member, line, col);
                     expr = (VusAstNode*)access;
                 }
+            }
+
+            /* 下标访问链（方括号） */
+            while (parser_peek(parser) && parser_peek(parser)->type == VUS_TOKEN_LBRACKET) {
+                parser_advance(parser); /* 跳过 [ */
+                VusAstNode *idx = parse_expr(parser);
+                if (!idx) return NULL;
+                parser_expect(parser, VUS_TOKEN_RBRACKET);
+                if (parser->error) return NULL;
+                VusAstSubscript *sub = vus_ast_subscript_new(expr, idx, line, col);
+                expr = (VusAstNode*)sub;
             }
 
             return expr;
@@ -1705,6 +1825,7 @@ VusParser *vus_parser_new(VusToken *tokens, size_t count) {
     parser->pos = 0;
     parser->error = 0;
     parser->error_msg[0] = '\0';
+    parser->in_function = 0;
 
     return parser;
 }

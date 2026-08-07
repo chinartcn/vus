@@ -156,6 +156,7 @@ const char *vus_token_type_name(VusTokenType type)
     case VUS_TOKEN_BIT_AND:      return "按位与";
     case VUS_TOKEN_BIT_OR:       return "按位或";
     case VUS_TOKEN_BIT_XOR:      return "按位异或";
+    case VUS_TOKEN_BIT_NOT:      return "按位取反";
     case VUS_TOKEN_SHL:          return "左移";
     case VUS_TOKEN_SHR:          return "右移";
 

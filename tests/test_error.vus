@@ -1,0 +1,10 @@
+#// 测试：异常处理 try/except/throw
+def test():
+    try:
+        throw "test_error"
+        print("no_error")
+    except:
+        print("caught")
+    print("done")
+
+test()

@@ -193,6 +193,13 @@ VusAstAssign *vus_ast_assign_new(const char *target, const char *type_ann, VusAs
     node->target = target ? strdup(target) : NULL;
     node->type_annotation = type_ann ? strdup(type_ann) : NULL;
     node->value = val;
+    node->is_local = 0;
+    return node;
+}
+
+VusAstAssign *vus_ast_assign_local_new(const char *target, const char *type_ann, VusAstNode *val, int line, int col) {
+    VusAstAssign *node = vus_ast_assign_new(target, type_ann, val, line, col);
+    if (node) node->is_local = 1;
     return node;
 }
 
@@ -407,6 +414,58 @@ VusAstCoroYield *vus_ast_coro_yield_new(int line, int col) {
     return node;
 }
 
+VusAstSubscript *vus_ast_subscript_new(VusAstNode *obj, VusAstNode *idx, int line, int col) {
+    VusAstSubscript *node = calloc(1, sizeof(VusAstSubscript));
+    if (!node) return NULL;
+    node->type = VUS_AST_SUBSCRIPT;
+    node->line = line;
+    node->column = col;
+    node->object = obj;
+    node->index = idx;
+    return node;
+}
+
+/* ==================================================================
+ * 本地导入/FromImport AST 节点结构定义
+ * 与 parser.c 中的定义保持一致，用于 vus_ast_node_free 中的释放
+ * ================================================================== */
+typedef struct {
+    VusAstNodeType type;
+    int            line;
+    int            column;
+    VusAstList    *names;
+} AstLocalImport;
+
+typedef struct {
+    VusAstNodeType type;
+    int            line;
+    int            column;
+    char          *module;
+    VusAstList    *names;
+} AstLocalFromImport;
+/* ================================================================== */
+
+static void vus_ast_node_free_import(VusAstNode *node) {
+    AstLocalImport *imp = (AstLocalImport *)node;
+    if (imp->names) {
+        for (size_t i = 0; i < imp->names->count; i++)
+            vus_ast_node_free(imp->names->items[i]);
+        free(imp->names->items);
+        free(imp->names);
+    }
+}
+
+static void vus_ast_node_free_from_import(VusAstNode *node) {
+    AstLocalFromImport *fi = (AstLocalFromImport *)node;
+    free(fi->module);
+    if (fi->names) {
+        for (size_t i = 0; i < fi->names->count; i++)
+            vus_ast_node_free(fi->names->items[i]);
+        free(fi->names->items);
+        free(fi->names);
+    }
+}
+
 /* ============ AST 节点释放 ============ */
 
 void vus_ast_node_free(VusAstNode *node) {
@@ -586,9 +645,17 @@ void vus_ast_node_free(VusAstNode *node) {
     }
     case VUS_AST_CORO_YIELD:
         break;
+    case VUS_AST_SUBSCRIPT: {
+        VusAstSubscript *n = (VusAstSubscript *)node;
+        vus_ast_node_free(n->object);
+        vus_ast_node_free(n->index);
+        break;
+    }
     case VUS_AST_IMPORT:
+        vus_ast_node_free_import(node);
+        break;
     case VUS_AST_FROM_IMPORT:
-        /* 由 parser 内部管理，直接释放节点本身 */
+        vus_ast_node_free_from_import(node);
         break;
     default:
         break;

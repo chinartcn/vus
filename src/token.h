@@ -121,6 +121,7 @@ typedef enum {
     VUS_TOKEN_BIT_AND,
     VUS_TOKEN_BIT_OR,
     VUS_TOKEN_BIT_XOR,
+    VUS_TOKEN_BIT_NOT,
     VUS_TOKEN_SHL,
     VUS_TOKEN_SHR,
 

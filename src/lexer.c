@@ -25,7 +25,6 @@
 /* ============ 静态辅助函数声明 ============ */
 
 static void     lexer_advance(VusLexer *lexer);
-static char     lexer_peek(VusLexer *lexer);
 static char     lexer_peek_next(VusLexer *lexer);
 static void     lexer_skip_whitespace(VusLexer *lexer);
 static void     lexer_skip_comment(VusLexer *lexer);
@@ -57,17 +56,6 @@ static void lexer_advance(VusLexer *lexer)
         }
         lexer->pos++;
     }
-}
-
-/*
- * 查看当前字符（不消费）。到达末尾返回 '\0'。
- */
-static char lexer_peek(VusLexer *lexer)
-{
-    if (lexer->pos < lexer->source_len) {
-        return lexer->source[lexer->pos];
-    }
-    return '\0';
 }
 
 /*
@@ -241,8 +229,6 @@ static void lexer_read_string(VusLexer *lexer)
 {
     int line = lexer->line;
     int col  = lexer->column;
-    /* start 指向开头的 " */
-    const char *start = lexer->source + lexer->pos;
 
     /* 跳过开头的 " */
     lexer_advance(lexer);
@@ -863,6 +849,11 @@ VusToken *vus_lexer_tokenize(VusLexer *lexer, size_t *out_count)
         case '^':
             lexer_advance(lexer);
             lexer_add_token(lexer, VUS_TOKEN_BIT_XOR,
+                            lexer->source + (lexer->pos - 1), 1, line, col);
+            break;
+        case '~':
+            lexer_advance(lexer);
+            lexer_add_token(lexer, VUS_TOKEN_BIT_NOT,
                             lexer->source + (lexer->pos - 1), 1, line, col);
             break;
         default:

@@ -286,9 +286,9 @@ VusError* vus_error_new(int code, const char* msg, int line, const char* func) {
     VusError* err = (VusError*)malloc(sizeof(VusError));
     if (!err) return NULL;
     err->code = code;
-    err->msg = msg;
+    err->msg = msg ? strdup(msg) : NULL;
     err->line = line;
-    err->func = func;
+    err->func = func ? strdup(func) : NULL;
     err->next = NULL;
     return err;
 }
@@ -313,6 +313,8 @@ void vus_error_print(VusError* err) {
 void vus_error_free(VusError* err) {
     while (err) {
         VusError* next = err->next;
+        free((void*)err->msg);
+        free((void*)err->func);
         free(err);
         err = next;
     }

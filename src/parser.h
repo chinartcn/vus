@@ -22,6 +22,7 @@ typedef struct {
     size_t       pos;
     int          error;
     char         error_msg[256];
+    int          in_function;   /* 1=当前正在解析函数体, 0=全局作用域 */
 } VusParser;
 
 /* ============ 语法分析器操作 ============ */
