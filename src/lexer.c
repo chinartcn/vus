@@ -222,6 +222,25 @@ static void lexer_handle_indent(VusLexer *lexer)
 }
 
 /*
+ * 安全扩展字符串缓冲区。
+ * 失败时释放 buf、设置错误，返回 NULL。
+ */
+static char *lexer_buf_grow(char *buf, size_t *cap, size_t needed,
+                            VusLexer *lexer)
+{
+    size_t new_cap = *cap;
+    while (new_cap <= needed) new_cap *= 2;
+    char *new_buf = realloc(buf, new_cap);
+    if (!new_buf) {
+        free(buf);
+        lexer_set_error(lexer, "内存不足：无法扩展字符串缓冲区");
+        return NULL;
+    }
+    *cap = new_cap;
+    return new_buf;
+}
+
+/*
  * 读取双引号字符串字面量，支持转义序列。
  * 转义：\n \r \t \\ \" \xHH \uHHHH
  */
@@ -273,23 +292,23 @@ static void lexer_read_string(VusLexer *lexer)
 
             switch (esc) {
             case 'n':
-                if (len + 1 >= cap) { cap *= 2; buf = realloc(buf, cap); }
+                if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
                 buf[len++] = '\n';
                 break;
             case 'r':
-                if (len + 1 >= cap) { cap *= 2; buf = realloc(buf, cap); }
+                if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
                 buf[len++] = '\r';
                 break;
             case 't':
-                if (len + 1 >= cap) { cap *= 2; buf = realloc(buf, cap); }
+                if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
                 buf[len++] = '\t';
                 break;
             case '\\':
-                if (len + 1 >= cap) { cap *= 2; buf = realloc(buf, cap); }
+                if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
                 buf[len++] = '\\';
                 break;
             case '"':
-                if (len + 1 >= cap) { cap *= 2; buf = realloc(buf, cap); }
+                if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
                 buf[len++] = '"';
                 break;
             case 'x': {
@@ -314,7 +333,7 @@ static void lexer_read_string(VusLexer *lexer)
                     return;
                 }
                 unsigned long val = strtoul(hex, NULL, 16);
-                if (len + 1 >= cap) { cap *= 2; buf = realloc(buf, cap); }
+                if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
                 buf[len++] = (char)val;
                 break;
             }
@@ -339,14 +358,14 @@ static void lexer_read_string(VusLexer *lexer)
                 unsigned long cp = strtoul(hex, NULL, 16);
                 /* 编码为 UTF-8 */
                 if (cp < 0x80) {
-                    if (len + 1 >= cap) { cap *= 2; buf = realloc(buf, cap); }
+                    if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
                     buf[len++] = (char)cp;
                 } else if (cp < 0x800) {
-                    if (len + 2 >= cap) { cap *= 2; buf = realloc(buf, cap); }
+                    if (len + 2 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 2, lexer); if (!buf) return; }
                     buf[len++] = (char)(0xC0 | (cp >> 6));
                     buf[len++] = (char)(0x80 | (cp & 0x3F));
                 } else if (cp < 0x10000) {
-                    if (len + 3 >= cap) { cap *= 2; buf = realloc(buf, cap); }
+                    if (len + 3 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 3, lexer); if (!buf) return; }
                     buf[len++] = (char)(0xE0 | (cp >> 12));
                     buf[len++] = (char)(0x80 | ((cp >> 6) & 0x3F));
                     buf[len++] = (char)(0x80 | (cp & 0x3F));
@@ -360,13 +379,13 @@ static void lexer_read_string(VusLexer *lexer)
             }
             default:
                 /* 未知转义序列，保持原样 */
-                if (len + 1 >= cap) { cap *= 2; buf = realloc(buf, cap); }
+                if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
                 buf[len++] = esc;
                 break;
             }
         } else {
             /* 普通字符 */
-            if (len + 1 >= cap) { cap *= 2; buf = realloc(buf, cap); }
+            if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
             buf[len++] = c;
             lexer_advance(lexer);
         }

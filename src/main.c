@@ -500,7 +500,15 @@ static int vus_test(void) {
             memcmp(name + nlen - 4, ".vus", 4) == 0) {
             if (test_count >= test_cap) {
                 test_cap = test_cap ? test_cap * 2 : 16;
-                test_files = (char **)realloc(test_files, test_cap * sizeof(char *));
+                char **new_files = (char **)realloc(test_files, test_cap * sizeof(char *));
+                if (!new_files) {
+                    fprintf(stderr, "内存不足：无法扩展测试文件列表\n");
+                    for (size_t k = 0; k < test_count; k++) free(test_files[k]);
+                    free(test_files);
+                    closedir(dir);
+                    return 1;
+                }
+                test_files = new_files;
             }
             char full_path[1024];
             snprintf(full_path, sizeof(full_path), "%s/%s", test_dir, name);

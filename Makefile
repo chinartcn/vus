@@ -17,7 +17,9 @@ SRCS     = $(SRC_DIR)/main.c $(SRC_DIR)/token.c $(SRC_DIR)/lexer.c \
            $(SRC_DIR)/vus_lang.c $(SRC_DIR)/vus_vusx.c $(SRC_DIR)/vus_apk.c
 OBJS     = $(SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
 RT_SRC   = $(RT_DIR)/libvus_rt.c
+RT_CORO  = $(RT_DIR)/vus_coro.c
 RT_OBJ   = $(BUILD_DIR)/libvus_rt.o
+RT_CORO_OBJ = $(BUILD_DIR)/vus_coro.o
 RT_LIB   = $(BUILD_DIR)/libvus_rt.a
 
 # 头文件依赖（所有 .o 都依赖这些通用头）
@@ -99,11 +101,15 @@ $(BUILD_DIR)/vus_apk.o: $(SRC_DIR)/vus_apk.c $(APK_H) $(GEN_H) $(CONFIG_H) | $(B
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c -o $@ $<
 
 # 编译运行时库
-$(RT_OBJ): $(RT_SRC) $(RT_H) | $(BUILD_DIR)
+$(RT_OBJ): $(RT_SRC) $(RT_H) $(RT_DIR)/vus_coro.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -I$(RT_DIR) -c -o $@ $<
 
-# 运行时库静态归档
-$(RT_LIB): $(RT_OBJ)
+# 编译协程模块（独立，避免 libvus_rt.c 里做 inline asm 时跟 C11 冲突）
+$(RT_CORO_OBJ): $(RT_CORO) $(RT_DIR)/vus_coro.h | $(BUILD_DIR)
+	$(CC) -Wall -Wextra -g -O2 -Wno-format-truncation -I$(RT_DIR) -c -o $@ $<
+
+# 运行时库静态归档（含 vus_coro.o）
+$(RT_LIB): $(RT_OBJ) $(RT_CORO_OBJ)
 	ar rcs $@ $^
 
 # =============================================================================

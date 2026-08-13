@@ -1683,12 +1683,15 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
         abs_rt_dir[sizeof(abs_rt_dir) - 1] = '\0';
     }
 
-    /* 确定 rt 源文件路径 */
+    /* 确定 rt 源文件路径（libvus_rt.c + vus_coro.c 一起编译） */
     char rt_source[2048];
+    char rt_coro[2048];
     if (config->rt_dir[0]) {
         snprintf(rt_source, sizeof(rt_source), "%s/libvus_rt.c", abs_rt_dir);
+        snprintf(rt_coro,   sizeof(rt_coro),   "%s/vus_coro.c", abs_rt_dir);
     } else {
         rt_source[0] = '\0';
+        rt_coro[0] = '\0';
     }
 
     /* 构建 GCC 命令 */
@@ -1707,23 +1710,25 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
 
     if (extra_objects && extra_objects[0]) {
         n = snprintf(cmd, sizeof(cmd),
-            "gcc %s -g %s -I\"%s\" \"%s\" \"%s\" %s -o \"%s\" -lm -lpthread %s 2>&1",
+            "gcc %s -g %s -I\"%s\" \"%s\" \"%s\" \"%s\" %s -o \"%s\" -lm -lpthread %s 2>&1",
             opt_level,
             curl_def,
             abs_rt_dir,
             c_source_path,
             rt_source,
+            rt_coro,
             extra_objects,
             output_path,
             curl_lib);
     } else {
         n = snprintf(cmd, sizeof(cmd),
-            "gcc %s -g %s -I\"%s\" \"%s\" \"%s\" -o \"%s\" -lm -lpthread %s 2>&1",
+            "gcc %s -g %s -I\"%s\" \"%s\" \"%s\" \"%s\" -o \"%s\" -lm -lpthread %s 2>&1",
             opt_level,
             curl_def,
             abs_rt_dir,
             c_source_path,
             rt_source,
+            rt_coro,
             output_path,
             curl_lib);
     }

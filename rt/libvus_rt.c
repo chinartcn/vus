@@ -541,93 +541,15 @@ void vus_coro_resume_handle(VusString* handle) {
 }
 
 // ============ 协程实现 ============
-// 使用 ucontext 实现轻量级协程
+// 基于 setjmp / longjmp + 少量平台特定汇编栈切换。
+// 不依赖 ucontext，可在 Android / Termux（armv8l aarch64）上编译通过。
 
-#include <ucontext.h>
+#include "vus_coro.h"
 
-// 协程状态
-typedef enum {
-    CORO_READY,
-    CORO_RUNNING,
-    CORO_YIELDED,
-    CORO_DONE
-} CoroState;
-
-struct VusCoroutine {
-    CoroState state;
-    void (*func)(void*);
-    void* arg;
-    ucontext_t ctx;
-    char* stack;
-};
-
-// 主上下文（协程调度器的上下文）
-static ucontext_t vus_coro_main_ctx;
-static VusCoroutine* current_coro = NULL;
-
-// 协程入口
-static void coro_entry(void) {
-    if (current_coro && current_coro->func) {
-        current_coro->func(current_coro->arg);
-    }
-    if (current_coro) {
-        current_coro->state = CORO_DONE;
-    }
-    // uc_link 设置为 &vus_coro_main_ctx，函数返回后自动切回
-}
-
-VusCoroutine* vus_coro_create(void (*func)(void*), void* arg) {
-    VusCoroutine* coro = (VusCoroutine*)malloc(sizeof(VusCoroutine));
-    if (!coro) return NULL;
-    coro->state = CORO_READY;
-    coro->func = func;
-    coro->arg = arg;
-    coro->stack = NULL;
-    return coro;
-}
-
-void vus_coro_resume(VusCoroutine* coro) {
-    if (!coro || coro->state == CORO_DONE) return;
-
-    VusCoroutine* prev = current_coro;
-    current_coro = coro;
-
-    if (coro->state == CORO_READY) {
-        coro->state = CORO_RUNNING;
-        coro->stack = (char*)malloc(65536);
-        if (!coro->stack) { current_coro = prev; return; }
-
-        getcontext(&coro->ctx);
-        coro->ctx.uc_stack.ss_sp = coro->stack;
-        coro->ctx.uc_stack.ss_size = 65536;
-        coro->ctx.uc_stack.ss_flags = 0;
-        coro->ctx.uc_link = &vus_coro_main_ctx;
-
-        makecontext(&coro->ctx, coro_entry, 0);
-        swapcontext(&vus_coro_main_ctx, &coro->ctx);
-    } else if (coro->state == CORO_YIELDED) {
-        coro->state = CORO_RUNNING;
-        swapcontext(&vus_coro_main_ctx, &coro->ctx);
-    }
-
-    if (coro->state == CORO_DONE) {
-        free(coro->stack);
-        coro->stack = NULL;
-    }
-
-    current_coro = prev;
-}
-
-void vus_coro_yield(void) {
-    if (current_coro) {
-        current_coro->state = CORO_YIELDED;
-        swapcontext(&current_coro->ctx, &vus_coro_main_ctx);
-    }
-}
-
-int vus_coro_is_done(VusCoroutine* coro) {
-    return !coro || coro->state == CORO_DONE;
-}
+VusCoroutine* vus_coro_create(void (*func)(void*), void* arg);
+void          vus_coro_resume(VusCoroutine* coro);
+void          vus_coro_yield(void);
+int           vus_coro_is_done(VusCoroutine* coro);
 
 /* ============ 插件运行时函数实现 ============ */
 

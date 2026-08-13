@@ -52,6 +52,7 @@ static int json_find_string(const char *json, const char *key,
             p++;
             switch (*p) {
                 case 'n': out[o++] = '\n'; break;
+                case 'r': out[o++] = '\r'; break;
                 case 't': out[o++] = '\t'; break;
                 case '\\': out[o++] = '\\'; break;
                 case '"': out[o++] = '"'; break;
@@ -92,8 +93,19 @@ static int json_find_string_array(const char *json, const char *key,
             p++;
             size_t o = 0;
             while (*p && *p != '"' && o < VUS_VUSX_NAME_LEN - 1) {
-                if (*p == '\\' && *(p+1)) p++;
-                out[count][o++] = *p;
+                if (*p == '\\' && *(p+1)) {
+                    p++;
+                    switch (*p) {
+                        case 'n': out[count][o++] = '\n'; break;
+                        case 'r': out[count][o++] = '\r'; break;
+                        case 't': out[count][o++] = '\t'; break;
+                        case '\\': out[count][o++] = '\\'; break;
+                        case '"': out[count][o++] = '"'; break;
+                        default: out[count][o++] = *p; break;
+                    }
+                } else {
+                    out[count][o++] = *p;
+                }
                 p++;
             }
             out[count][o] = '\0';

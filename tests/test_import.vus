@@ -1,0 +1,14 @@
+#// 测试：导入（import/from import）语句
+#// 验证模块导入语法解析
+
+#// 导入整个模块
+导入 test_hello
+
+#// 从模块导入特定函数
+从 test_hello 导入 打印
+
+#// 导入多个模块
+导入 test_variables
+导入 test_arithmetic
+
+打印("导入测试完成\n")
