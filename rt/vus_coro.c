@@ -65,9 +65,16 @@ static int           g_main_inited = 0;
  * 不返回（以 tail-jump 的方式继续执行，下次从别人切回时仿佛是 swap 正常返回）。
  */
 
+/* Clang 不支持 noclone，且 naked 函数中不允许非汇编语句 */
+#if defined(__clang__)
+#define VUS_CORO_NAKED  __attribute__((noinline, naked))
+#else
+#define VUS_CORO_NAKED  __attribute__((noinline, noclone, naked))
+#endif
+
 #if defined(__x86_64__) && !defined(_WIN32)
 #define VUS_CORO_HAVE_SWAP 1
-__attribute__((noinline, noclone, naked))
+VUS_CORO_NAKED
 static void vus_coro_swap_ctx(unsigned long* from, unsigned long* to)
 {
     /* rdi = from, rsi = to.
@@ -97,7 +104,6 @@ static void vus_coro_swap_ctx(unsigned long* from, unsigned long* to)
         : : : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11",
               "memory", "cc"
     );
-    __builtin_unreachable();
 }
 
 #elif defined(__aarch64__) || defined(__arm64__)
@@ -125,7 +131,7 @@ static void vus_coro_swap_ctx(unsigned long* from, unsigned long* to)
 #define VCTX_LR   11
 #define VCTX_SP   12
 #define VCTX_PC   11
-__attribute__((noinline, noclone, naked))
+VUS_CORO_NAKED
 static void vus_coro_swap_ctx(unsigned long* from, unsigned long* to)
 {
     __asm__ __volatile__(
@@ -149,7 +155,6 @@ static void vus_coro_swap_ctx(unsigned long* from, unsigned long* to)
         "ret\n\t"
         : : : "x16","x17","memory","cc"
     );
-    __builtin_unreachable();
 }
 
 #elif defined(__arm__)
@@ -169,7 +174,7 @@ static void vus_coro_swap_ctx(unsigned long* from, unsigned long* to)
 #define VCTX_R11 7
 #define VCTX_SP  8
 #define VCTX_PC  9
-__attribute__((noinline, noclone, naked))
+VUS_CORO_NAKED
 static void vus_coro_swap_ctx(unsigned long* from, unsigned long* to)
 {
     /* r0 = from, r1 = to */
@@ -187,7 +192,6 @@ static void vus_coro_swap_ctx(unsigned long* from, unsigned long* to)
         "bx     r3\n\t"
         : : : "r2","r3","memory","cc"
     );
-    __builtin_unreachable();
 }
 
 #elif defined(__i386__)
@@ -203,7 +207,7 @@ static void vus_coro_swap_ctx(unsigned long* from, unsigned long* to)
 #define VCTX_EDI 3
 #define VCTX_SP  4
 #define VCTX_PC  5
-__attribute__((noinline, noclone, naked))
+VUS_CORO_NAKED
 static void vus_coro_swap_ctx(unsigned long* from, unsigned long* to)
 {
     __asm__ __volatile__(
@@ -223,13 +227,19 @@ static void vus_coro_swap_ctx(unsigned long* from, unsigned long* to)
         "jmp    *8(%%esi)\n\t"        /* jump to saved esi (we moved eax to nothing; reload) */
         : : : "eax", "ecx", "edx", "memory", "cc"
     );
-    __builtin_unreachable();
 }
 /* Note: i386 is rare in 2025; fallback mode will catch it if the above fails. */
 #endif
 
+/* GCC/Clang 兼容的属性宏 */
+#if defined(__clang__)
+#define VUS_CORO_NOINLINE __attribute__((noinline))
+#else
+#define VUS_CORO_NOINLINE __attribute__((noinline, noclone, optimize("O0")))
+#endif
+
 /* ---------- C 层 swap 包装 ---------- */
-__attribute__((noinline, noclone, optimize("O0")))
+VUS_CORO_NOINLINE
 static void vus_coro_swap(VusCoroutine* a, VusCoroutine* b)
 {
 #if defined(VUS_CORO_HAVE_SWAP)
@@ -240,7 +250,8 @@ static void vus_coro_swap(VusCoroutine* a, VusCoroutine* b)
 }
 
 /* ---------- 入口桥 ---------- */
-__attribute__((noinline, noclone, noreturn, optimize("O0")))
+VUS_CORO_NOINLINE
+__attribute__((noreturn))
 static void vus_coro_entry_bridge(void)
 {
     VusCoroutine* self = g_current;
@@ -330,7 +341,7 @@ VusCoroutine* vus_coro_create(void (*func)(void*), void* arg)
     return coro;
 }
 
-__attribute__((optimize("O0")))
+VUS_CORO_NOINLINE
 void vus_coro_resume(VusCoroutine* coro)
 {
     vus_coro_ensure_main();
@@ -357,7 +368,7 @@ void vus_coro_resume(VusCoroutine* coro)
     g_current = prev;
 }
 
-__attribute__((optimize("O0")))
+VUS_CORO_NOINLINE
 void vus_coro_yield(void)
 {
     vus_coro_ensure_main();
