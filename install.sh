@@ -168,11 +168,16 @@ if [ "$INSTALL_FROM_SOURCE" -eq 1 ]; then
 
     # 克隆仓库
     echo "克隆源码..."
-    if [ -d "$INSTALL_DIR" ]; then
+    if [ -d "$INSTALL_DIR/.git" ]; then
         echo "检测到已有安装，正在更新..."
         cd "$INSTALL_DIR"
-        git pull --ff-only
+        # 先确保远程地址正确
+        git remote set-url origin "$REPO_URL" 2>/dev/null || git remote add origin "$REPO_URL"
+        git fetch origin
+        git reset --hard origin/master
     else
+        # 目录存在但不是 git 仓库，删除后重新克隆
+        [ -d "$INSTALL_DIR" ] && rm -rf "$INSTALL_DIR"
         git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
         cd "$INSTALL_DIR"
     fi
