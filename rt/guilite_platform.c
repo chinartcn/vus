@@ -29,17 +29,15 @@ static int      s_running = 0;
 
 /* 显示方向补偿开关：部分后端（如 Termux-X11 的 GL 渲染）会把窗口内容
  * 翻转显示。用环境变量 VUS_X11_FLIP 控制：
- *   空 / auto   默认垂直翻转（适配 Termux-X11 GL 呈现层）
- *   none / 0    不翻转
- *   v           垂直翻转（上下颠倒）
- *   h           水平翻转（左右镜像）
- *   vh / hv     垂直+水平翻转（180度）
+ *   none / 0 / off    不翻转（默认）
+ *   v                 垂直翻转（上下颠倒）
+ *   h                 水平翻转（左右镜像）
+ *   vh / hv           垂直+水平翻转（180度）
  * 在 vus_gui_platform_init 中读取一次，redraw 时按开关映射像素坐标。
  *
- * 说明：PPM / XGetImage 读回 X server 内部的像素始终是正向的，但
- * Termux-X11 的 GL 层在把 X 内容贴到屏幕时会翻转坐标（多设备一致，
- * 与具体 GPU 无关）。因此默认开启垂直翻转以补偿该呈现层翻转；
- * 标准 PC X11 / Xvfb 下可用 VUS_X11_FLIP=none 关闭。 */
+ * 说明：PPM / XGetImage 读回 X server 内部的像素始终是正向的，所以
+ * 这里默认不翻转，保持 X 层正确。Termux-X11 的 GL 贴图层翻转应由其
+ * 专用的 TERMUX_X11_FORCE_FLIP 来处理，避免两层叠加混乱。 */
 static int s_flip_v = 0;
 static int s_flip_h = 0;
 
@@ -84,29 +82,22 @@ int vus_gui_platform_init(int width, int height, const char* title)
     int screen = DefaultScreen(s_dpy);
 
     /* 读取显示方向补偿开关（Termux-X11 等后端可能翻转）。
-     * 未设置 / "auto"：默认垂直翻转；"none"/"0"：不翻转；
-     * 含 'v'/'h'：按位开启对应翻转。 */
+     * 默认不翻转（X server 内部像素始终正确，见 x11_read 验证）。
+     * 仅当显式设置 VUS_X11_FLIP 时才翻转坐标：
+     *   none / 0 / off    不翻转（默认）
+     *   v                 垂直翻转
+     *   h                 水平翻转
+     *   vh / hv           180度翻转
+     * 真正的 Termux GL 贴图翻转交给 TERMUX_X11_FORCE_FLIP 处理，
+     * 这里保持 X 层干净，避免双重叠加。 */
     s_flip_v = 0;
     s_flip_h = 0;
     {
         const char* fl = getenv("VUS_X11_FLIP");
-        int is_none = fl && (strcmp(fl, "none") == 0 || strcmp(fl, "0") == 0 || strcmp(fl, "off") == 0);
-        if (is_none)
+        if (fl && *fl && !(strcmp(fl, "none") == 0 || strcmp(fl, "0") == 0 || strcmp(fl, "off") == 0))
         {
-            s_flip_v = 0;
-            s_flip_h = 0;
-        }
-        else if (fl && *fl)
-        {
-            /* 显式模式：按字符开启对应翻转 */
             if (strchr(fl, 'v') || strchr(fl, 'V')) { s_flip_v = 1; }
             if (strchr(fl, 'h') || strchr(fl, 'H')) { s_flip_h = 1; }
-        }
-        else
-        {
-            /* 未设置：默认垂直翻转，补偿 Termux-X11 GL 呈现层翻转 */
-            s_flip_v = 1;
-            s_flip_h = 0;
         }
         fprintf(stderr, "[flip] VUS_X11_FLIP='%s' -> flip_v=%d flip_h=%d\n",
                 fl ? fl : "(null)", s_flip_v, s_flip_h);
