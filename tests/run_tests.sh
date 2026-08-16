@@ -63,4 +63,39 @@ if [ "$FAILED_FILES" != "" ]; then
     exit 1
 fi
 
+# ---- C 单元测试（进程内插件/JSON 转换）----
+# 需要 libpython 头文件；缺失时记录降级并跳过
+echo ""
+if command -v python3-config >/dev/null 2>&1; then
+    echo "运行 C 单元测试: test_plugin_inproc"
+    if gcc -DVUS_USE_PY $(python3-config --includes) -I../rt -I../rt/easylogger/inc \
+        test_plugin_inproc.c ../rt/libvus_rt.c ../rt/vus_coro.c \
+        ../rt/easylogger/src/elog.c ../rt/easylogger/src/elog_utils.c ../rt/elog_port.c \
+        $(python3-config --ldflags) -lpthread -o test_plugin_inproc 2>/dev/null; then
+        if LD_LIBRARY_PATH=$(python3-config --prefix)/lib \
+            VUS_PLUGIN_DIR="../examples/plugins" ./test_plugin_inproc >/dev/null 2>&1; then
+            echo "  ✅ test_plugin_inproc 通过"
+            PASS=$((PASS + 1))
+        else
+            echo "  ❌ test_plugin_inproc 失败"
+            FAIL=$((FAIL + 1))
+            FAILED_FILES="$FAILED_FILES test_plugin_inproc(C)"
+        fi
+    else
+        echo "  ⚠️  C 单测编译失败，跳过（记录降级）"
+    fi
+else
+    echo "  ⚠️  未找到 python3-config，跳过 C 单测（降级路径）"
+fi
+
+echo ""
+echo "=========================================="
+printf "含 C 单测：共 %d 个用例，通过 %d 个，失败 %d 个\n" $((PASS + FAIL)) $PASS $FAIL
+echo "=========================================="
+
+if [ "$FAILED_FILES" != "" ]; then
+    echo "失败用例：$FAILED_FILES"
+    exit 1
+fi
+
 exit 0

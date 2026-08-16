@@ -10,6 +10,20 @@ RT_DIR   = rt
 BUILD_DIR = build
 TEST_DIR = tests
 
+# libpython 检测（可选）：存在则启用进程内嵌入，否则降级子进程
+PY_INC := $(shell python3-config --includes 2>/dev/null)
+PY_LD  := $(shell python3-config --ldflags 2>/dev/null)
+PY_VER := $(strip $(shell python3 -c "import sys;print('libpython%d.%d.so'%(sys.version_info[0],sys.version_info[1]))" 2>/dev/null))
+ifeq ($(strip $(PY_INC)),)
+PY_DEF =
+else
+PY_DEF = -DVUS_USE_PY
+ifneq ($(strip $(PY_VER)),)
+# 注入与编译环境匹配的 libpython soname，避免运行时 dlopen 硬编码版本
+PY_DEF += -DVUS_PY_SONAME=\"$(PY_VER)\"
+endif
+endif
+
 # 源文件
 SRCS     = $(SRC_DIR)/main.c $(SRC_DIR)/token.c $(SRC_DIR)/lexer.c \
            $(SRC_DIR)/parser.c $(SRC_DIR)/generator.c $(SRC_DIR)/config.c \
@@ -21,6 +35,12 @@ RT_CORO  = $(RT_DIR)/vus_coro.c
 RT_OBJ   = $(BUILD_DIR)/libvus_rt.o
 RT_CORO_OBJ = $(BUILD_DIR)/vus_coro.o
 RT_LIB   = $(BUILD_DIR)/libvus_rt.a
+
+# EasyLogger 日志库（VUS 静态集成）
+EL_DIR = $(RT_DIR)/easylogger
+EL_SRC = $(EL_DIR)/src/elog.c $(EL_DIR)/src/elog_utils.c $(RT_DIR)/elog_port.c
+EL_OBJ = $(BUILD_DIR)/elog.o $(BUILD_DIR)/elog_utils.o $(BUILD_DIR)/elog_port.o
+EL_INC = -I$(EL_DIR)/inc
 
 # 头文件依赖（所有 .o 都依赖这些通用头）
 COMMON_H = $(SRC_DIR)/token.h $(SRC_DIR)/ast.h $(SRC_DIR)/config.h
@@ -100,16 +120,26 @@ APK_H = $(SRC_DIR)/vus_apk.h
 $(BUILD_DIR)/vus_apk.o: $(SRC_DIR)/vus_apk.c $(APK_H) $(GEN_H) $(CONFIG_H) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c -o $@ $<
 
-# 编译运行时库
+# 编译运行时库（启用进程内嵌入时追加 libpython 头/链接参数）
 $(RT_OBJ): $(RT_SRC) $(RT_H) $(RT_DIR)/vus_coro.h | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -I$(RT_DIR) -c -o $@ $<
+	$(CC) $(CFLAGS) $(PY_DEF) $(PY_INC) -I$(RT_DIR) $(EL_INC) -c -o $@ $<
 
 # 编译协程模块（独立，避免 libvus_rt.c 里做 inline asm 时跟 C11 冲突）
 $(RT_CORO_OBJ): $(RT_CORO) $(RT_DIR)/vus_coro.h | $(BUILD_DIR)
 	$(CC) -Wall -Wextra -g -O2 -Wno-format-truncation -I$(RT_DIR) -c -o $@ $<
 
-# 运行时库静态归档（含 vus_coro.o）
-$(RT_LIB): $(RT_OBJ) $(RT_CORO_OBJ)
+# 编译 EasyLogger 核心源码
+$(BUILD_DIR)/elog.o: $(EL_DIR)/src/elog.c $(EL_DIR)/inc/elog.h $(EL_DIR)/inc/elog_cfg.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(EL_INC) -c -o $@ $<
+
+$(BUILD_DIR)/elog_utils.o: $(EL_DIR)/src/elog_utils.c $(EL_DIR)/inc/elog.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(EL_INC) -c -o $@ $<
+
+$(BUILD_DIR)/elog_port.o: $(RT_DIR)/elog_port.c $(EL_DIR)/inc/elog.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(EL_INC) -I$(RT_DIR) -c -o $@ $<
+
+# 运行时库静态归档（含 vus_coro.o 与 easylogger elog.o/elog_utils.o）
+$(RT_LIB): $(RT_OBJ) $(RT_CORO_OBJ) $(EL_OBJ)
 	ar rcs $@ $^
 
 # =============================================================================

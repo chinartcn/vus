@@ -11,6 +11,8 @@
 #define TYPE_FLOAT   2
 #define TYPE_STR     3
 #define TYPE_BOOL    4
+#define TYPE_LIST    5
+#define TYPE_DICT    6
 #define TYPE_MIXED   99
 
 // ============ 前向声明 ============
@@ -19,6 +21,34 @@ typedef struct VusList VusList;
 typedef struct VusDict VusDict;
 typedef struct VusClosure VusClosure;
 typedef struct VusError VusError;
+typedef struct VusObject VusObject;
+
+// ============ 结构化对象（组合容器） ============
+// 带类型标记的轻量容器：内部 union 持有指向 VusList/VusDict/VusString 的指针。
+// 不替代、不重写既有结构，用于承载插件返回的结构化数据。
+#define VUS_OBJECT_MAGIC 0x564F4221  // 'VOB!'：运行时识别结构化容器的魔数
+
+struct VusObject {
+    int ref;    // 引用计数，必须为第一个字段（与 VusString/VusList/VusDict 约定一致）
+    int magic;  // VUS_OBJECT_MAGIC：供 vus_print/vus_typeof 区分 VusObject 与 VusString
+    int type;   // TYPE_LIST / TYPE_DICT / TYPE_STR / TYPE_INT / TYPE_FLOAT / TYPE_BOOL
+    union {
+        VusList*    list;
+        VusDict*    dict;
+        VusString*  str;
+    } u;
+};
+
+// 判断指针是否为结构化容器（VusObject*）。非容器（普通 VusString*）返回 0。
+// 依据：VusObject 在 ref 后有 magic 标记，而 VusString 在 ref 后是 len（小整数），
+// 不会与 VUS_OBJECT_MAGIC 冲突。
+static inline int vus_is_object(void* obj) {
+    return obj && ((VusObject*)obj)->magic == VUS_OBJECT_MAGIC;
+}
+
+// 将任意值（VusString* 或 VusObject*）转为字符串表示：标量取原文，列表/字典递归序列化。
+// 纯 C 实现，不依赖嵌入式 Python，供 vus_print 等安全消费。
+VusString* vus_object_to_string(void* obj);
 
 // ============ 引用计数通用操作 ============
 void vus_ref(void* obj);
@@ -103,6 +133,17 @@ void vus_error_free(VusError* err);
 extern int vus_debug_enabled;
 void vus_debug_print(const char* msg);
 
+// ============ 分级日志（EasyLogger 集成） ============
+// 首次调用任一 日志_* 内建函数时惰性初始化；无需手动调用 vus_log_init。
+// 4 级输出函数返回 VusString*（"0" 成功 / "-1" 失败），沿用内建函数约定。
+
+int vus_log_init(void);                              // 初始化 EasyLogger，幂等，失败返回 -1
+VusString* vus_log_set_level(VusString* level);      // 设置过滤级别（调试/信息/警告/错误）
+VusString* vus_log_debug(VusString* msg);
+VusString* vus_log_info(VusString* msg);
+VusString* vus_log_warn(VusString* msg);
+VusString* vus_log_error(VusString* msg);
+
 // ============ 栈追踪支持 ============
 #define VUS_MAX_STACK_DEPTH 256
 extern int vus_stack_depth;
@@ -115,7 +156,7 @@ void vus_stack_print(void);
 // ============ 标准库辅助函数 ============
 // 以下函数由编译器生成的 C 代码调用，用于标准库功能
 
-void vus_print(VusString* s);
+void vus_print(void* s);
 VusString* vus_input(VusString* prompt);
 
 // vus_add：加法/字符串拼接。若两个操作数均可解析为整数则做算术加法，否则做字符串拼接。
@@ -167,6 +208,27 @@ VusString* vus_plugin_tui_reset(VusString* dummy);
 VusString* vus_plugin_http_get(VusString* url);
 VusString* vus_plugin_http_post(VusString* url, VusString* data);
 VusString* vus_plugin_http_download(VusString* url, VusString* filepath);
+
+/* 插件调用（调用 .vux Python 插件） */
+VusString* vus_plugin_run_vux(VusString* plugin, VusString* cmd);
+
+/* 进程内嵌入 Python 解释器（惰性 dlopen libpython），0 成功，-1 失败或未启用 VUS_USE_PY */
+int vus_py_init(void);
+
+/* 进程内调用 .vux 插件，返回字符串结果（VUS_USE_PY 下用嵌入解释器，否则回退子进程） */
+VusString* vus_plugin_run_vux_inproc(VusString* plugin, VusString* cmd);
+
+/* 进程内调用 .vux 插件，返回结构化 VusObject*（列表/字典/字符串），失败返回 NULL */
+void* vus_plugin_run_vux_json(VusString* plugin, VusString* cmd);
+
+/* JSON 字符串 -> 结构化 VusObject*（组合容器），失败返回 NULL */
+void* vus_json_parse(VusString* s);
+
+/* 结构化 VusObject* -> JSON 字符串，失败返回空串 */
+VusString* vus_json_generate(void* obj);
+
+/* 返回结构化值的类型名（整数/浮点/字符串/布尔/列表/字典/空） */
+VusString* vus_typeof(void* obj);
 
 /* 文件操作 */
 VusString* vus_plugin_file_read(VusString* path);

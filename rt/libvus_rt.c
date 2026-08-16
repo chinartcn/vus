@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <elog.h>
+
 // ============ 引用计数通用操作 ============
 
 void vus_ref(void* obj) {
@@ -330,6 +332,73 @@ void vus_debug_print(const char* msg) {
     }
 }
 
+// ============ 分级日志（EasyLogger 集成） ============
+
+static int s_vus_log_inited = 0;
+
+/* 惰性初始化 EasyLogger，幂等。成功返回 0，失败返回 -1。 */
+int vus_log_init(void) {
+    if (s_vus_log_inited) return 0;
+    if (elog_init() != ELOG_NO_ERR) return -1;
+
+    /* 启用格式：级别 + 标签 + 时间（VUS 运行时非源码行号，禁用 dir/func/line） */
+    for (int lvl = ELOG_LVL_ASSERT; lvl <= ELOG_LVL_VERBOSE; lvl++) {
+        elog_set_fmt((uint8_t)lvl, ELOG_FMT_LVL | ELOG_FMT_TAG | ELOG_FMT_TIME);
+    }
+
+    elog_start();   /* 启用输出并打印初始化成功日志 */
+    s_vus_log_inited = 1;
+    return 0;
+}
+
+/* 解析中文级别名称，返回对应 ELOG_LVL_*；无法识别返回 -1 */
+static int vus_log_parse_level(VusString* level) {
+    if (!level || !level->data) return -1;
+    const char* s = level->data;
+    if (strcmp(s, "调试") == 0) return ELOG_LVL_DEBUG;
+    if (strcmp(s, "信息") == 0) return ELOG_LVL_INFO;
+    if (strcmp(s, "警告") == 0) return ELOG_LVL_WARN;
+    if (strcmp(s, "错误") == 0) return ELOG_LVL_ERROR;
+    if (strcmp(s, "assert") == 0) return ELOG_LVL_ASSERT;
+    if (strcmp(s, "verbose") == 0) return ELOG_LVL_VERBOSE;
+    return -1;
+}
+
+/* 设置运行时过滤级别：低于该级别的日志将被过滤。 */
+VusString* vus_log_set_level(VusString* level) {
+    if (vus_log_init() != 0) return vus_string_new("-1");
+    int lvl = vus_log_parse_level(level);
+    if (lvl < 0) return vus_string_new("-1");
+    elog_set_filter_lvl((uint8_t)lvl);
+    return vus_string_new("0");
+}
+
+#define VUS_LOG_TAG "vus"
+
+VusString* vus_log_debug(VusString* msg) {
+    if (vus_log_init() != 0) return vus_string_new("-1");
+    elog_d(VUS_LOG_TAG, "%s", msg ? vus_string_cstr(msg) : "");
+    return vus_string_new("0");
+}
+
+VusString* vus_log_info(VusString* msg) {
+    if (vus_log_init() != 0) return vus_string_new("-1");
+    elog_i(VUS_LOG_TAG, "%s", msg ? vus_string_cstr(msg) : "");
+    return vus_string_new("0");
+}
+
+VusString* vus_log_warn(VusString* msg) {
+    if (vus_log_init() != 0) return vus_string_new("-1");
+    elog_w(VUS_LOG_TAG, "%s", msg ? vus_string_cstr(msg) : "");
+    return vus_string_new("0");
+}
+
+VusString* vus_log_error(VusString* msg) {
+    if (vus_log_init() != 0) return vus_string_new("-1");
+    elog_e(VUS_LOG_TAG, "%s", msg ? vus_string_cstr(msg) : "");
+    return vus_string_new("0");
+}
+
 // ============ 栈追踪支持 ============
 
 int vus_stack_depth = 0;
@@ -356,10 +425,58 @@ void vus_stack_print(void) {
 
 // ============ 标准库辅助函数 ============
 
-void vus_print(VusString* s) {
-    if (!s || !s->data) return;
-    printf("%s", s->data);
+void vus_print(void* s) {
+    if (!s) return;
+    if (vus_is_object(s)) {
+        VusString* rep = vus_object_to_string(s);
+        if (rep) { printf("%s", vus_string_cstr(rep)); vus_unref(rep); }
+    } else {
+        VusString* str = (VusString*)s;
+        if (!str->data) return;
+        printf("%s", str->data);
+    }
     fflush(stdout);
+}
+
+/* 将任意值（VusString* 或 VusObject*）转为字符串表示。
+ * 标量取原文；列表/字典递归序列化为可读文本。纯 C 实现，不依赖嵌入式 Python。 */
+VusString* vus_object_to_string(void* obj) {
+    if (!obj) return vus_string_new("");
+    if (!vus_is_object(obj)) {
+        VusString* s = (VusString*)obj;
+        return s ? vus_string_new_len(s->data, s->len) : vus_string_new("");
+    }
+    VusObject* o = (VusObject*)obj;
+    switch (o->type) {
+        case TYPE_STR:
+            return o->u.str ? vus_string_new_len(o->u.str->data, o->u.str->len) : vus_string_new("");
+        case TYPE_LIST: {
+            VusList* list = o->u.list;
+            if (!list) return vus_string_new("[]");
+            VusString* acc = vus_string_new("[");
+            int n = vus_list_len(list);
+            for (int i = 0; i < n; i++) {
+                VusString* item = vus_object_to_string(vus_list_get(list, i));
+                if (!item) item = vus_string_new("");
+                if (i > 0) {
+                    VusString* sep = vus_string_new(", ");
+                    VusString* t = vus_string_concat(acc, sep);
+                    vus_unref(acc); vus_unref(sep); acc = t;
+                }
+                VusString* t = vus_string_concat(acc, item);
+                vus_unref(acc); vus_unref(item); acc = t;
+            }
+            VusString* close = vus_string_new("]");
+            VusString* out = vus_string_concat(acc, close);
+            vus_unref(acc); vus_unref(close);
+            return out;
+        }
+        case TYPE_DICT:
+            /* v0.1 字典无遍历接口，返回占位表示 */
+            return vus_string_new("{}");
+        default:
+            return vus_string_new("");
+    }
 }
 
 VusString* vus_input(VusString* prompt) {
@@ -713,6 +830,524 @@ VusString* vus_plugin_http_download(VusString* url, VusString* filepath) {
     return vus_string_new("-1");
 #endif
 }
+
+/* ---- 插件调用（.vux Python 插件） ---- */
+
+/*
+ * vus_plugin_run_vux — 调用已安装的 .vux Python 插件。
+ *
+ * 通过子进程执行：
+ *   python3 <vux_plugin_manager.py> run <插件名> "<命令>" --raw
+ * 并返回插件实际输出（stdout）。
+ *
+ * 脚本路径查找顺序：
+ *   1. 环境变量 VUS_PLUGIN_MANAGER（指向 vux_plugin_manager.py）
+ *   2. 环境变量 VUS_HOME/scripts/vux_plugin_manager.py
+ *   3. 当前目录 scripts/vux_plugin_manager.py
+ */
+VusString* vus_plugin_run_vux(VusString* plugin, VusString* cmd) {
+    if (!plugin || !cmd) return vus_string_new("");
+    const char* c_plugin = vus_string_cstr(plugin);
+    const char* c_cmd = vus_string_cstr(cmd);
+
+    /* 定位插件管理器脚本 */
+    char manager[1024] = {0};
+    const char *env_mgr = getenv("VUS_PLUGIN_MANAGER");
+    if (env_mgr && env_mgr[0]) {
+        snprintf(manager, sizeof(manager), "%s", env_mgr);
+    } else {
+        const char *home = getenv("VUS_HOME");
+        if (home && home[0]) {
+            snprintf(manager, sizeof(manager), "%s/scripts/vux_plugin_manager.py", home);
+        } else {
+            snprintf(manager, sizeof(manager), "scripts/vux_plugin_manager.py");
+        }
+    }
+
+    /* 构建命令。插件名与命令参数在 manager 脚本中作为 argv 传递，
+     * 这里用 shell 引号包裹避免特殊字符破坏结构。 */
+    char cmdline[8192];
+    int n = snprintf(cmdline, sizeof(cmdline),
+                     "python3 \"%s\" run \"%s\" \"%s\" --raw 2>/dev/null",
+                     manager, c_plugin, c_cmd);
+    if (n < 0 || n >= (int)sizeof(cmdline)) {
+        return vus_string_new("");
+    }
+
+    FILE *fp = popen(cmdline, "r");
+    if (!fp) return vus_string_new("");
+
+    /* 读取全部输出 */
+    size_t cap = 4096, len = 0;
+    char *buf = (char*)malloc(cap);
+    if (!buf) { pclose(fp); return vus_string_new(""); }
+    size_t r;
+    while ((r = fread(buf + len, 1, cap - len - 1, fp)) > 0) {
+        len += r;
+        if (len + 1 >= cap) {
+            cap *= 2;
+            char *nb = (char*)realloc(buf, cap);
+            if (!nb) { free(buf); pclose(fp); return vus_string_new(""); }
+            buf = nb;
+        }
+    }
+    int status = pclose(fp);
+    buf[len] = '\0';
+
+    /* 去掉末尾换行 */
+    while (len > 0 && (buf[len-1] == '\n' || buf[len-1] == '\r')) {
+        buf[--len] = '\0';
+    }
+
+    /* 非零退出码视为失败，返回空串 */
+    if (status != 0 && len == 0) {
+        VusString* empty = vus_string_new("");
+        free(buf);
+        return empty;
+    }
+
+    VusString* result = vus_string_new_len(buf, (int)len);
+    free(buf);
+    return result;
+}
+
+/* =====================================================================
+ * 进程内嵌入 Python 解释器
+ * ---------------------------------------------------------------------
+ * 通过 dlopen 惰性加载 libpython，用 dlsym 定位符号，避免编译期对
+ * libpython 的硬依赖。开 VUS_USE_PY 才启用；否则这些函数回退到
+ * 子进程方案或返回空值，保证无解释器环境仍可编译运行。
+ * 注意：VUS 协程为单线程协作式调度，插件调用采用同步阻塞执行，
+ * 调用期间协程不可切换（决策 #6）。
+ * ===================================================================== */
+#ifdef VUS_USE_PY
+#include <dlfcn.h>
+
+/* PyRun_String 的起始语法模式：Py_file_input（编译完整语句）。
+ * 值为 CPython 头文件 pgenheader 中定义的枚举，此处命名化避免裸魔数。 */
+#define VUS_PY_FILE_INPUT 257
+
+/* ---- libpython 符号函数指针 ---- */
+static void* (*vus_py_Py_InitializeFn)(void) = NULL;
+static void  (*vus_py_Py_FinalizeFn)(void) = NULL;
+static void* (*vus_py_PyImport_ImportModuleFn)(const char*) = NULL;
+static void* (*vus_py_PyObject_CallFunctionFn)(void*, const char*, ...) = NULL;
+static void* (*vus_py_PyObject_CallMethodFn)(void*, const char*, const char*, ...) = NULL;
+static void* (*vus_py_PySys_GetObjectFn)(const char*) = NULL;
+static void  (*vus_py_Py_XDECREF_Fn)(void*) = NULL;
+static void  (*vus_py_PyErr_PrintFn)(void) = NULL;
+static void* (*vus_py_PyErr_ClearFn)(void) = NULL;
+static double(*vus_py_PyFloat_AsDoubleFn)(void*) = NULL;
+static int   (*vus_py_PyList_SizeFn)(void*) = NULL;
+static void* (*vus_py_PyList_GetItemFn)(void*, long) = NULL;
+static int   (*vus_py_PyDict_NextFn)(void*, long*, void**, void**) = NULL;
+static int   (*vus_py_PyDict_SizeFn)(void*) = NULL;
+static void* (*vus_py_Py_BuildValueFn)(const char*, ...) = NULL;
+static int   (*vus_py_PyObject_IsTrueFn)(void*) = NULL;
+static int   (*vus_py_PySequence_CheckFn)(void*) = NULL;
+static int   (*vus_py_PyMapping_CheckFn)(void*) = NULL;
+static void* (*vus_py_PyObject_TypeFn)(void*) = NULL;
+static const char* (*vus_py_PyUnicode_AsUTF8Fn)(void*) = NULL;
+static void* (*vus_py_PyUnicode_FromStringFn)(const char*) = NULL;
+static void* (*vus_py_PyObject_StrFn)(void*) = NULL;
+static void* (*vus_py_PyList_NewFn)(long) = NULL;
+static int   (*vus_py_PyList_AppendFn)(void*, void*) = NULL;
+static void* (*vus_py_PyDict_NewFn)(void) = NULL;
+static int   (*vus_py_PyDict_SetItemFn)(void*, void*, void*) = NULL;
+static long (*vus_py_PyLong_AsLongFn)(void*) = NULL;
+static void* (*vus_py_PyRun_StringFn)(const char*, int, void*, void*) = NULL;
+static void* (*vus_py_PyObject_CallObjectFn)(void*, void*) = NULL;
+static void* (*vus_py_PyImport_AddModuleFn)(const char*) = NULL;
+static void* (*vus_py_PyModule_GetDictFn)(void*) = NULL;
+static void* (*vus_py_PyDict_GetItemStringFn)(void*, const char*) = NULL;
+static void* (*vus_py_PyEval_GetBuiltinsFn)(void) = NULL;
+
+static void* vus_py_globals = NULL;
+static void* vus_py_handle = NULL;
+static void* vus_py_PyUnicode_Type = NULL;   /* &PyUnicode_Type，用于实现 PyUnicode_Check 宏 */
+static int   vus_py_inited  = 0;
+static int   vus_py_tried   = 0;
+
+/* 查找一条符号；缺失则整套回退 */
+static int vus_py_load_symbol(const char* name, void** out) {
+    void* sym = dlsym(vus_py_handle, name);
+    if (!sym) return -1;
+    *out = sym;
+    return 0;
+}
+
+int vus_py_init(void) {
+    if (vus_py_inited) return 0;
+    if (vus_py_tried)  return -1;   /* 已尝试过且失败，快速返回 */
+
+    vus_py_tried = 1;
+    /* 候选 soname：优先编译期注入的匹配版本（见 Makefile -DVUS_PY_SONAME），
+     * 其次无版本符号链接，再回退若干常见版本，避免硬编码单一版本。 */
+#ifdef VUS_PY_SONAME
+    vus_py_handle = dlopen(VUS_PY_SONAME, RTLD_NOW | RTLD_GLOBAL);
+#endif
+    if (!vus_py_handle) vus_py_handle = dlopen("libpython3.so", RTLD_NOW | RTLD_GLOBAL);
+    if (!vus_py_handle) vus_py_handle = dlopen("libpython3.14.so", RTLD_NOW | RTLD_GLOBAL);
+    if (!vus_py_handle) vus_py_handle = dlopen("libpython3.12.so", RTLD_NOW | RTLD_GLOBAL);
+    if (!vus_py_handle) return -1;
+
+#define VSYM(n, f) if (vus_py_load_symbol(n, (void**)&f) != 0) { dlclose(vus_py_handle); vus_py_handle = NULL; return -1; }
+    VSYM("Py_Initialize",            vus_py_Py_InitializeFn);
+    VSYM("Py_Finalize",              vus_py_Py_FinalizeFn);
+    VSYM("PyImport_ImportModule",    vus_py_PyImport_ImportModuleFn);
+    VSYM("PyObject_CallFunction",    vus_py_PyObject_CallFunctionFn);
+    VSYM("PyObject_CallMethod",      vus_py_PyObject_CallMethodFn);
+    VSYM("PySys_GetObject",          vus_py_PySys_GetObjectFn);
+    VSYM("Py_DecRef",                vus_py_Py_XDECREF_Fn);
+    VSYM("PyErr_Print",              vus_py_PyErr_PrintFn);
+    VSYM("PyErr_Clear",              vus_py_PyErr_ClearFn);
+    VSYM("PyFloat_AsDouble",         vus_py_PyFloat_AsDoubleFn);
+    VSYM("PyList_Size",              vus_py_PyList_SizeFn);
+    VSYM("PyList_GetItem",           vus_py_PyList_GetItemFn);
+    VSYM("PyDict_Next",              vus_py_PyDict_NextFn);
+    VSYM("PyDict_Size",              vus_py_PyDict_SizeFn);
+    VSYM("Py_BuildValue",            vus_py_Py_BuildValueFn);
+    VSYM("PyObject_IsTrue",          vus_py_PyObject_IsTrueFn);
+    VSYM("PySequence_Check",         vus_py_PySequence_CheckFn);
+    VSYM("PyMapping_Check",          vus_py_PyMapping_CheckFn);
+    VSYM("PyObject_Type",            vus_py_PyObject_TypeFn);
+    VSYM("PyUnicode_AsUTF8",         vus_py_PyUnicode_AsUTF8Fn);
+    VSYM("PyUnicode_FromString",     vus_py_PyUnicode_FromStringFn);
+    VSYM("PyObject_Str",             vus_py_PyObject_StrFn);
+    VSYM("PyList_New",               vus_py_PyList_NewFn);
+    VSYM("PyList_Append",            vus_py_PyList_AppendFn);
+    VSYM("PyDict_New",               vus_py_PyDict_NewFn);
+    VSYM("PyDict_SetItem",           vus_py_PyDict_SetItemFn);
+    VSYM("PyLong_AsLong",            vus_py_PyLong_AsLongFn);
+    VSYM("PyObject_CallObject",     vus_py_PyObject_CallObjectFn);
+    VSYM("PyRun_String",            vus_py_PyRun_StringFn);
+    VSYM("PyDict_GetItemString",    vus_py_PyDict_GetItemStringFn);
+    VSYM("PyImport_AddModule",      vus_py_PyImport_AddModuleFn);
+    VSYM("PyModule_GetDict",        vus_py_PyModule_GetDictFn);
+    VSYM("PyEval_GetBuiltins",      vus_py_PyEval_GetBuiltinsFn);
+#undef VSYM
+
+    /* PyUnicode_Type 是全局变量（非函数），用 dlsym 取地址 */
+    vus_py_PyUnicode_Type = dlsym(vus_py_handle, "PyUnicode_Type");
+    if (!vus_py_PyUnicode_Type) { dlclose(vus_py_handle); vus_py_handle = NULL; return -1; }
+
+    vus_py_Py_InitializeFn();
+    /* 初始化模块全局命名空间：__main__ 模块的 dict，供 PyRun_String 使用 */
+    vus_py_globals = vus_py_PyModule_GetDictFn(vus_py_PyImport_AddModuleFn("__main__"));
+    vus_py_inited = 1;
+    return 0;
+}
+
+/* ---- PyObject -> VusObject / VusString 转换 ---- */
+
+/* 释放一个 VusObject 容器（不递归释放内部引用，交由 VUS 引用计数管理） */
+static void vus_py_vus_object_free(VusObject* obj) {
+    free(obj);
+}
+
+static VusObject* vus_py_to_vus_object(void* pyobj);
+
+static VusString* vus_py_unicode_to_vus(void* pyobj) {
+    const char* s = vus_py_PyUnicode_AsUTF8Fn(pyobj);
+    if (!s) return vus_string_new("");
+    return vus_string_new(s);
+}
+
+static VusObject* vus_py_to_vus_object(void* pyobj) {
+    if (!pyobj || pyobj == (void*)0x1 || pyobj == (void*)0x0) return NULL;
+    if (vus_py_PyObject_TypeFn(pyobj) == vus_py_PyUnicode_Type) {
+        VusObject* o = (VusObject*)calloc(1, sizeof(VusObject));
+        if (!o) return NULL;
+        o->magic = VUS_OBJECT_MAGIC;
+        o->type = TYPE_STR;
+        o->u.str = vus_py_unicode_to_vus(pyobj);
+        return o;
+    }
+    if (vus_py_PySequence_CheckFn(pyobj)) {
+        long n = vus_py_PyList_SizeFn(pyobj);
+        if (n < 0) return NULL;
+        VusList* list = vus_list_new(TYPE_MIXED);
+        for (long i = 0; i < n; i++) {
+            void* item = vus_py_PyList_GetItemFn(pyobj, i);
+            VusObject* sub = vus_py_to_vus_object(item);
+            if (sub) {
+                /* 展开子对象：标量存字符串，列表/字典存容器 */
+                if (sub->type == TYPE_LIST || sub->type == TYPE_DICT) {
+                    vus_list_append(list, sub);
+                } else {
+                    vus_ref(sub->u.str);
+                    vus_list_append(list, sub->u.str);
+                    vus_py_vus_object_free(sub);
+                }
+            }
+        }
+        VusObject* o = (VusObject*)calloc(1, sizeof(VusObject));
+        if (!o) return NULL;
+        o->magic = VUS_OBJECT_MAGIC;
+        o->type = TYPE_LIST;
+        o->u.list = list;
+        return o;
+    }
+    if (vus_py_PyMapping_CheckFn(pyobj)) {
+        VusDict* dict = vus_dict_new();
+        long pos = 0;
+        void *key, *value;
+        while (vus_py_PyDict_NextFn(pyobj, &pos, &key, &value)) {
+            VusString* k = vus_py_unicode_to_vus(key);
+            VusObject* sub = vus_py_to_vus_object(value);
+            if (k && sub) {
+                if (sub->type == TYPE_LIST || sub->type == TYPE_DICT) {
+                    vus_dict_set(dict, k, sub);
+                } else {
+                    vus_ref(sub->u.str);
+                    vus_dict_set(dict, k, sub->u.str);
+                    vus_py_vus_object_free(sub);
+                }
+            }
+            if (k) vus_unref(k);
+        }
+        VusObject* o = (VusObject*)calloc(1, sizeof(VusObject));
+        if (!o) return NULL;
+        o->magic = VUS_OBJECT_MAGIC;
+        o->type = TYPE_DICT;
+        o->u.dict = dict;
+        return o;
+    }
+    /* 数字/布尔/标量：统一转字符串 */
+    void* s = vus_py_PyObject_StrFn(pyobj);
+    if (s) {
+        VusObject* o = (VusObject*)calloc(1, sizeof(VusObject));
+        if (o) { o->magic = VUS_OBJECT_MAGIC; o->type = TYPE_STR; o->u.str = vus_py_unicode_to_vus(s); }
+        vus_py_Py_XDECREF_Fn(s);
+        return o;
+    }
+    return NULL;
+}
+
+/* ---- JSON 解析 / 生成 ---- */
+
+void* vus_json_parse(VusString* s) {
+    if (!s || vus_py_init() != 0) return NULL;
+    void* json_mod = vus_py_PyImport_ImportModuleFn("json");
+    if (!json_mod) return NULL;
+    void* result = vus_py_PyObject_CallMethodFn(json_mod, "loads", "(s)", vus_string_cstr(s));
+    if (!result) {
+        vus_py_PyErr_PrintFn();
+        vus_py_PyErr_ClearFn();
+        return NULL;
+    }
+    VusObject* obj = vus_py_to_vus_object(result);
+    vus_py_Py_XDECREF_Fn(result);
+    vus_py_Py_XDECREF_Fn(json_mod);
+    return obj;
+}
+
+/* 将 VusObject 容器序列化为 Python 对象（用于 json.dumps） */
+static void* vus_py_vus_to_py(VusObject* obj) {
+    if (!obj) return NULL;
+    if (obj->type == TYPE_STR) {
+        if (obj->u.str) return vus_py_PyUnicode_FromStringFn(vus_string_cstr(obj->u.str));
+        return NULL;
+    }
+    if (obj->type == TYPE_LIST && obj->u.list) {
+        void* py_list = vus_py_PyList_NewFn(0);
+        if (!py_list) return NULL;
+        for (int i = 0; i < vus_list_len(obj->u.list); i++) {
+            void* item = vus_list_get(obj->u.list, i);
+            void* pitem = vus_py_vus_to_py((VusObject*)item);
+            if (pitem) {
+                vus_py_PyList_AppendFn(py_list, pitem);
+                vus_py_Py_XDECREF_Fn(pitem);
+            }
+        }
+        return py_list;
+    }
+    if (obj->type == TYPE_DICT && obj->u.dict) {
+        void* py_dict = vus_py_PyDict_NewFn();
+        if (!py_dict) return NULL;
+        /* 简化字典转换：VUS 字典遍历接口 v0.1 未提供，返回空 dict */
+        return py_dict;
+    }
+    return NULL;
+}
+
+VusString* vus_json_generate(void* obj) {
+    if (!obj) return vus_string_new("");
+    if (vus_py_init() != 0) return vus_string_new("");
+    void* json_mod = vus_py_PyImport_ImportModuleFn("json");
+    if (!json_mod) return vus_string_new("");
+    void* pyval = vus_py_vus_to_py((VusObject*)obj);
+    if (!pyval) return vus_string_new("");
+    void* result = vus_py_PyObject_CallMethodFn(json_mod, "dumps", "(O)", pyval);
+    if (!result) {
+        vus_py_PyErr_PrintFn();
+        vus_py_PyErr_ClearFn();
+        return vus_string_new("");
+    }
+    VusString* out = vus_py_unicode_to_vus(result);
+    vus_py_Py_XDECREF_Fn(result);
+    vus_py_Py_XDECREF_Fn(pyval);
+    vus_py_Py_XDECREF_Fn(json_mod);
+    return out;
+}
+
+/* ---- 进程内插件调用 ---- */
+
+/* ---- 进程内插件调用 ---- */
+
+/* 构造内联 Python 助手：调用插件类 run(api, input_data)，返回结构化 JSON。
+ * helper 通过 exec 注入后在模块内执行；返回 (json, code)。 */
+static const char* VUS_PY_PLUGIN_HELPER =
+    "import json, sys, os\n"
+    "def _vus_run_plugin(plugin_root, plugin_name, input_data):\n"
+    "    sys.path.insert(0, plugin_root)\n"
+    "    for _cand in (os.path.join(plugin_root, '..', '..', 'scripts'),\n"
+    "                  os.path.join(os.getcwd(), 'scripts')):\n"
+    "        _cand = os.path.abspath(_cand)\n"
+    "        if os.path.isfile(os.path.join(_cand, 'vux_plugin_entry.py')) and _cand not in sys.path:\n"
+    "            sys.path.insert(0, _cand)\n"
+    "    try:\n"
+    "        from vux_plugin_entry import VuxPluginAPI, load_plugin\n"
+    "        plugin = load_plugin(os.path.join(plugin_root, plugin_name))\n"
+    "        if plugin is None:\n"
+    "            return json.dumps({'ok': False, 'error': 'load_plugin failed', 'data': None})\n"
+    "        api = VuxPluginAPI()\n"
+    "        if plugin.init(api) != 0:\n"
+    "            return json.dumps({'ok': False, 'error': 'init failed', 'data': None})\n"
+    "        code, out = plugin.run(api, input_data)\n"
+    "        plugin.cleanup(api)\n"
+    "        return json.dumps({'ok': code == 0, 'code': code, 'data': out})\n"
+    "    except Exception as e:\n"
+    "        return json.dumps({'ok': False, 'error': str(e), 'data': None})\n"
+    "    finally:\n"
+    "        for _p in list(sys.path):\n"
+    "            if _p and (_p == plugin_root or _p.endswith('scripts')):\n"
+    "                sys.path.remove(_p)\n";
+
+/* ---- 进程内插件调用 ---- */
+
+/* 定位插件根目录：优先 VUS_PLUGIN_DIR，其次 VUS_HOME，默认当前目录 */
+static int vus_py_resolve_plugin_root(char* out, size_t cap) {
+    const char* d = getenv("VUS_PLUGIN_DIR");
+    if (d && d[0]) { snprintf(out, cap, "%s", d); return 0; }
+    const char* home = getenv("VUS_HOME");
+    if (home && home[0]) { snprintf(out, cap, "%s", home); return 0; }
+    snprintf(out, cap, ".");
+    return 0;
+}
+
+/* 进程内调用插件，返回：
+ *   structured=1 -> VusObject*（解析插件返回的 JSON 结构化数据）
+ *   structured=0 -> VusString*（插件返回的原始字符串）
+ * 失败时 structured=0 返回空串，structured=1 返回 NULL。 */
+
+/* 从字典中取指定键的 PyObject*（借用引用） */
+static void* vus_py_dict_get_str(void* dict, const char* key) {
+    return vus_py_PyDict_GetItemStringFn(dict, key);
+}
+
+/* 将 PyObject*（Unicode）转为 UTF-8 C 字符串（借用引用） */
+static const char* vus_py_unicode_to_cstr(void* obj) {
+    return vus_py_PyUnicode_AsUTF8Fn(obj);
+}
+
+static void* vus_py_plugin_run_obj(VusString* plugin, VusString* cmd, int structured) {
+    if (!plugin || !cmd) return structured ? NULL : vus_string_new("");
+    if (vus_py_init() != 0) {
+        return structured ? NULL : vus_string_new("");
+    }
+
+    char root[2048];
+    vus_py_resolve_plugin_root(root, sizeof(root));
+    const char* pname = vus_string_cstr(plugin);
+    const char* input = vus_string_cstr(cmd);
+
+    /* 注入助手源码到内建命名空间（start=VUS_PY_FILE_INPUT，编译完整语句） */
+    if (vus_py_PyRun_StringFn(VUS_PY_PLUGIN_HELPER, VUS_PY_FILE_INPUT, vus_py_globals, vus_py_globals) == NULL) {
+        vus_py_PyErr_PrintFn();
+        vus_py_PyErr_ClearFn();
+        return structured ? NULL : vus_string_new("");
+    }
+
+    /* 调用 _vus_run_plugin(root, pname, input) */
+    void* args = vus_py_Py_BuildValueFn("(sss)", root, pname, input);
+    if (!args) return structured ? NULL : vus_string_new("");
+    void* result = vus_py_PyObject_CallObjectFn(vus_py_dict_get_str(vus_py_globals, "_vus_run_plugin"), args);
+    vus_py_Py_XDECREF_Fn(args);
+    if (!result) {
+        vus_py_PyErr_PrintFn();
+        vus_py_PyErr_ClearFn();
+        return structured ? NULL : vus_string_new("");
+    }
+
+    /* result 是 JSON 字符串 */
+    const char* js = vus_py_unicode_to_cstr(result);
+    if (!js) { vus_py_Py_XDECREF_Fn(result); return structured ? NULL : vus_string_new(""); }
+
+    if (structured) {
+        /* 解析 JSON 为 VusObject；临时串用完即释放，避免泄漏 */
+        VusString* tmp = vus_string_new(js);
+        VusObject* obj = (VusObject*)vus_json_parse(tmp);
+        vus_unref(tmp);
+        vus_py_Py_XDECREF_Fn(result);
+        return obj;
+    } else {
+        VusString* s = vus_string_new(js);
+        vus_py_Py_XDECREF_Fn(result);
+        return s;
+    }
+}
+
+VusString* vus_plugin_run_vux_inproc(VusString* plugin, VusString* cmd) {
+#ifdef VUS_USE_PY
+    return (VusString*)vus_py_plugin_run_obj(plugin, cmd, 0);
+#else
+    return vus_plugin_run_vux(plugin, cmd);
+#endif
+}
+
+void* vus_plugin_run_vux_json(VusString* plugin, VusString* cmd) {
+#ifdef VUS_USE_PY
+    return vus_py_plugin_run_obj(plugin, cmd, 1);
+#else
+    return NULL;
+#endif
+}
+
+VusString* vus_typeof(void* obj) {
+    if (!obj) return vus_string_new("空");
+    /* 非结构化容器（普通 VusString*）视为字符串 */
+    if (!vus_is_object(obj)) return vus_string_new("字符串");
+    VusObject* o = (VusObject*)obj;
+    switch (o->type) {
+        case TYPE_INT:    return vus_string_new("整数");
+        case TYPE_FLOAT:  return vus_string_new("浮点");
+        case TYPE_STR:    return vus_string_new("字符串");
+        case TYPE_BOOL:   return vus_string_new("布尔");
+        case TYPE_LIST:   return vus_string_new("列表");
+        case TYPE_DICT:   return vus_string_new("字典");
+        default:          return vus_string_new("空");
+    }
+}
+
+#else /* !VUS_USE_PY：降级实现 */
+
+int vus_py_init(void) { return -1; }
+
+VusString* vus_plugin_run_vux_inproc(VusString* plugin, VusString* cmd) {
+    return vus_plugin_run_vux(plugin, cmd);
+}
+
+void* vus_plugin_run_vux_json(VusString* plugin, VusString* cmd) {
+    (void)plugin; (void)cmd;
+    return NULL;
+}
+
+void* vus_json_parse(VusString* s) { (void)s; return NULL; }
+VusString* vus_json_generate(void* obj) { (void)obj; return vus_string_new(""); }
+VusString* vus_typeof(void* obj) { (void)obj; return vus_string_new("空"); }
+
+#endif /* VUS_USE_PY */
 
 /* ---- 文件操作 ---- */
 

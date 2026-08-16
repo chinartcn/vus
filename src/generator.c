@@ -548,6 +548,63 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
         return strdup("(0)");
     }
 
+    /* ============= 分级日志内置函数（EasyLogger） ============= */
+    if (strcmp(call->func_name, "日志_调试") == 0) {
+        if (call->args && call->args->count > 0) {
+            char *arg = gen_expr(buf, call->args->items[0]);
+            size_t sz = strlen(arg) + 64;
+            char *result = (char *)malloc(sz);
+            snprintf(result, sz, "vus_log_debug(%s)", arg);
+            free(arg);
+            return result;
+        }
+        return strdup("vus_log_debug(vus_string_new(\"\"))");
+    }
+    if (strcmp(call->func_name, "日志_信息") == 0) {
+        if (call->args && call->args->count > 0) {
+            char *arg = gen_expr(buf, call->args->items[0]);
+            size_t sz = strlen(arg) + 64;
+            char *result = (char *)malloc(sz);
+            snprintf(result, sz, "vus_log_info(%s)", arg);
+            free(arg);
+            return result;
+        }
+        return strdup("vus_log_info(vus_string_new(\"\"))");
+    }
+    if (strcmp(call->func_name, "日志_警告") == 0) {
+        if (call->args && call->args->count > 0) {
+            char *arg = gen_expr(buf, call->args->items[0]);
+            size_t sz = strlen(arg) + 64;
+            char *result = (char *)malloc(sz);
+            snprintf(result, sz, "vus_log_warn(%s)", arg);
+            free(arg);
+            return result;
+        }
+        return strdup("vus_log_warn(vus_string_new(\"\"))");
+    }
+    if (strcmp(call->func_name, "日志_错误") == 0) {
+        if (call->args && call->args->count > 0) {
+            char *arg = gen_expr(buf, call->args->items[0]);
+            size_t sz = strlen(arg) + 64;
+            char *result = (char *)malloc(sz);
+            snprintf(result, sz, "vus_log_error(%s)", arg);
+            free(arg);
+            return result;
+        }
+        return strdup("vus_log_error(vus_string_new(\"\"))");
+    }
+    if (strcmp(call->func_name, "日志_级别") == 0) {
+        if (call->args && call->args->count > 0) {
+            char *arg = gen_expr(buf, call->args->items[0]);
+            size_t sz = strlen(arg) + 64;
+            char *result = (char *)malloc(sz);
+            snprintf(result, sz, "vus_log_set_level(%s)", arg);
+            free(arg);
+            return result;
+        }
+        return strdup("vus_log_set_level(vus_string_new(\"信息\"))");
+    }
+
     /* ============= TUI 插件内置函数 ============= */
     if (strcmp(call->func_name, "tui_清屏") == 0) {
         return strdup("vus_plugin_tui_clear(NULL)");
@@ -671,6 +728,59 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
             char *arg = gen_expr(buf, call->args->items[0]);
             char result[4096];
             snprintf(result, sizeof(result), "vus_plugin_file_list(%s)", arg);
+            free(arg);
+            return strdup(result);
+        }
+    }
+
+    /* ============= 插件调用内置函数 ============= */
+    if (strcmp(call->func_name, "插件_运行") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *plugin = gen_expr(buf, call->args->items[0]);
+            char *cmd = gen_expr(buf, call->args->items[1]);
+            char result[4096];
+#ifdef VUS_USE_PY
+            snprintf(result, sizeof(result), "vus_plugin_run_vux_inproc(%s, %s)", plugin, cmd);
+#else
+            snprintf(result, sizeof(result), "vus_plugin_run_vux(%s, %s)", plugin, cmd);
+#endif
+            free(plugin); free(cmd);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "插件_运行JSON") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *plugin = gen_expr(buf, call->args->items[0]);
+            char *cmd = gen_expr(buf, call->args->items[1]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_run_vux_json(%s, %s)", plugin, cmd);
+            free(plugin); free(cmd);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "JSON_解析") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *arg = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_json_parse(%s)", arg);
+            free(arg);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "JSON_生成") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *arg = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_json_generate(%s)", arg);
+            free(arg);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "typeof") == 0 || strcmp(call->func_name, "类型") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *arg = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_typeof(%s)", arg);
             free(arg);
             return strdup(result);
         }
@@ -934,6 +1044,49 @@ static char *gen_expr(GenBuf *buf, VusAstNode *node) {
             free(obj);
             free(idx);
             return strdup(result);
+        }
+        case VUS_AST_LIST_LITERAL: {
+            VusAstListLiteral *ll = (VusAstListLiteral *)node;
+            /* 用 GCC statement 表达式构造 VusObject（装箱）并逐项 append，
+             * 使列表字面量与 VUS 字符串值模型隔离，可被 vus_print/typeof 安全识别 */
+            char *tmp = strdup("({VusObject* _o=(VusObject*)calloc(1,sizeof(VusObject));"
+                "_o->magic=VUS_OBJECT_MAGIC;_o->type=TYPE_LIST;"
+                "_o->u.list=(VusList*)vus_list_new(TYPE_MIXED);");
+            if (ll->items) {
+                for (size_t i = 0; i < ll->items->count; i++) {
+                    char *e = gen_expr(buf, ll->items->items[i]);
+                    char *tmp2;
+                    if (asprintf(&tmp2, "vus_list_append(_o->u.list, (void*)(%s));", e) < 0) { tmp2 = NULL; }
+                    char *nb = (char*)realloc(tmp, strlen(tmp) + strlen(tmp2?tmp2:"") + 1);
+                    if (nb) { strcat(nb, tmp2?tmp2:""); tmp = nb; }
+                    free(tmp2); free(e);
+                }
+            }
+            char *tail = "_o;})";
+            char *nb2 = (char*)realloc(tmp, strlen(tmp) + strlen(tail) + 1);
+            if (nb2) { strcat(nb2, tail); tmp = nb2; }
+            return tmp;
+        }
+        case VUS_AST_DICT_LITERAL: {
+            VusAstDictLiteral *dl = (VusAstDictLiteral *)node;
+            char *tmp = strdup("({VusObject* _o=(VusObject*)calloc(1,sizeof(VusObject));"
+                "_o->magic=VUS_OBJECT_MAGIC;_o->type=TYPE_DICT;"
+                "_o->u.dict=(VusDict*)vus_dict_new();");
+            if (dl->keys && dl->values) {
+                for (size_t i = 0; i < dl->keys->count; i++) {
+                    char *k = gen_expr(buf, dl->keys->items[i]);
+                    char *v = gen_expr(buf, dl->values->items[i]);
+                    char *tmp2;
+                    if (asprintf(&tmp2, "vus_dict_set(_o->u.dict, (VusString*)(%s), (void*)(%s));", k, v) < 0) { tmp2 = NULL; }
+                    char *nb = (char*)realloc(tmp, strlen(tmp) + strlen(tmp2?tmp2:"") + 1);
+                    if (nb) { strcat(nb, tmp2?tmp2:""); tmp = nb; }
+                    free(tmp2); free(k); free(v);
+                }
+            }
+            char *tail = "_o;})";
+            char *nb2 = (char*)realloc(tmp, strlen(tmp) + strlen(tail) + 1);
+            if (nb2) { strcat(nb2, tail); tmp = nb2; }
+            return tmp;
         }
         default:
             return strdup("NULL");
@@ -1272,12 +1425,31 @@ static void gen_statement(GenBuf *buf, VusAstNode *node) {
 
 /* ============ 函数定义生成 ============ */
 
-/* 递归扫描 AST 节点，收集局部变量名 */
-static void gen_collect_locals(VusAstNode *node, VusAstList *locals) {
+/* 判断某个变量名是否为函数参数（需在函数顶部单独声明，局部变量收集时须排除，
+ * 否则会与参数声明产生重复声明，导致 C 编译错误 "redefinition"。） */
+static int gen_is_param_name(VusAstFunctionDef *func, const char *name) {
+    if (!func || !func->params || !name) return 0;
+    for (size_t i = 0; i < func->params->count; i++) {
+        VusAstNode *pnode = func->params->items[i];
+        if (pnode->type == VUS_AST_PARAM) {
+            VusAstParam *p = (VusAstParam *)pnode;
+            if (p->name && strcmp(p->name, name) == 0) return 1;
+        } else if (pnode->type == VUS_AST_PARAM_DEFAULT) {
+            VusAstParamDefault *p = (VusAstParamDefault *)pnode;
+            if (p->name && strcmp(p->name, name) == 0) return 1;
+        }
+    }
+    return 0;
+}
+
+/* 递归扫描 AST 节点，收集局部变量名（排除函数参数） */
+static void gen_collect_locals(VusAstFunctionDef *func, VusAstNode *node, VusAstList *locals) {
     if (!node) return;
     if (node->type == VUS_AST_ASSIGN) {
         VusAstAssign *assign = (VusAstAssign *)node;
         if (assign->is_local) {
+            /* 参数名已在函数顶部声明，跳过，避免重复声明 */
+            if (gen_is_param_name(func, assign->target)) return;
             /* 检查是否已收集 */
             for (size_t i = 0; i < locals->count; i++) {
                 VusAstIdentifier *id = (VusAstIdentifier *)locals->items[i];
@@ -1290,51 +1462,51 @@ static void gen_collect_locals(VusAstNode *node, VusAstList *locals) {
         VusAstIf *ifn = (VusAstIf *)node;
         if (ifn->then_body) {
             for (size_t i = 0; i < ifn->then_body->count; i++)
-                gen_collect_locals(ifn->then_body->items[i], locals);
+                gen_collect_locals(func, ifn->then_body->items[i], locals);
         }
         if (ifn->elif_bodies) {
             for (size_t i = 0; i < ifn->elif_bodies->count; i++) {
                 VusAstList *body = (VusAstList *)ifn->elif_bodies->items[i];
                 if (body) {
                     for (size_t j = 0; j < body->count; j++)
-                        gen_collect_locals(body->items[j], locals);
+                        gen_collect_locals(func, body->items[j], locals);
                 }
             }
         }
         if (ifn->else_body) {
             for (size_t i = 0; i < ifn->else_body->count; i++)
-                gen_collect_locals(ifn->else_body->items[i], locals);
+                gen_collect_locals(func, ifn->else_body->items[i], locals);
         }
     } else if (node->type == VUS_AST_FOR_RANGE) {
         VusAstForRange *fr = (VusAstForRange *)node;
         if (fr->body) {
             for (size_t i = 0; i < fr->body->count; i++)
-                gen_collect_locals(fr->body->items[i], locals);
+                gen_collect_locals(func, fr->body->items[i], locals);
         }
     } else if (node->type == VUS_AST_FOR_EACH) {
         VusAstForEach *fe = (VusAstForEach *)node;
         if (fe->body) {
             for (size_t i = 0; i < fe->body->count; i++)
-                gen_collect_locals(fe->body->items[i], locals);
+                gen_collect_locals(func, fe->body->items[i], locals);
         }
     } else if (node->type == VUS_AST_WHILE) {
         VusAstWhile *wl = (VusAstWhile *)node;
         if (wl->body) {
             for (size_t i = 0; i < wl->body->count; i++)
-                gen_collect_locals(wl->body->items[i], locals);
+                gen_collect_locals(func, wl->body->items[i], locals);
         }
     } else if (node->type == VUS_AST_TRY) {
         VusAstTry *tryn = (VusAstTry *)node;
         if (tryn->try_body) {
             for (size_t i = 0; i < tryn->try_body->count; i++)
-                gen_collect_locals(tryn->try_body->items[i], locals);
+                gen_collect_locals(func, tryn->try_body->items[i], locals);
         }
         if (tryn->except_bodies) {
             for (size_t i = 0; i < tryn->except_bodies->count; i++) {
                 VusAstList *body = (VusAstList *)tryn->except_bodies->items[i];
                 if (body) {
                     for (size_t j = 0; j < body->count; j++)
-                        gen_collect_locals(body->items[j], locals);
+                        gen_collect_locals(func, body->items[j], locals);
                 }
             }
         }
@@ -1400,7 +1572,7 @@ static void gen_function(GenBuf *buf, VusAstFunctionDef *func) {
     if (func->body) {
         VusAstList *locals = vus_ast_list_new();
         for (size_t i = 0; i < func->body->count; i++) {
-            gen_collect_locals(func->body->items[i], locals);
+            gen_collect_locals(func, func->body->items[i], locals);
         }
         for (size_t i = 0; i < locals->count; i++) {
             VusAstIdentifier *id = (VusAstIdentifier *)locals->items[i];
@@ -1567,22 +1739,32 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config) {
     gen_emit(buf, "    return _vus_args[0];\n");
     gen_emit(buf, "}\n\n");
 
-    /* 全局变量声明 */
+    /* 全局变量声明（去重，避免同一变量多次赋值导致重复声明） */
     if (program->statements) {
+        GenBuf gl;
+        memset(&gl, 0, sizeof(gl));
+        gl.cap = 4096;
+        gl.data = (char *)malloc(gl.cap);
+        gl.data[0] = '\0';
         for (size_t i = 0; i < program->statements->count; i++) {
             VusAstNode *node = program->statements->items[i];
+            const char *name = NULL;
             if (node->type == VUS_AST_ASSIGN) {
-                VusAstAssign *assign = (VusAstAssign *)node;
-                char san[256];
-                gen_sanitize_name(assign->target, san, sizeof(san));
-                gen_emitf(buf, "VusString* vus_%s = NULL;\n", san);
+                name = ((VusAstAssign *)node)->target;
             } else if (node->type == VUS_AST_GLOBAL_DECL) {
-                VusAstGlobalDecl *gd = (VusAstGlobalDecl *)node;
-                char san[256];
-                gen_sanitize_name(gd->name, san, sizeof(san));
-                gen_emitf(buf, "VusString* vus_%s = NULL;\n", san);
+                name = ((VusAstGlobalDecl *)node)->name;
             }
+            if (!name) continue;
+            char san[256];
+            gen_sanitize_name(name, san, sizeof(san));
+            char decl[320];
+            snprintf(decl, sizeof(decl), "VusString* vus_%s = NULL;\n", san);
+            /* 检查是否已声明 */
+            if (strstr(gl.data, decl)) continue;
+            gen_emit(&gl, decl);
         }
+        gen_emit(buf, gl.data);
+        free(gl.data);
     }
     gen_emit(buf, "\n");
 
@@ -1694,6 +1876,19 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
         rt_coro[0] = '\0';
     }
 
+    /* EasyLogger 日志库：头文件路径 + 需要一并编译的源码（随 libvus_rt.c 链接） */
+    char elog_inc[1024];
+    char elog_src[2048];
+    if (config->rt_dir[0]) {
+        snprintf(elog_inc, sizeof(elog_inc), "-I\"%s/easylogger/inc\"", abs_rt_dir);
+        snprintf(elog_src, sizeof(elog_src),
+                 "\"%s/easylogger/src/elog.c\" \"%s/easylogger/src/elog_utils.c\" \"%s/elog_port.c\"",
+                 abs_rt_dir, abs_rt_dir, abs_rt_dir);
+    } else {
+        elog_inc[0] = '\0';
+        elog_src[0] = '\0';
+    }
+
     /* 构建 GCC 命令 */
     char cmd[8192];
     int n;
@@ -1708,29 +1903,67 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
     const char *curl_def = has_curl ? "-DVUS_HAVE_CURL" : "";
     const char *curl_lib = has_curl ? "-lcurl" : "";
 
+    /* 检测 libpython 开发环境（可选）：存在则启用进程内嵌入 */
+    int has_py = 0;
+    char py_inc[1024] = {0};
+    char py_ld[2048] = {0};
+    FILE *py_check = popen("python3-config --includes 2>/dev/null", "r");
+    if (py_check) {
+        if (fgets(py_inc, sizeof(py_inc), py_check)) {
+            /* 去掉末尾换行 */
+            size_t pl = strlen(py_inc);
+            while (pl > 0 && (py_inc[pl-1] == '\n' || py_inc[pl-1] == ' ')) py_inc[--pl] = '\0';
+            if (py_inc[0]) has_py = 1;
+        }
+        pclose(py_check);
+    }
+    if (has_py) {
+        FILE *py_ldf = popen("python3-config --ldflags 2>/dev/null", "r");
+        if (py_ldf) {
+            if (fgets(py_ld, sizeof(py_ld), py_ldf)) {
+                size_t pl = strlen(py_ld);
+                while (pl > 0 && (py_ld[pl-1] == '\n' || py_ld[pl-1] == ' ')) py_ld[--pl] = '\0';
+            }
+            pclose(py_ldf);
+        }
+    }
+    const char *py_def = has_py ? "-DVUS_USE_PY" : "";
+    const char *py_inc_str = has_py ? py_inc : "";
+    const char *py_ld_str = has_py ? py_ld : "";
+
     if (extra_objects && extra_objects[0]) {
         n = snprintf(cmd, sizeof(cmd),
-            "gcc %s -g %s -I\"%s\" \"%s\" \"%s\" \"%s\" %s -o \"%s\" -lm -lpthread %s 2>&1",
+            "gcc %s -g %s %s %s -I\"%s\" %s \"%s\" \"%s\" \"%s\" %s %s -o \"%s\" -lm -lpthread %s %s 2>&1",
             opt_level,
             curl_def,
+            py_def,
+            py_inc_str,
             abs_rt_dir,
+            elog_inc,
             c_source_path,
             rt_source,
             rt_coro,
+            elog_src,
             extra_objects,
             output_path,
-            curl_lib);
+            curl_lib,
+            py_ld_str);
     } else {
         n = snprintf(cmd, sizeof(cmd),
-            "gcc %s -g %s -I\"%s\" \"%s\" \"%s\" \"%s\" -o \"%s\" -lm -lpthread %s 2>&1",
+            "gcc %s -g %s %s %s -I\"%s\" %s \"%s\" \"%s\" \"%s\" %s -o \"%s\" -lm -lpthread %s %s 2>&1",
             opt_level,
             curl_def,
+            py_def,
+            py_inc_str,
             abs_rt_dir,
+            elog_inc,
             c_source_path,
             rt_source,
             rt_coro,
+            elog_src,
             output_path,
-            curl_lib);
+            curl_lib,
+            py_ld_str);
     }
 
     if (n >= (int)sizeof(cmd)) {
