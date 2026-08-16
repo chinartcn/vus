@@ -1,0 +1,1 @@
+meilisearch.vux >= 1.0.0
