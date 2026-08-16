@@ -26,6 +26,14 @@ static GC       s_gc = 0;
 static XImage*  s_img = 0;
 static Atom     s_wm_delete = 0;
 static int      s_running = 0;
+
+/* 返回无符号整数中最低有效位 SET 的位置（用于把 8bit 颜色分量左移到掩码位） */
+static int ffs_pos(unsigned long mask)
+{
+    int pos = 0;
+    while (mask && !(mask & 1)) { mask >>= 1; pos++; }
+    return pos;
+}
 #endif
 
 /* 把 ARGB8888 帧缓冲导出为 PPM P6 图像（RGB 各 8bit） */
@@ -109,8 +117,25 @@ void vus_gui_platform_redraw(int width, int height, const unsigned int* fb)
 
 #ifdef VUS_GUI_X11
     if (!s_dpy || !s_img || !fb) { return; }
-    /* ARGB8888 与 32bit ZPixmap 布局一致：低 24bit 为 BGR，alpha 为 pad 字节 */
-    memcpy(s_img->data, fb, (size_t)width * (size_t)height * 4);
+    /* 用 XPutPixel 逐像素写入 s_img->data：Xlib 会根据 XImage 的
+     * byte_order / bit_order / 各颜色掩码自动换算像素值，从而适配
+     * 任意 visual / 深度 / 字节序（Termux Xwayland、PC X11、Xvfb）。
+     * 相比直接 memcpy 假设内存布局与服务器一致，可避免错位与方向颠倒。 */
+    for (int y = 0; y < height; y++)
+    {
+        for (int x = 0; x < width; x++)
+        {
+            unsigned int px = fb[(size_t)y * (size_t)width + (size_t)x];
+            unsigned long val = 0;
+            if (s_img->red_mask)
+                val |= ((unsigned long)((px >> 16) & 0xFF) << ffs_pos(s_img->red_mask)) & s_img->red_mask;
+            if (s_img->green_mask)
+                val |= ((unsigned long)((px >> 8) & 0xFF) << ffs_pos(s_img->green_mask)) & s_img->green_mask;
+            if (s_img->blue_mask)
+                val |= ((unsigned long)(px & 0xFF) << ffs_pos(s_img->blue_mask)) & s_img->blue_mask;
+            XPutPixel(s_img, x, y, val);
+        }
+    }
     XPutImage(s_dpy, s_win, s_gc, s_img, 0, 0, 0, 0,
               (unsigned int)width, (unsigned int)height);
     XFlush(s_dpy);
