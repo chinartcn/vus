@@ -657,6 +657,17 @@ void vus_ast_node_free(VusAstNode *node) {
     case VUS_AST_FROM_IMPORT:
         vus_ast_node_free_from_import(node);
         break;
+    case VUS_AST_LIST_LITERAL: {
+        VusAstListLiteral *n = (VusAstListLiteral *)node;
+        vus_ast_list_free(n->items);
+        break;
+    }
+    case VUS_AST_DICT_LITERAL: {
+        VusAstDictLiteral *n = (VusAstDictLiteral *)node;
+        vus_ast_list_free(n->keys);
+        vus_ast_list_free(n->values);
+        break;
+    }
     default:
         break;
     }
