@@ -149,6 +149,6 @@
 - 每个角色完成其交接物后，通过 Issue 评论 / PR 备注 / 对话框接力通知下一个角色。
 - **当前同步状态**（实时更新，供派发依据；各 AI 环境隔离，未提交改动互不可见）：
   - ✅ **EasyLogger 集成（Issue IK907N）已全部完成**：A1-A5 + B1-B2 完成，PR #1 已合入 master，Issue 已关闭，所有 AI 确认 3/3。
-  - 📌 **待排期**：将 `VusAstListLiteral` / `VusAstDictLiteral` 加入 `vus_ast_node_free`，完善内存管理覆盖（文档AI 建议）。
-  - ➡️ 下一步由人类确认新任务后，创建新 Issue 并写清分工再派发。
+  - ✅ **AST 内存管理改进（Issue IK90K0）已全部完成**：C1/C2（开发②）补 LIST/DICT_LITERAL 分支 + 回归用例，C3（文档AI）审查通过，PR #2 已合入 master，Issue 已关闭，回归 42/42。
+  - ➡️ 当前无待办任务。下一步由人类确认新需求后，创建新 Issue 并写清分工再派发。
 - 合并前需满足：设计文档已入库、代码通过审查（内容 + Gitee 审批）、测试通过。
