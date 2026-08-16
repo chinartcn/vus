@@ -120,7 +120,8 @@ int vus_gui_platform_init(int width, int height, const char* title)
     {
         XStoreName(s_dpy, s_win, title);
     }
-    XSelectInput(s_dpy, s_win, ExposureMask | StructureNotifyMask | KeyPressMask);
+    XSelectInput(s_dpy, s_win, ExposureMask | StructureNotifyMask | KeyPressMask |
+                                    ButtonPressMask | PointerMotionMask);
     XMapWindow(s_dpy, s_win);
 
     s_gc = XCreateGC(s_dpy, s_win, 0, NULL);
@@ -244,6 +245,60 @@ void vus_gui_platform_redraw(int width, int height, const unsigned int* fb)
 #endif
 }
 
+#ifdef VUS_GUI_X11
+/* 单条 X 事件处理（阻塞 run 循环与非阻塞 poll 共用） */
+static void vus_gui_platform_handle_event(XEvent *ev, int width, int height, const unsigned int* fb)
+{
+    switch (ev->type)
+    {
+    case Expose:
+        vus_gui_platform_redraw(width, height, fb);
+        break;
+    case ClientMessage:
+        if ((Atom)ev->xclient.data.l[0] == s_wm_delete)
+        {
+            s_running = 0;
+        }
+        break;
+    case KeyPress:
+        /* 任意按键退出事件循环，便于测试 */
+        s_running = 0;
+        break;
+    case ButtonPress:
+        /* 鼠标/触摸按下：记录坐标供 图形_按钮点击 命中，并触发 事件_点击 回调 */
+        vus_gui_platform_emit_click(ev->xbutton.x, ev->xbutton.y);
+        break;
+    case MotionNotify:
+        /* 指针移动：可选的连续回调，当前不派发，保留作后续扩展 */
+        break;
+    default:
+        break;
+    }
+}
+#endif /* VUS_GUI_X11 */
+
+/* 非阻塞取事件：处理当前 X 事件队列（含点击/重绘/退出），供轮询式交互模型。
+ * 返回不阻塞；处理事件数设上限，避免 Motion 洪泛导致忙等。 */
+void vus_gui_platform_poll(int width, int height, const unsigned int* fb)
+{
+#ifdef VUS_GUI_X11
+    if (!s_dpy)
+    {
+        return;
+    }
+    int guard = 128;
+    while (guard-- > 0 && s_running && XPending(s_dpy))
+    {
+        XEvent ev;
+        XNextEvent(s_dpy, &ev);
+        vus_gui_platform_handle_event(&ev, width, height, fb);
+    }
+    XFlush(s_dpy);
+#else
+    (void)width; (void)height; (void)fb;
+#endif
+}
+
 void vus_gui_platform_run(int width, int height, const unsigned int* fb)
 {
 #ifdef VUS_GUI_X11
@@ -255,24 +310,7 @@ void vus_gui_platform_run(int width, int height, const unsigned int* fb)
     {
         XEvent ev;
         XNextEvent(s_dpy, &ev);
-        switch (ev.type)
-        {
-        case Expose:
-            vus_gui_platform_redraw(width, height, fb);
-            break;
-        case ClientMessage:
-            if ((Atom)ev.xclient.data.l[0] == s_wm_delete)
-            {
-                s_running = 0;
-            }
-            break;
-        case KeyPress:
-            /* 任意按键退出事件循环，便于测试 */
-            s_running = 0;
-            break;
-        default:
-            break;
-        }
+        vus_gui_platform_handle_event(&ev, width, height, fb);
     }
     if (s_img)
     {

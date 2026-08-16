@@ -709,7 +709,59 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
         return strdup("vus_gui_run()");
     }
 
-    /* ============= TUI 插件内置函数 ============= */
+    /* ===== 阶段2：控件与轮询交互 =====
+     * 图形_按钮(名,x,y,宽,高,文本)：创建并绘制一个按钮，登记命中矩形。
+     * 图形_取事件()：非阻塞处理 X 事件队列，更新点击坐标。
+     * 图形_按钮点击(名)：命中检测，返回 "true"/"false"，可直接作 如果 条件。 */
+    if (strcmp(call->func_name, "图形_按钮") == 0) {
+        if (call->args && call->args->count >= 6) {
+            char *nm = gen_expr(buf, call->args->items[0]);
+            char *x  = gen_expr(buf, call->args->items[1]);
+            char *y  = gen_expr(buf, call->args->items[2]);
+            char *wd = gen_expr(buf, call->args->items[3]);
+            char *ht = gen_expr(buf, call->args->items[4]);
+            char *tx = gen_expr(buf, call->args->items[5]);
+            char result[4096];
+            snprintf(result, sizeof(result),
+                "vus_gui_button(vus_string_cstr(%s), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), vus_string_cstr(%s))",
+                nm, x, y, wd, ht, tx);
+            free(nm); free(x); free(y); free(wd); free(ht); free(tx);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_取事件") == 0) {
+        g_uses_gui = 1;
+        return strdup("vus_gui_poll()");
+    }
+    if (strcmp(call->func_name, "图形_按钮点击") == 0 ||
+        strcmp(call->func_name, "按钮被点击") == 0) {
+        /* 图形_按钮点击(名) / 按钮被点击(名)：自然语义别名，排在控件判定后面。
+         * 返回 "true"/"false"，可直接作 如果 条件。 */
+        if (call->args && call->args->count >= 1) {
+            char *nm = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result),
+                "vus_gui_button_clicked(vus_string_cstr(%s))", nm);
+            free(nm);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_模拟点击") == 0) {
+        /* 图形_模拟点击(x,y)：注入一次点击坐标，headless 测试命中路径用。 */
+        if (call->args && call->args->count >= 2) {
+            char *x = gen_expr(buf, call->args->items[0]);
+            char *y = gen_expr(buf, call->args->items[1]);
+            char result[1024];
+            snprintf(result, sizeof(result),
+                "vus_gui_sim_click((int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err))",
+                x, y);
+            free(x); free(y);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
     if (strcmp(call->func_name, "tui_清屏") == 0) {
         return strdup("vus_plugin_tui_clear(NULL)");
     }
@@ -2062,7 +2114,9 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
             pclose(x11_check);
         }
         gui_def = has_x11 ? "-DVUS_GUI_X11" : "";
-        gui_lib = has_x11 ? "-lX11" : "";
+        /* -rdynamic：把主程序全局符号导出到 dynsym，dlsym 才能反查用户脚本
+           定义的 事件_点击 等回调函数；-ldl 提供 dlsym（Termux bionic 必需）。 */
+        gui_lib = has_x11 ? "-lX11 -rdynamic -ldl" : "-rdynamic -ldl";
     }
 
     if (extra_objects && extra_objects[0]) {
