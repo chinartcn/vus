@@ -268,12 +268,29 @@ typedef struct {
     int            value;       /* 0 或 1 */
 } VusAstBool;
 
-/* 其他简单节点类型 */
+/* NullLiteral — 空字面量 */
 typedef struct {
     VusAstNodeType type;   /* VUS_AST_NULL_LITERAL */
     int            line;
     int            column;
 } VusAstNull;
+
+/* ListLiteral — 列表字面量 [e1, e2, ...] */
+typedef struct {
+    VusAstNodeType type;   /* VUS_AST_LIST_LITERAL */
+    int            line;
+    int            column;
+    VusAstList    *items;  /* 元素表达式列表 */
+} VusAstListLiteral;
+
+/* DictLiteral — 字典字面量 {k1:v1, k2:v2, ...} */
+typedef struct {
+    VusAstNodeType type;   /* VUS_AST_DICT_LITERAL */
+    int            line;
+    int            column;
+    VusAstList    *keys;   /* 键表达式列表 */
+    VusAstList    *values; /* 值表达式列表 */
+} VusAstDictLiteral;
 
 typedef struct {
     VusAstNodeType type;   /* VUS_AST_BREAK / CONTINUE */
