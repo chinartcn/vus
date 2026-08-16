@@ -87,6 +87,8 @@ int vus_gui_platform_init(int width, int height, const char* title)
             if (strchr(fl, 'v') || strchr(fl, 'V')) { s_flip_v = 1; }
             if (strchr(fl, 'h') || strchr(fl, 'H')) { s_flip_h = 1; }
         }
+        fprintf(stderr, "[flip] VUS_X11_FLIP='%s' -> flip_v=%d flip_h=%d\n",
+                fl ? fl : "(null)", s_flip_v, s_flip_h);
     }
 
     s_win = XCreateSimpleWindow(s_dpy, RootWindow(s_dpy, screen),
