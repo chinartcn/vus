@@ -27,6 +27,16 @@ static XImage*  s_img = 0;
 static Atom     s_wm_delete = 0;
 static int      s_running = 0;
 
+/* 显示方向补偿开关：部分后端（如 Termux-X11 的 GL 渲染）会把窗口内容
+ * 翻转显示。用环境变量 VUS_X11_FLIP 控制：
+ *   空/未设置  不翻转
+ *   v          垂直翻转（上下颠倒）
+ *   h          水平翻转（左右镜像）
+ *   vh / hv    垂直+水平翻转（180度）
+ * 在 vus_gui_platform_init 中读取一次，redraw 时按开关映射像素坐标。 */
+static int s_flip_v = 0;
+static int s_flip_h = 0;
+
 /* 返回无符号整数中最低有效位 SET 的位置（用于把 8bit 颜色分量左移到掩码位） */
 static int ffs_pos(unsigned long mask)
 {
@@ -66,6 +76,19 @@ int vus_gui_platform_init(int width, int height, const char* title)
         return 0;
     }
     int screen = DefaultScreen(s_dpy);
+
+    /* 读取显示方向补偿开关（Termux-X11 等后端可能翻转） */
+    s_flip_v = 0;
+    s_flip_h = 0;
+    {
+        const char* fl = getenv("VUS_X11_FLIP");
+        if (fl)
+        {
+            if (strchr(fl, 'v') || strchr(fl, 'V')) { s_flip_v = 1; }
+            if (strchr(fl, 'h') || strchr(fl, 'H')) { s_flip_h = 1; }
+        }
+    }
+
     s_win = XCreateSimpleWindow(s_dpy, RootWindow(s_dpy, screen),
                                 0, 0, (unsigned int)width, (unsigned int)height,
                                 1, BlackPixel(s_dpy, screen), WhitePixel(s_dpy, screen));
@@ -133,7 +156,10 @@ void vus_gui_platform_redraw(int width, int height, const unsigned int* fb)
                 val |= ((unsigned long)((px >> 8) & 0xFF) << ffs_pos(s_img->green_mask)) & s_img->green_mask;
             if (s_img->blue_mask)
                 val |= ((unsigned long)(px & 0xFF) << ffs_pos(s_img->blue_mask)) & s_img->blue_mask;
-            XPutPixel(s_img, x, y, val);
+            /* 翻转补偿：按 VUS_X11_FLIP 映射目标像素坐标 */
+            int tx = s_flip_h ? (width - 1 - x) : x;
+            int ty = s_flip_v ? (height - 1 - y) : y;
+            XPutPixel(s_img, tx, ty, val);
         }
     }
     XPutImage(s_dpy, s_win, s_gc, s_img, 0, 0, 0, 0,
