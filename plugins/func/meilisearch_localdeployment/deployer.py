@@ -115,8 +115,8 @@ class BinaryDeployer(Deployer):
 
     mode = "binary"
 
-    def _binary(self, version):
-        asset = target.resolve_asset()
+    def _binary(self, version, asset=None):
+        asset = asset or target.resolve_asset()
         return BIN_DIR / f"meilisearch-{version.lstrip('v')}-{asset}"
 
     def install(self, version, cfg):
@@ -125,7 +125,7 @@ class BinaryDeployer(Deployer):
             return None, "当前平台（arm32 非 Alpine Linux）无官方二进制，请从源码构建 Meilisearch 后手动放置。"
 
         url = target.download_url(version, asset)
-        dest = self._binary(version)
+        dest = self._binary(version, asset)
         BIN_DIR.mkdir(parents=True, exist_ok=True)
         try:
             with urllib.request.urlopen(url, timeout=60) as resp:
@@ -146,8 +146,8 @@ class BinaryDeployer(Deployer):
 
         data_dir = Path(cfg["data_dir"])
         data_dir.mkdir(parents=True, exist_ok=True)
-        log_path = Path(cfg.get("_log_path", ""))
-        log_fh = open(log_path, "a", encoding="utf-8") if str(log_path) else subprocess.DEVNULL
+        log_path = cfg.get("_log_path", "")
+        log_fh = open(log_path, "a", encoding="utf-8") if log_path else subprocess.DEVNULL
 
         cmd = [
             str(binary),
@@ -157,7 +157,15 @@ class BinaryDeployer(Deployer):
         if cfg.get("master_key"):
             cmd += ["--master-key", cfg["master_key"]]
 
-        proc = subprocess.Popen(cmd, stdout=log_fh, stderr=subprocess.STDOUT)
+        env = os.environ.copy()
+        if cfg.get("cors_origins"):
+            env["MEILI_HTTP_CORS_ORIGIN"] = cfg["cors_origins"]
+
+        # stdin 重定向到 DEVNULL（避免父进程退出后 stdin EOF 导致子进程退出），
+        # 并 start_new_session 脱离父进程组，防止沙箱/父进程退出时连带清理 meilisearch。
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
+                                stdout=log_fh, stderr=subprocess.STDOUT,
+                                env=env, start_new_session=True)
         cfg["_pid"] = proc.pid
         return proc, None
 

@@ -1,0 +1,78 @@
+#// 真实 VUS 程序：调用 meilisearch 插件生成食谱搜索页面
+#//
+#// 1. 调用 meilisearch 插件查询索引信息
+#// 2. 调用 meilisearch 插件搜索示例数据
+#// 3. 生成本地搜索结果页面 data/search.html
+#// 4. 页面内嵌 meilisearch JS SDK，通过公网隧道实时搜索
+
+打印("=== VUS × Meilisearch 搜索页面生成器 ===\n")
+
+#// 目标页面路径
+页面路径 = "data/search.html"
+
+#// 1. 查询索引列表
+索引信息 = 插件_运行("Meilisearch搜索", "索引 列表")
+打印("索引信息: ")
+打印(索引信息)
+打印("\n")
+
+#// 2. 设置页面标题与搜索示例
+标题 = "VUS 食谱搜索引擎"
+副标题 = "由 VUS 语言 + Meilisearch 驱动"
+搜索示例 = "试试搜索：红烧肉 / 豆腐 / 鲈鱼"
+
+#// 3. 生成 HTML 页面（搜索框 + 结果容器 + meilisearch JS SDK）
+页头 = "<!DOCTYPE html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<title>" + 标题 + "</title>\n"
+
+样式 = "<style>\n"
+样式 = 样式 + "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;max-width:860px;margin:0 auto;padding:40px 20px;background:#f7f8fa;color:#1f2328;}\n"
+样式 = 样式 + "h1{text-align:center;font-size:32px;margin-bottom:4px;}\n"
+样式 = 样式 + ".sub{text-align:center;color:#656d76;margin-bottom:24px;}\n"
+样式 = 样式 + ".searchwrap{display:flex;gap:8px;margin-bottom:24px;}\n"
+样式 = 样式 + "input[type=text]{flex:1;padding:12px 16px;font-size:16px;border:1px solid #d0d7de;border-radius:8px;outline:none;}\n"
+样式 = 样式 + "input[type=text]:focus{border-color:#2f81f7;box-shadow:0 0 0 3px rgba(47,129,247,.15);}\n"
+样式 = 样式 + "button{padding:12px 24px;font-size:16px;background:#2f81f7;color:#fff;border:none;border-radius:8px;cursor:pointer;}\n"
+样式 = 样式 + "button:hover{background:#1f6feb;}\n"
+样式 = 样式 + ".hint{text-align:center;color:#8b949e;font-size:13px;margin-bottom:24px;}\n"
+样式 = 样式 + "#结果{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:16px;}\n"
+样式 = 样式 + ".card{background:#fff;border:1px solid #d0d7de;border-radius:12px;padding:18px;box-shadow:0 1px 3px rgba(31,35,40,.08);}\n"
+样式 = 样式 + ".card h3{margin:0 0 8px;font-size:18px;color:#1f2328;}\n"
+样式 = 样式 + ".card .tag{display:inline-block;background:#ddf4ff;color:#0969da;border-radius:4px;padding:2px 8px;font-size:12px;margin-bottom:8px;}\n"
+样式 = 样式 + ".card p{margin:6px 0;color:#57606a;font-size:14px;line-height:1.5;}\n"
+样式 = 样式 + ".card .score{color:#e3b341;font-weight:600;}\n"
+样式 = 样式 + ".empty{text-align:center;color:#8b949e;padding:40px 0;}\n"
+样式 = 样式 + "#统计{text-align:center;color:#656d76;font-size:13px;margin-bottom:16px;}\n"
+样式 = 样式 + "</style>\n"
+
+页体 = "<body>\n<h1>" + 标题 + "</h1>\n"
+页体 = 页体 + "<div class=\"sub\">" + 副标题 + "</div>\n"
+页体 = 页体 + "<div class=\"searchwrap\"><input type=\"text\" id=\"搜索框\" placeholder=\"" + 搜索示例 + "\"><button onclick=\"搜索()\">搜索</button></div>\n"
+页体 = 页体 + "<div class=\"hint\">按回车或点击搜索按钮，实时检索已索引的食谱</div>\n"
+页体 = 页体 + "<div id=\"统计\"></div>\n"
+页体 = 页体 + "<div id=\"结果\"><div class=\"empty\">输入关键词开始搜索</div></div>\n"
+
+脚本 = "<script src=\"https://cdn.jsdelivr.net/npm/meilisearch@0.42.0\"></script>\n"
+脚本 = 脚本 + "<script>\n"
+脚本 = 脚本 + "var HOST = 'http://107.172.83.38:53801';\n"
+脚本 = 脚本 + "var SEARCH_KEY = '59ee58480dcaeb7df7ad220449ff57aa431410123444281f1237bd51f072c8d8';\n"
+脚本 = 脚本 + "var INDEX = 'recipes';\n"
+脚本 = 脚本 + "var client = new MeiliSearch({host:HOST, apiKey:SEARCH_KEY});\n"
+脚本 = 脚本 + "var index = client.index(INDEX);\n"
+脚本 = 脚本 + "function 搜索(){var q=document.getElementById('搜索框').value;index.search(q).then(function(r){render(r);}).catch(function(e){document.getElementById('结果').innerHTML='<div class=empty>搜索失败: '+e+'</div>';});}\n"
+脚本 = 脚本 + "function render(r){var box=document.getElementById('结果');document.getElementById('统计').textContent='命中 '+r.hits.length+' 条，耗时 '+r.processingTimeMs+'ms';if(!r.hits.length){box.innerHTML='<div class=empty>未找到匹配结果</div>';return;}var html='';r.hits.forEach(function(d){html+='<div class=card><h3>'+d.标题+'</h3><span class=tag>评分 '+d.评分+'</span><p><b>食材:</b> '+d.食材+'</p><p><b>做法:</b> '+d.步骤+'</p></div>';});box.innerHTML=html;}\n"
+脚本 = 脚本 + "document.getElementById('搜索框').addEventListener('keydown',function(e){if(e.key==='Enter'){搜索();}});\n"
+脚本 = 脚本 + "搜索();\n"
+脚本 = 脚本 + "</script>\n</body>\n</html>\n"
+
+页面 = 页头 + 样式 + 页体 + 脚本
+
+#// 4. 写入页面文件
+写入结果 = 文件_写入(页面路径, 页面)
+打印("页面写入结果: ")
+打印(写入结果)
+打印("\n")
+
+打印("页面已生成: ")
+打印(页面路径)
+打印("\n")
+打印("=== 生成完成 ===\n")
