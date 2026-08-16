@@ -53,6 +53,33 @@ void vus_gui_platform_run(int width, int height, const unsigned int* fb);
 /* 平台层文字绘制：X11 可用且加载了 X 字体时用 XDrawString 叠加入队，返回 1；
  * 否则返回 0，由桥接层回退到 GuiLite 帧缓冲绘制。 */
 int  vus_gui_platform_draw_text(int x, int y, const char* text, unsigned int color);
+/* 平台层非阻塞取事件：处理当前 X 事件队列（含点击/重绘/退出），供轮询式交互。 */
+void vus_gui_platform_poll(int width, int height, const unsigned int* fb);
+
+/* 点击事件派发：平台层（X11 事件循环）捕获鼠标点击后回调本接口，
+ * 本接口负责按约定函数名反查 VUS 回调（事件_点击）并调用（见 guilite_bridge.c）。
+ * x / y 为窗口内坐标（像素，左上为原点）。 */
+void vus_gui_platform_emit_click(int x, int y);
+
+/* ============ 阶段2：控件与轮询交互 API ============ */
+
+/* 创建并绘制一个按钮，登记命中矩形（供 图形_按钮点击 命中检测）。
+ * name：控件唯一名；x/y：左上角；w/h：宽高；text：按钮文本。
+ * 返回 VusString*："1" 成功 / "0" 失败。 */
+VusString* vus_gui_button(const char* name, int x, int y, int w, int h, const char* text);
+
+/* 非阻塞处理 X 事件队列（轮询式交互模型的核心），更新最近点击坐标。
+ * 返回 VusString*："1" 成功 / "0" 失败。 */
+VusString* vus_gui_poll(void);
+
+/* 命中检测：最近一次点击是否落在名为 name 的按钮矩形内。
+ * 返回 VusString*："true" / "false"，可直接用作 如果 条件。 */
+VusString* vus_gui_button_clicked(const char* name);
+
+/* 模拟一次点击（x/y 为窗口内坐标），等价于平台层收到一次鼠标按下。
+ * 用于 headless 自动化测试注入点击，验证命中检测与 如果 条件分支。
+ * 返回 VusString*："1" 成功 / "0" 失败。 */
+VusString* vus_gui_sim_click(int x, int y);
 
 #ifdef __cplusplus
 }
