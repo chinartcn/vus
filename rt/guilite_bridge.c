@@ -62,6 +62,11 @@ VusString* vus_gui_fill_rect(int x, int y, int width, int height, unsigned int c
 VusString* vus_gui_draw_text(int x, int y, const char* text, unsigned int color)
 {
     if (!s_initialized) { return vus_string_new("0"); }
+    /* 优先用 X11 文字（XDrawString，方向正常）；X11 不可用时回退 GuiLite */
+    if (vus_gui_platform_draw_text(x, y, text, color) == 1)
+    {
+        return vus_string_new("1");
+    }
     vus_gui_surface_draw_text(x, y, text, argb_from_rgb(color));
     return vus_string_new("1");
 }
