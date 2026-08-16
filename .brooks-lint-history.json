@@ -1,0 +1,13 @@
+[
+  {
+    "date": "2026-08-16",
+    "mode": "PR Review",
+    "score": 63,
+    "findings": {
+      "critical": 1,
+      "warning": 4,
+      "suggestion": 2
+    },
+    "scope": "未暂存改动（采样审查，VUS 插件进程内集成）"
+  }
+]

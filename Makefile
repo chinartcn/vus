@@ -4,6 +4,7 @@
 
 # --- 变量 ---
 CC       = gcc
+CXX      = g++
 CFLAGS   = -Wall -Wextra -g -O2 -std=c11 -Wno-format-truncation
 SRC_DIR  = src
 RT_DIR   = rt
@@ -41,6 +42,12 @@ EL_DIR = $(RT_DIR)/easylogger
 EL_SRC = $(EL_DIR)/src/elog.c $(EL_DIR)/src/elog_utils.c $(RT_DIR)/elog_port.c
 EL_OBJ = $(BUILD_DIR)/elog.o $(BUILD_DIR)/elog_utils.o $(BUILD_DIR)/elog_port.o
 EL_INC = -I$(EL_DIR)/inc
+
+# GuiLite 图形库（VUS GUI 集成）：C++ 包装 + C 桥接 + C 平台层
+GUI_DIR = $(RT_DIR)/guilite
+GUI_SRC = $(RT_DIR)/guilite_bridge.c $(RT_DIR)/guilite_platform.c $(RT_DIR)/guilite_wrapper.cpp
+GUI_OBJ = $(BUILD_DIR)/guilite_bridge.o $(BUILD_DIR)/guilite_platform.o $(BUILD_DIR)/guilite_wrapper.o
+GUI_INC = -I$(RT_DIR) -I$(GUI_DIR)
 
 # 头文件依赖（所有 .o 都依赖这些通用头）
 COMMON_H = $(SRC_DIR)/token.h $(SRC_DIR)/ast.h $(SRC_DIR)/config.h
@@ -138,8 +145,18 @@ $(BUILD_DIR)/elog_utils.o: $(EL_DIR)/src/elog_utils.c $(EL_DIR)/inc/elog.h | $(B
 $(BUILD_DIR)/elog_port.o: $(RT_DIR)/elog_port.c $(EL_DIR)/inc/elog.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(EL_INC) -I$(RT_DIR) -c -o $@ $<
 
-# 运行时库静态归档（含 vus_coro.o 与 easylogger elog.o/elog_utils.o）
-$(RT_LIB): $(RT_OBJ) $(RT_CORO_OBJ) $(EL_OBJ)
+# 编译 GuiLite 图形库（C 桥接 / C 平台 / C++ 包装）
+$(BUILD_DIR)/guilite_bridge.o: $(RT_DIR)/guilite_bridge.c $(RT_DIR)/guilite_bridge.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(PY_DEF) $(PY_INC) -I$(RT_DIR) -c -o $@ $<
+
+$(BUILD_DIR)/guilite_platform.o: $(RT_DIR)/guilite_platform.c $(RT_DIR)/guilite_bridge.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(PY_DEF) $(PY_INC) -I$(RT_DIR) -DVUS_GUI_X11 -c -o $@ $<
+
+$(BUILD_DIR)/guilite_wrapper.o: $(RT_DIR)/guilite_wrapper.cpp $(GUI_DIR)/GuiLite.h | $(BUILD_DIR)
+	$(CXX) -Wall -Wextra -g -O2 $(GUI_INC) -c -o $@ $<
+
+# 运行时库静态归档（含 vus_coro.o、easylogger elog.o 与 GuiLite 图形库）
+$(RT_LIB): $(RT_OBJ) $(RT_CORO_OBJ) $(EL_OBJ) $(GUI_OBJ)
 	ar rcs $@ $^
 
 # =============================================================================

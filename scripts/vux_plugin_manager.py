@@ -435,8 +435,12 @@ def list_plugins():
                     pass
 
 
-def run_plugin(plugin_name, input_data=""):
-    """运行已安装的插件。"""
+def run_plugin(plugin_name, input_data="", raw=False):
+    """运行已安装的插件。
+
+    raw=True 时仅输出插件实际返回内容（供 VUS 内建函数 插件_运行 使用），
+    不打印生命周期与标签信息。
+    """
     from vux_plugin_entry import VuxPluginAPI, load_plugin
 
     plugin_dir = PLUGINS_DIR / plugin_name
@@ -452,14 +456,23 @@ def run_plugin(plugin_name, input_data=""):
     api = VuxPluginAPI()
 
     # 生命周期
-    print(f"初始化插件: {plugin.name}")
+    if not raw:
+        print(f"初始化插件: {plugin.name}")
     init_ret = plugin.init(api)
     if init_ret != 0:
         print(f"  初始化失败 (code={init_ret})", file=sys.stderr)
         return False
 
-    print(f"运行插件: {plugin.name}")
+    if not raw:
+        print(f"运行插件: {plugin.name}")
     ret, output = plugin.run(api, input_data)
+    if raw:
+        # raw 模式：只输出插件返回值（stdout 上的 output），返回码走退出状态
+        plugin.cleanup(api)
+        if output:
+            print(output)
+        sys.exit(0 if ret == 0 else 1)
+
     print(f"  返回码: {ret}")
     if output:
         print(f"  输出: {output}")
@@ -582,6 +595,8 @@ def main():
     p_run = subparsers.add_parser("run", help="运行插件")
     p_run.add_argument("plugin_name", help="插件名")
     p_run.add_argument("input", nargs="?", default="", help="输入数据")
+    p_run.add_argument("--raw", action="store_true",
+                       help="仅输出插件实际返回内容（供 VUS 内建函数调用）")
 
     # check-deps
     p_check = subparsers.add_parser("check-deps", help="检查依赖")
@@ -598,7 +613,7 @@ def main():
     elif args.command == "list":
         list_plugins()
     elif args.command == "run":
-        run_plugin(args.plugin_name, args.input)
+        run_plugin(args.plugin_name, args.input, raw=args.raw)
     elif args.command == "check-deps":
         check_dependencies(args.source_dir)
     else:

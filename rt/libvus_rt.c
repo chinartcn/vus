@@ -864,11 +864,12 @@ VusString* vus_plugin_run_vux(VusString* plugin, VusString* cmd) {
         }
     }
 
-    /* 构建命令。插件名与命令参数在 manager 脚本中作为 argv 传递，
-     * 这里用 shell 引号包裹避免特殊字符破坏结构。 */
+    /* 构建命令。插件名与命令参数在 manager 脚本中作为 argv 传递。
+     * 参数用单引号包裹：命令内可安全携带双引号（如 --json '{"a":1}'），
+     * 避免 VUS 脚本构造的 JSON/引号破坏 shell 结构。 */
     char cmdline[8192];
     int n = snprintf(cmdline, sizeof(cmdline),
-                     "python3 \"%s\" run \"%s\" \"%s\" --raw 2>/dev/null",
+                     "python3 '%s' run '%s' '%s' --raw 2>/dev/null",
                      manager, c_plugin, c_cmd);
     if (n < 0 || n >= (int)sizeof(cmdline)) {
         return vus_string_new("");

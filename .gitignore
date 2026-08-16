@@ -9,6 +9,7 @@ release/
 /vus
 *.o
 *.a
+tests/test_plugin_inproc
 
 # 系统文件
 .DS_Store

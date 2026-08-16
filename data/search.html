@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VUS 食谱搜索引擎</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;max-width:860px;margin:0 auto;padding:40px 20px;background:#f7f8fa;color:#1f2328;}
+h1{text-align:center;font-size:32px;margin-bottom:4px;}
+.sub{text-align:center;color:#656d76;margin-bottom:24px;}
+.searchwrap{display:flex;gap:8px;margin-bottom:24px;}
+input[type=text]{flex:1;padding:12px 16px;font-size:16px;border:1px solid #d0d7de;border-radius:8px;outline:none;}
+input[type=text]:focus{border-color:#2f81f7;box-shadow:0 0 0 3px rgba(47,129,247,.15);}
+button{padding:12px 24px;font-size:16px;background:#2f81f7;color:#fff;border:none;border-radius:8px;cursor:pointer;}
+button:hover{background:#1f6feb;}
+.hint{text-align:center;color:#8b949e;font-size:13px;margin-bottom:24px;}
+#结果{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:16px;}
+.card{background:#fff;border:1px solid #d0d7de;border-radius:12px;padding:18px;box-shadow:0 1px 3px rgba(31,35,40,.08);}
+.card h3{margin:0 0 8px;font-size:18px;color:#1f2328;}
+.card .tag{display:inline-block;background:#ddf4ff;color:#0969da;border-radius:4px;padding:2px 8px;font-size:12px;margin-bottom:8px;}
+.card p{margin:6px 0;color:#57606a;font-size:14px;line-height:1.5;}
+.card .score{color:#e3b341;font-weight:600;}
+.empty{text-align:center;color:#8b949e;padding:40px 0;}
+#统计{text-align:center;color:#656d76;font-size:13px;margin-bottom:16px;}
+</style>
+<body>
+<h1>VUS 食谱搜索引擎</h1>
+<div class="sub">由 VUS 语言 + Meilisearch 驱动</div>
+<div class="searchwrap"><input type="text" id="搜索框" placeholder="试试搜索：红烧肉 / 豆腐 / 鲈鱼"><button onclick="搜索()">搜索</button></div>
+<div class="hint">按回车或点击搜索按钮，实时检索已索引的食谱</div>
+<div id="统计"></div>
+<div id="结果"><div class="empty">输入关键词开始搜索</div></div>
+<script src="https://cdn.jsdelivr.net/npm/meilisearch@0.42.0"></script>
+<script>
+var HOST = 'http://107.172.83.38:53801';
+var SEARCH_KEY = '59ee58480dcaeb7df7ad220449ff57aa431410123444281f1237bd51f072c8d8';
+var INDEX = 'recipes';
+var client = new MeiliSearch({host:HOST, apiKey:SEARCH_KEY});
+var index = client.index(INDEX);
+function 搜索(){var q=document.getElementById('搜索框').value;index.search(q).then(function(r){render(r);}).catch(function(e){document.getElementById('结果').innerHTML='<div class=empty>搜索失败: '+e+'</div>';});}
+function render(r){var box=document.getElementById('结果');document.getElementById('统计').textContent='命中 '+r.hits.length+' 条，耗时 '+r.processingTimeMs+'ms';if(!r.hits.length){box.innerHTML='<div class=empty>未找到匹配结果</div>';return;}var html='';r.hits.forEach(function(d){html+='<div class=card><h3>'+d.标题+'</h3><span class=tag>评分 '+d.评分+'</span><p><b>食材:</b> '+d.食材+'</p><p><b>做法:</b> '+d.步骤+'</p></div>';});box.innerHTML=html;}
+document.getElementById('搜索框').addEventListener('keydown',function(e){if(e.key==='Enter'){搜索();}});
+搜索();
+</script>
+</body>
+</html>

@@ -270,6 +270,7 @@ static void gen_string_escape(const char *input, char *output, size_t out_size) 
 /* 返回 malloc 分配的字符串，调用方需 free */
 static char *gen_expr(GenBuf *buf, VusAstNode *node);
 static GenStructInfo *s_gen_structs = NULL; /* 结构体类型表，用于成员访问 */
+static int g_uses_gui = 0; /* 是否在代码中使用了 GuiLite 图形内建函数（决定链接参数） */
 
 static char *gen_expr_access(GenBuf *buf, VusAstAccess *access) {
     /* 生成成员访问表达式
@@ -603,6 +604,109 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
             return result;
         }
         return strdup("vus_log_set_level(vus_string_new(\"信息\"))");
+    }
+
+    /* ============= GuiLite 图形内置函数（vus_gui_*） ============= */
+    /* VUS 参数均为 VusString*：整数参数用 vus_to_int 转 native int，
+       字符串参数用 vus_string_cstr 取 C 字符串，颜色为 0xRRGGBB 整数。 */
+    if (strcmp(call->func_name, "图形_初始化") == 0) {
+        if (call->args && call->args->count >= 3) {
+            char *w = gen_expr(buf, call->args->items[0]);
+            char *h = gen_expr(buf, call->args->items[1]);
+            char *t = gen_expr(buf, call->args->items[2]);
+            char result[4096];
+            snprintf(result, sizeof(result),
+                "vus_gui_init((int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), vus_string_cstr(%s))",
+                w, h, t);
+            free(w); free(h); free(t);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_画点") == 0) {
+        if (call->args && call->args->count >= 3) {
+            char *x = gen_expr(buf, call->args->items[0]);
+            char *y = gen_expr(buf, call->args->items[1]);
+            char *c = gen_expr(buf, call->args->items[2]);
+            char result[4096];
+            snprintf(result, sizeof(result),
+                "vus_gui_draw_pixel((int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (unsigned int)vus_to_int(%s, &_err))",
+                x, y, c);
+            free(x); free(y); free(c);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_画线") == 0) {
+        if (call->args && call->args->count >= 5) {
+            char *x1 = gen_expr(buf, call->args->items[0]);
+            char *y1 = gen_expr(buf, call->args->items[1]);
+            char *x2 = gen_expr(buf, call->args->items[2]);
+            char *y2 = gen_expr(buf, call->args->items[3]);
+            char *c  = gen_expr(buf, call->args->items[4]);
+            char result[4096];
+            snprintf(result, sizeof(result),
+                "vus_gui_draw_line((int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (unsigned int)vus_to_int(%s, &_err))",
+                x1, y1, x2, y2, c);
+            free(x1); free(y1); free(x2); free(y2); free(c);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_矩形") == 0) {
+        if (call->args && call->args->count >= 5) {
+            char *x = gen_expr(buf, call->args->items[0]);
+            char *y = gen_expr(buf, call->args->items[1]);
+            char *wd = gen_expr(buf, call->args->items[2]);
+            char *ht = gen_expr(buf, call->args->items[3]);
+            char *c  = gen_expr(buf, call->args->items[4]);
+            char result[4096];
+            snprintf(result, sizeof(result),
+                "vus_gui_draw_rect((int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (unsigned int)vus_to_int(%s, &_err))",
+                x, y, wd, ht, c);
+            free(x); free(y); free(wd); free(ht); free(c);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_填充") == 0) {
+        if (call->args && call->args->count >= 5) {
+            char *x = gen_expr(buf, call->args->items[0]);
+            char *y = gen_expr(buf, call->args->items[1]);
+            char *wd = gen_expr(buf, call->args->items[2]);
+            char *ht = gen_expr(buf, call->args->items[3]);
+            char *c  = gen_expr(buf, call->args->items[4]);
+            char result[4096];
+            snprintf(result, sizeof(result),
+                "vus_gui_fill_rect((int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (unsigned int)vus_to_int(%s, &_err))",
+                x, y, wd, ht, c);
+            free(x); free(y); free(wd); free(ht); free(c);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_文字") == 0) {
+        if (call->args && call->args->count >= 4) {
+            char *x = gen_expr(buf, call->args->items[0]);
+            char *y = gen_expr(buf, call->args->items[1]);
+            char *txt = gen_expr(buf, call->args->items[2]);
+            char *c  = gen_expr(buf, call->args->items[3]);
+            char result[4096];
+            snprintf(result, sizeof(result),
+                "vus_gui_draw_text((int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), vus_string_cstr(%s), (unsigned int)vus_to_int(%s, &_err))",
+                x, y, txt, c);
+            free(x); free(y); free(txt); free(c);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_刷新") == 0) {
+        g_uses_gui = 1;
+        return strdup("vus_gui_redraw()");
+    }
+    if (strcmp(call->func_name, "图形_保持") == 0) {
+        g_uses_gui = 1;
+        return strdup("vus_gui_run()");
     }
 
     /* ============= TUI 插件内置函数 ============= */
@@ -1706,6 +1810,8 @@ static void gen_main_function(GenBuf *buf, VusAstProgram *program, int debug) {
 char *vus_generate_c(VusAstProgram *program, VusConfig *config) {
     if (!program || !config) return NULL;
 
+    g_uses_gui = 0; /* 每次生成前重置 GUI 使用标记 */
+
     GenBuf *buf = gen_buf_new();
     if (!buf) return NULL;
 
@@ -1726,7 +1832,8 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config) {
 
     /* 运行时头文件 */
     if (config->rt_dir[0]) {
-        gen_emit(buf, "#include \"libvus_rt.h\"\n\n");
+        gen_emit(buf, "#include \"libvus_rt.h\"\n");
+        gen_emit(buf, "#include \"guilite_bridge.h\"\n\n");
     }
 
     /* 线程/协程运行时辅助 */
@@ -1931,9 +2038,36 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
     const char *py_inc_str = has_py ? py_inc : "";
     const char *py_ld_str = has_py ? py_ld : "";
 
+    /* GuiLite 图形库：仅当源码使用了 图形_* 内建函数时，才编译 bridge/platform/wrapper
+       并追加 -lstdc++（GuiLite 为 C++）与 -lX11（X11 后端可用时）。 */
+    char gui_src[2048];
+    gui_src[0] = '\0';
+    const char *gui_def = "";
+    const char *gui_lib = "";
+    if (config->rt_dir[0] && g_uses_gui) {
+        snprintf(gui_src, sizeof(gui_src),
+                 "\"%s/guilite_bridge.c\" \"%s/guilite_platform.c\" \"%s/guilite_wrapper.cpp\"",
+                 abs_rt_dir, abs_rt_dir, abs_rt_dir);
+        int has_x11 = 0;
+        /* X11 开发库检测：同时支持标准路径与 Termux $PREFIX 路径（Termux 的
+           X11 头在 $PREFIX/include/X11/Xlib.h，非 /usr/include）。 */
+        FILE *x11_check = popen(
+            "test -f /usr/include/X11/Xlib.h -o -f \"${PREFIX:-/usr}/include/X11/Xlib.h\" "
+            "-o -f \"$TERMUX_PREFIX/include/X11/Xlib.h\" && echo yes || echo no", "r");
+        if (x11_check) {
+            char line[16] = {0};
+            if (fgets(line, sizeof(line), x11_check)) {
+                has_x11 = (strncmp(line, "yes", 3) == 0);
+            }
+            pclose(x11_check);
+        }
+        gui_def = has_x11 ? "-DVUS_GUI_X11" : "";
+        gui_lib = has_x11 ? "-lX11" : "";
+    }
+
     if (extra_objects && extra_objects[0]) {
         n = snprintf(cmd, sizeof(cmd),
-            "gcc %s -g %s %s %s -I\"%s\" %s \"%s\" \"%s\" \"%s\" %s %s -o \"%s\" -lm -lpthread %s %s 2>&1",
+            "gcc %s -g %s %s %s -I\"%s\" %s \"%s\" \"%s\" \"%s\" %s %s %s -o \"%s\" -lm -lpthread %s %s -lstdc++ %s %s 2>&1",
             opt_level,
             curl_def,
             py_def,
@@ -1944,13 +2078,16 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
             rt_source,
             rt_coro,
             elog_src,
+            gui_src,
             extra_objects,
             output_path,
             curl_lib,
-            py_ld_str);
+            py_ld_str,
+            gui_def,
+            gui_lib);
     } else {
         n = snprintf(cmd, sizeof(cmd),
-            "gcc %s -g %s %s %s -I\"%s\" %s \"%s\" \"%s\" \"%s\" %s -o \"%s\" -lm -lpthread %s %s 2>&1",
+            "gcc %s -g %s %s %s -I\"%s\" %s \"%s\" \"%s\" \"%s\" %s %s -o \"%s\" -lm -lpthread %s %s -lstdc++ %s %s 2>&1",
             opt_level,
             curl_def,
             py_def,
@@ -1961,9 +2098,12 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
             rt_source,
             rt_coro,
             elog_src,
+            gui_src,
             output_path,
             curl_lib,
-            py_ld_str);
+            py_ld_str,
+            gui_def,
+            gui_lib);
     }
 
     if (n >= (int)sizeof(cmd)) {
