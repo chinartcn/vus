@@ -189,7 +189,9 @@ class MeilisearchPlugin(VuxPlugin):
 
     def _cmd_stats(self, rest, options):
         """查询服务统计信息。"""
-        stats = self._client.get_indexes_stats()
+        # 兼容不同 SDK 版本：新版用 get_all_stats，旧版用 get_indexes_stats
+        getter = getattr(self._client, "get_all_stats", None) or self._client.get_indexes_stats
+        stats = getter()
         # 简化输出：只保留数据库大小与索引概览
         summary = {
             "数据库大小": stats.get("databaseSize"),
@@ -211,21 +213,31 @@ class MeilisearchPlugin(VuxPlugin):
 
         if sub == "列表":
             indexes = self._client.get_indexes()
-            idx_list = [{"uid": i.get("uid"), "primaryKey": i.get("primaryKey")} for i in indexes]
+            # 兼容不同 SDK 版本：新版返回 dict（results 为 Index 对象），旧版返回 list
+            results = indexes.get("results") if isinstance(indexes, dict) else indexes
+            idx_list = [
+                {"uid": getattr(i, "uid", None) or i.get("uid"),
+                 "primaryKey": getattr(i, "primary_key", None) or i.get("primaryKey")}
+                for i in results
+            ]
             return 0, json.dumps(idx_list, ensure_ascii=False, default=str)
 
         if sub == "创建":
             if not name:
                 return 0, "错误: 用法 索引 创建 <名称> [--主键 xxx]"
+            err = self._validate_index_uid(name)
+            if err:
+                return 0, err
             primary_key = options.get("主键")
-            task = self._client.create_index(name, primary_key=primary_key)
-            return 0, f"索引创建任务已提交 uid={task.get('taskUid')}"
+            task = self._client.create_index(
+                name, options={"primaryKey": primary_key} if primary_key else None)
+            return 0, f"索引创建任务已提交 uid={self._task_uid(task)}"
 
         if sub == "删除":
             if not name:
                 return 0, "错误: 用法 索引 删除 <名称>"
             task = self._client.delete_index(name)
-            return 0, f"索引删除任务已提交 uid={task.get('taskUid')}"
+            return 0, f"索引删除任务已提交 uid={self._task_uid(task)}"
 
         if sub == "设置":
             return self._index_settings(name, options)
@@ -242,7 +254,7 @@ class MeilisearchPlugin(VuxPlugin):
             if err:
                 return 0, err
             task = index.update_settings(settings)
-            return 0, f"索引设置更新任务已提交 uid={task.get('taskUid')}"
+            return 0, f"索引设置更新任务已提交 uid={self._task_uid(task)}"
         settings = index.get_settings()
         return 0, json.dumps(settings, ensure_ascii=False, default=str)
 
@@ -258,6 +270,9 @@ class MeilisearchPlugin(VuxPlugin):
         index_name = rest[1] if len(rest) > 1 else None
         if not index_name:
             return 0, "错误: 缺少索引名称"
+        err = self._validate_index_uid(index_name)
+        if err:
+            return 0, err
 
         index = self._get_index(self._client, index_name)
 
@@ -270,20 +285,24 @@ class MeilisearchPlugin(VuxPlugin):
                 task = index.add_documents(docs, primary_key=primary_key)
             else:
                 task = index.update_documents(docs, primary_key=primary_key)
-            return 0, f"文档{sub}任务已提交 uid={task.get('taskUid')} 条数={len(docs)}"
+            return 0, f"文档{sub}任务已提交 uid={self._task_uid(task)} 条数={len(docs)}"
 
         if sub == "删除":
             doc_id = rest[2] if len(rest) > 2 else None
             if not doc_id:
                 return 0, "错误: 用法 文档 删除 <索引> <id>"
             task = index.delete_document(doc_id)
-            return 0, f"文档删除任务已提交 uid={task.get('taskUid')}"
+            return 0, f"文档删除任务已提交 uid={self._task_uid(task)}"
 
         if sub == "获取":
             doc_id = rest[2] if len(rest) > 2 else None
             if not doc_id:
                 return 0, "错误: 用法 文档 获取 <索引> <id>"
             doc = index.get_document(doc_id)
+            # 兼容不同 SDK 版本的文档对象：
+            # 旧版返回 dict；新版返回 Document 模型对象（字段为实例属性）
+            if not isinstance(doc, dict):
+                doc = self._document_to_dict(doc)
             return 0, json.dumps(doc, ensure_ascii=False, default=str)
 
         return 0, f"错误: 未知文档子命令 '{sub}'"
@@ -318,6 +337,9 @@ class MeilisearchPlugin(VuxPlugin):
         index_name = options.get("索引")
         if not index_name:
             return 0, "错误: 必须通过 --索引 <名称> 指定搜索的索引"
+        err = self._validate_index_uid(index_name)
+        if err:
+            return 0, err
 
         params = {}
         if "筛选" in options:
@@ -336,7 +358,9 @@ class MeilisearchPlugin(VuxPlugin):
                 return 0, "错误: --限制 必须是整数"
 
         index = self._get_index(self._client, index_name)
-        result = index.search(query, **params)
+        result = self._search_query(index, query, params)
+        if isinstance(result, tuple):
+            return result
 
         hits = result.get("hits", [])
         summary = {
@@ -359,6 +383,9 @@ class MeilisearchPlugin(VuxPlugin):
         index_name = rest[1] if len(rest) > 1 else None
         if not index_name:
             return 0, "错误: 缺少索引名称"
+        err = self._validate_index_uid(index_name)
+        if err:
+            return 0, err
 
         index = self._get_index(self._client, index_name)
 
@@ -373,7 +400,7 @@ class MeilisearchPlugin(VuxPlugin):
                 if len(words) >= 2:
                     synonyms[words[0]] = words[1:]
             task = index.update_synonyms(synonyms)
-            return 0, f"同义词更新任务已提交 uid={task.get('taskUid')}"
+            return 0, f"同义词更新任务已提交 uid={self._task_uid(task)}"
 
         if sub == "获取":
             settings = index.get_settings()
@@ -394,6 +421,9 @@ class MeilisearchPlugin(VuxPlugin):
         index_name = rest[1] if len(rest) > 1 else None
         if not index_name:
             return 0, "错误: 缺少索引名称"
+        err = self._validate_index_uid(index_name)
+        if err:
+            return 0, err
 
         index = self._get_index(self._client, index_name)
 
@@ -408,13 +438,87 @@ class MeilisearchPlugin(VuxPlugin):
             if err:
                 return 0, err
             task = index.update_settings(settings)
-            return 0, f"设置更新任务已提交 uid={task.get('taskUid')}"
+            return 0, f"设置更新任务已提交 uid={self._task_uid(task)}"
 
         return 0, f"错误: 未知设置子命令 '{sub}'"
 
     # ------------------------------------------------------------------
     # 工具方法
     # ------------------------------------------------------------------
+    @staticmethod
+    def _search_query(index, query, params):
+        """调用 index.search，兼容不同 SDK 版本。
+
+        新版 SDK 用 search(query, opt_params=...)，旧版用 search(query, **kwargs)。
+        返回搜索结果 dict；若参数非法返回 (code, error_msg) 元组。
+        """
+        if not params:
+            return index.search(query)
+        try:
+            import inspect
+            sig = inspect.signature(index.search)
+            if "opt_params" in sig.parameters:
+                return index.search(query, opt_params=params)
+            return index.search(query, **params)
+        except TypeError:
+            # 无法识别签名时回退到关键字展开
+            return index.search(query, **params)
+
+    @staticmethod
+    def _document_to_dict(doc):
+        """将 SDK 返回的文档对象转换为 dict，兼容不同 SDK 版本。
+
+        - dict：直接返回
+        - pydantic 模型：model_dump() / dict()
+        - 新版 SDK Document（字段为实例属性）：收集 __dict__ / vars
+        """
+        if doc is None:
+            return {}
+        if isinstance(doc, dict):
+            return doc
+        if hasattr(doc, "model_dump"):
+            return doc.model_dump()
+        if hasattr(doc, "dict") and callable(doc.dict):
+            return doc.dict()
+        # 兜底：收集实例属性
+        data = getattr(doc, "__dict__", None)
+        if data:
+            return dict(data)
+        # 通过 __iter__ 转为 dict
+        try:
+            return dict(doc)
+        except (TypeError, ValueError):
+            return {"value": str(doc)}
+
+    @staticmethod
+    def _task_uid(task):
+        """从任务对象读取 taskUid，兼容 dict 与新版 SDK 的 TaskInfo 对象。"""
+        if task is None:
+            return None
+        if isinstance(task, dict):
+            return task.get("taskUid")
+        # TaskInfo 等 pydantic 对象：优先 model_dump，其次属性
+        for attr in ("task_uid", "taskUid", "uid"):
+            if hasattr(task, attr):
+                return getattr(task, attr)
+        try:
+            return task.get("taskUid")
+        except AttributeError:
+            return None
+
+    @staticmethod
+    def _validate_index_uid(uid):
+        """校验索引名是否为 Meilisearch 合法 uid，返回错误提示或 None。
+
+        Meilisearch 限制 index uid 只能包含 ASCII 字母数字、连字符(-)与下划线(_)。
+        中文等非 ASCII 字符会被服务端拒绝（invalid_index_uid）。
+        """
+        import re
+        if not re.match(r"^[a-zA-Z0-9_-]+$", uid or ""):
+            return (f"错误: 索引名 '{uid}' 非法。Meilisearch 索引名只能包含 "
+                    f"字母、数字、连字符(-)和下划线(_)，建议使用英文如 'books'。")
+        return None
+
     @staticmethod
     def _build_settings_from_options(options):
         """从选项构建更新用的设置字典。
