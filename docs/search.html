@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VUS 文档搜索</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --panel: #171a23;
+    --border: #2a2f3a;
+    --text: #e6e8ee;
+    --muted: #8b93a7;
+    --accent: #38bdf8;
+    --accent-dim: #0ea5e9;
+    --highlight: #fde047;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    min-height: 100vh;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 40px 20px 80px; }
+  header { text-align: center; margin-bottom: 32px; }
+  header h1 {
+    font-size: 28px; font-weight: 700; letter-spacing: 0.5px;
+    background: linear-gradient(90deg, var(--accent), #a78bfa);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  header p { color: var(--muted); margin-top: 8px; font-size: 14px; }
+  .search-box { position: relative; margin-bottom: 24px; }
+  .search-box input {
+    width: 100%; padding: 16px 20px 16px 48px;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; color: var(--text); font-size: 16px;
+    outline: none; transition: border-color .2s, box-shadow .2s;
+  }
+  .search-box input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(56,189,248,.15);
+  }
+  .search-box input::placeholder { color: var(--muted); }
+  .search-box .icon {
+    position: absolute; left: 16px; top: 50%; transform: translateY(-50%);
+    color: var(--muted); font-size: 18px;
+  }
+  .stats {
+    color: var(--muted); font-size: 13px; margin-bottom: 16px;
+    min-height: 20px;
+  }
+  .loading { text-align: center; color: var(--muted); padding: 40px 0; }
+  .result {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 18px 20px; margin-bottom: 14px;
+    transition: border-color .2s;
+  }
+  .result:hover { border-color: var(--accent-dim); }
+  .result .title { font-size: 17px; font-weight: 600; margin-bottom: 6px; }
+  .result .title a { color: var(--accent); text-decoration: none; }
+  .result .title a:hover { text-decoration: underline; }
+  .result .meta { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+  .result .meta .file { color: #a78bfa; }
+  .result .snippet {
+    font-size: 14px; color: var(--text); opacity: .92;
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .result .snippet mark {
+    background: rgba(253,224,71,.25); color: var(--highlight);
+    border-radius: 3px; padding: 0 2px; font-weight: 600;
+  }
+  .empty { text-align: center; color: var(--muted); padding: 60px 0; }
+  .empty .big { font-size: 42px; margin-bottom: 12px; }
+  footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 40px; }
+  footer a { color: var(--accent); text-decoration: none; }
+  .pagination { display: flex; gap: 8px; justify-content: center; margin-top: 20px; }
+  .pagination button {
+    background: var(--panel); border: 1px solid var(--border); color: var(--text);
+    padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 14px;
+  }
+  .pagination button:hover:not(:disabled) { border-color: var(--accent); }
+  .pagination button:disabled { opacity: .4; cursor: not-allowed; }
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 6px;
+    font-size: 11px; margin-right: 6px; border: 1px solid var(--border);
+    color: var(--muted);
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>VUS 文档搜索</h1>
+    <p>基于 Meilisearch 全文搜索引擎 · 实时检索 VUS 编程语言文档</p>
+  </header>
+
+  <div class="search-box">
+    <span class="icon">&#128269;</span>
+    <input id="searchInput" type="text" placeholder="搜索 VUS 文档，如：插件、协程、编译、tui..."
+           autocomplete="off" autofocus>
+  </div>
+
+  <div class="stats" id="stats"></div>
+  <div id="results"></div>
+
+  <footer>
+    由 <a href="https://www.meilisearch.com/" target="_blank" rel="noopener">Meilisearch</a> 驱动 ·
+    源码 <a href="https://gitee.com/rtccn_mc/vus" target="_blank" rel="noopener">gitee.com/rtccn_mc/vus</a>
+  </footer>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/meilisearch@0.42.0"></script>
+<script>
+(function () {
+  // ---- 配置：远程 Meilisearch 实例 + 只读搜索 key + 文档索引 ----
+  var HOST = "https://meilisearch-qqkiaoom.sealoshzh.site";
+  var SEARCH_KEY = "5ce5f34e457ebe1e9d48550869cac679b4fa84c8b2deb7a6e470266de10a9917";
+  var INDEX = "vus-docs";
+  var PAGE_SIZE = 10;
+
+  var client = new MeiliSearch({ host: HOST, apiKey: SEARCH_KEY });
+  var index = client.index(INDEX);
+
+  var input = document.getElementById("searchInput");
+  var statsEl = document.getElementById("stats");
+  var resultsEl = document.getElementById("results");
+  var currentPage = 0;
+  var debounceTimer = null;
+
+  function esc(s) {
+    var d = document.createElement("div");
+    d.textContent = s == null ? "" : String(s);
+    return d.innerHTML;
+  }
+
+  function render(results, page, total) {
+    if (!results.length) {
+      resultsEl.innerHTML =
+        '<div class="empty"><div class="big">&#128269;</div>' +
+        '<p>未找到与 "<strong>' + esc(input.value) + '</strong>" 相关的文档</p></div>';
+      return;
+    }
+    var html = "";
+    results.forEach(function (r) {
+      var snippet = r._formatted && r._formatted.content
+          ? r._formatted.content
+          : (r.content || "").slice(0, 200);
+      if (snippet.length > 220) snippet = snippet.slice(0, 220) + "…";
+      html += '<div class="result">' +
+        '<div class="title"><a href="' + esc(r.url) + '" target="_blank" rel="noopener">' +
+          esc(r._formatted && r._formatted.title ? r._formatted.title : r.title) +
+        '</a></div>' +
+        '<div class="meta"><span class="badge">' + esc(r.category) + '</span>' +
+          '<span class="file">' + esc(r.file) + '</span></div>' +
+        '<div class="snippet">' + (snippet ? snippet : "") + '</div>' +
+      '</div>';
+    });
+    resultsEl.innerHTML = html;
+
+    var from = page * PAGE_SIZE + 1;
+    var to = Math.min(page * PAGE_SIZE + results.length, total);
+    statsEl.textContent = "显示 " + from + "–" + to + " 条，共 " + total + " 条结果";
+  }
+
+  function renderPagination(total) {
+    var pages = Math.ceil(total / PAGE_SIZE);
+    if (pages <= 1) return;
+    var btn = [
+      '<div class="pagination">',
+      '<button id="prevBtn"' + (currentPage === 0 ? ' disabled' : '') + '>上一页</button>',
+      '<span style="align-self:center;color:var(--muted);font-size:13px">' +
+        (currentPage + 1) + ' / ' + pages + '</span>',
+      '<button id="nextBtn"' + (currentPage >= pages - 1 ? ' disabled' : '') + '>下一页</button>',
+      '</div>'
+    ].join("");
+    resultsEl.insertAdjacentHTML("beforeend", btn);
+    document.getElementById("prevBtn").addEventListener("click", function () {
+      if (currentPage > 0) { currentPage--; doSearch(); }
+    });
+    document.getElementById("nextBtn").addEventListener("click", function () {
+      if (currentPage < pages - 1) { currentPage++; doSearch(); }
+    });
+  }
+
+  function doSearch() {
+    var q = input.value.trim();
+    if (!q) {
+      statsEl.textContent = "";
+      resultsEl.innerHTML = '<div class="empty"><div class="big">&#128269;</div>' +
+        '<p>输入关键词开始搜索 VUS 文档</p></div>';
+      return;
+    }
+    resultsEl.innerHTML = '<div class="loading">搜索中…</div>';
+    index.search(q, {
+      limit: PAGE_SIZE,
+      offset: currentPage * PAGE_SIZE,
+      attributesToHighlight: ["title", "content"],
+      highlightPreTag: "<mark>",
+      highlightPostTag: "</mark>"
+    }).then(function (res) {
+      render(res.hits, currentPage, res.estimatedTotalHits);
+      renderPagination(res.estimatedTotalHits);
+    }).catch(function (err) {
+      resultsEl.innerHTML = '<div class="empty"><p>搜索出错：' + esc(err && err.message) +
+        '</p><p style="font-size:12px;margin-top:8px">请确认 Meilisearch 服务可用且索引 ' +
+        esc(INDEX) + ' 已就绪</p></div>';
+    });
+  }
+
+  input.addEventListener("input", function () {
+    currentPage = 0;
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(doSearch, 300);
+  });
+  input.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") { clearTimeout(debounceTimer); doSearch(); }
+  });
+
+  // 初始聚焦
+  input.focus();
+})();
+</script>
+</body>
+</html>
