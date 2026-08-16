@@ -1608,17 +1608,8 @@ static VusAstNode *parse_primary(VusParser *parser) {
             parser_expect(parser, VUS_TOKEN_RBRACKET);
             if (parser->error) { vus_ast_list_free(items); return NULL; }
 
-            /* 创建 ListLiteral 节点 — 使用 VUS_AST_LIST_LITERAL 类型 */
-            /* 由于没有专门的创建函数，用 calloc 创建一个通用节点临时存储 */
-            /* 使用 VusAstNode 作为基类，list 数据通过额外结构存储 */
-            typedef struct {
-                VusAstNodeType type;
-                int            line;
-                int            column;
-                VusAstList    *items;
-            } LocalListLiteral;
-
-            LocalListLiteral *node = (LocalListLiteral*)calloc(1, sizeof(LocalListLiteral));
+            /* 创建 ListLiteral 节点 — 用正式结构体 VusAstListLiteral */
+            VusAstListLiteral *node = (VusAstListLiteral*)calloc(1, sizeof(VusAstListLiteral));
             if (!node) { vus_ast_list_free(items); return NULL; }
             node->type = VUS_AST_LIST_LITERAL;
             node->line = token->line;
@@ -1659,16 +1650,8 @@ static VusAstNode *parse_primary(VusParser *parser) {
             parser_expect(parser, VUS_TOKEN_RBRACE);
             if (parser->error) { vus_ast_list_free(keys); vus_ast_list_free(values); return NULL; }
 
-            /* 创建 DictLiteral 节点 */
-            typedef struct {
-                VusAstNodeType type;
-                int            line;
-                int            column;
-                VusAstList    *keys;
-                VusAstList    *values;
-            } LocalDictLiteral;
-
-            LocalDictLiteral *node = (LocalDictLiteral*)calloc(1, sizeof(LocalDictLiteral));
+            /* 创建 DictLiteral 节点 — 用正式结构体 VusAstDictLiteral */
+            VusAstDictLiteral *node = (VusAstDictLiteral*)calloc(1, sizeof(VusAstDictLiteral));
             if (!node) { vus_ast_list_free(keys); vus_ast_list_free(values); return NULL; }
             node->type = VUS_AST_DICT_LITERAL;
             node->line = token->line;
