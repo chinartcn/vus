@@ -27,6 +27,16 @@ static XImage*  s_img = 0;
 static Atom     s_wm_delete = 0;
 static int      s_running = 0;
 
+/* X11 文字叠加：X11 下用 XDrawString（X 核心字体）直接画到窗口，避免依赖
+ * GuiLite 字形呈现（其在 Termux GL 层存在方向异常）。文字请求先入队，
+ * redraw 时在 XPutImage 之后重放，避免被帧缓冲覆盖。X 字体不可用时返回 0，
+ * 由桥接层回退到 GuiLite 帧缓冲绘制。 */
+static XFontStruct* s_xfont = 0;
+#define VUS_TEXT_MAX 256
+typedef struct { int x; int y; unsigned long color; char* text; } VUS_XText;
+static VUS_XText     s_texts[VUS_TEXT_MAX];
+static int           s_text_cnt = 0;
+
 /* 显示方向补偿开关：部分后端（如 Termux-X11 的 GL 渲染）会把窗口内容
  * 翻转显示。用环境变量 VUS_X11_FLIP 控制：
  *   none / 0 / off    不翻转（默认）
@@ -117,6 +127,11 @@ int vus_gui_platform_init(int width, int height, const char* title)
     s_wm_delete = XInternAtom(s_dpy, "WM_DELETE_WINDOW", False);
     XSetWMProtocols(s_dpy, s_win, &s_wm_delete, 1);
 
+    /* 加载 X 核心字体用于文字叠加（XDrawString）；失败则回退 GuiLite 帧缓冲 */
+    s_xfont = XLoadQueryFont(s_dpy, "fixed");
+    if (!s_xfont) { s_xfont = XLoadQueryFont(s_dpy, "6x13"); }
+    s_text_cnt = 0;
+
     /* 创建与显示匹配的 XImage；XCreateImage(data=NULL) 不会分配数据缓冲，
      * 需自行分配（32bpp 时 bytes_per_line = width*4，与 ARGB 帧缓冲布局一致）。 */
     s_img = XCreateImage(s_dpy, DefaultVisual(s_dpy, screen),
@@ -143,6 +158,37 @@ int vus_gui_platform_init(int width, int height, const char* title)
     s_running = 1;
 #endif /* VUS_GUI_X11 */
     return 0;
+}
+
+/* 平台层文字绘制：X11 可用且已加载 X 字体时，把文字请求入队（redraw 时
+ * 用 XDrawString 叠加到窗口），返回 1；否则返回 0，由桥接层回退到
+ * GuiLite 帧缓冲绘制（如 headless 导出 PPM）。 */
+int vus_gui_platform_draw_text(int x, int y, const char* text, unsigned int color)
+{
+#ifdef VUS_GUI_X11
+    if (!s_dpy || !s_gc || !s_xfont || !text || !*text)
+    {
+        return 0;
+    }
+    if (s_text_cnt >= VUS_TEXT_MAX)
+    {
+        return 0;
+    }
+    VUS_XText* t = &s_texts[s_text_cnt++];
+    t->x = x;
+    t->y = y;
+    t->color = (unsigned long)(color & 0x00FFFFFF);
+    t->text = strdup(text);
+    if (!t->text)
+    {
+        s_text_cnt--;
+        return 0;
+    }
+    return 1;
+#else
+    (void)x; (void)y; (void)text; (void)color;
+    return 0;
+#endif
 }
 
 void vus_gui_platform_redraw(int width, int height, const unsigned int* fb)
@@ -181,6 +227,19 @@ void vus_gui_platform_redraw(int width, int height, const unsigned int* fb)
     }
     XPutImage(s_dpy, s_win, s_gc, s_img, 0, 0, 0, 0,
               (unsigned int)width, (unsigned int)height);
+    /* 在帧缓冲之上重放文字（XDrawString），避免被 XPutImage 覆盖 */
+    if (s_xfont)
+    {
+        int ascent = s_xfont->max_bounds.ascent;
+        XSetFont(s_dpy, s_gc, s_xfont->fid);
+        for (int i = 0; i < s_text_cnt; i++)
+        {
+            XSetForeground(s_dpy, s_gc, s_texts[i].color);
+            XDrawString(s_dpy, s_win, s_gc, s_texts[i].x,
+                        s_texts[i].y + ascent, s_texts[i].text,
+                        (int)strlen(s_texts[i].text));
+        }
+    }
     XFlush(s_dpy);
 #endif
 }
@@ -219,6 +278,18 @@ void vus_gui_platform_run(int width, int height, const unsigned int* fb)
     {
         XDestroyImage(s_img);
         s_img = 0;
+    }
+    /* 释放文字请求缓冲 */
+    for (int i = 0; i < s_text_cnt; i++)
+    {
+        free(s_texts[i].text);
+        s_texts[i].text = 0;
+    }
+    s_text_cnt = 0;
+    if (s_xfont)
+    {
+        XFreeFont(s_dpy, s_xfont);
+        s_xfont = 0;
     }
     if (s_gc)
     {

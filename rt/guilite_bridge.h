@@ -50,6 +50,9 @@ int vus_gui_surface_height(void);
 int  vus_gui_platform_init(int width, int height, const char* title);
 void vus_gui_platform_redraw(int width, int height, const unsigned int* fb);
 void vus_gui_platform_run(int width, int height, const unsigned int* fb);
+/* 平台层文字绘制：X11 可用且加载了 X 字体时用 XDrawString 叠加入队，返回 1；
+ * 否则返回 0，由桥接层回退到 GuiLite 帧缓冲绘制。 */
+int  vus_gui_platform_draw_text(int x, int y, const char* text, unsigned int color);
 
 #ifdef __cplusplus
 }
