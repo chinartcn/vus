@@ -135,8 +135,11 @@ void vus_gui_platform_redraw(int width, int height, const unsigned int* fb)
 {
     if (!fb) { return; }
 
-    /* 始终导出 PPM 供自动化验证像素 */
-    export_ppm("/tmp/gui_out.ppm", width, height, fb);
+    /* 导出 PPM 到当前目录（Termux 可写），供检查帧缓冲内容 */
+    export_ppm("gui_out.ppm", width, height, fb);
+    fprintf(stderr, "[redraw] w=%d h=%d fb[0]=0x%08X fb[%d]=0x%08X fb[mid]=0x%08X\n",
+            width, height, fb[0], width * height - 1,
+            fb[(size_t)(width / 2) * (size_t)width + (size_t)(height / 2)]);
 
 #ifdef VUS_GUI_X11
     if (!s_dpy || !s_img || !fb) { return; }
