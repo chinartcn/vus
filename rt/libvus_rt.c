@@ -543,6 +543,7 @@ double vus_to_float(VusString* s, int* err) {
 // ============ 线程实现 ============
 
 #include <pthread.h>
+#include <unistd.h>  /* usleep / useconds_t，供 vus_thread_sleep */
 
 struct VusThread {
     pthread_t thread;
@@ -591,6 +592,21 @@ void vus_thread_detach(VusThread* thread) {
     if (!thread || thread->detached) return;
     pthread_detach(thread->thread);
     thread->detached = 1;
+}
+
+/* 睡眠：休眠毫秒。生成器把 睡眠(ms) 映射为 vus_thread_sleep(vus_to_string(ms))。
+ * 用 usleep 跨平台休眠，nanosleep 更精确但部分嵌入式环境缺失 usleep 依赖。
+ * Termux / Linux / macOS 均提供 usleep。 */
+void vus_thread_sleep(VusString* ms) {
+    int64_t msec = vus_to_int(ms, NULL);
+    if (msec <= 0) return;
+    /* 分组休眠，避免超大毫秒值乘 1000 溢出 */
+    int64_t remaining_us = msec * 1000;
+    while (remaining_us > 0) {
+        useconds_t chunk = remaining_us > 1000000 ? 1000000 : (useconds_t)remaining_us;
+        usleep(chunk);
+        remaining_us -= chunk;
+    }
 }
 
 /* ============ 线程/协程句柄接口 ============ */

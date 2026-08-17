@@ -323,7 +323,7 @@ AST 采用 **tagged union** 设计，所有节点以 `VusAstNode` 作为通用�
 |----------|-----------|
 | `打印`/`print`、`输入` | `vus_print` / `vus_input` |
 | `转数字`、`转文本` | `vus_to_int` / `vus_to_string` |
-| `睡眠` | `vus_thread_sleep`（已声明） |
+| `睡眠` | `vus_thread_sleep`（已实现，基于 usleep） |
 | `日志_调试/信息/警告/错误/级别` | `vus_log_*`（EasyLogger）|
 | `文件_读/写/追加/存在/删除/列表` | `vus_plugin_file_*` |
 | `插件_运行`、`插件_运行JSON`、`JSON_解析`、`JSON_生成`、`类型`/`typeof` | `vus_plugin_run_vux*` / `vus_json_*` / `vus_typeof` |

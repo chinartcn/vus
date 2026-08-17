@@ -179,6 +179,9 @@ VusThread* vus_thread_create(void* (*func)(void*), void* arg);
 void* vus_thread_join(VusThread* thread);
 void vus_thread_detach(VusThread* thread);
 
+/* 睡眠：休眠 ms 毫秒（生成器把 睡眠(ms) 映射为 vus_thread_sleep(vus_to_string(ms))）。 */
+void vus_thread_sleep(VusString* ms);
+
 /* 线程/协程句柄接口（返回 VusString* 句柄，避免指针类型转换问题） */
 #define VUS_MAX_HANDLES 64
 VusString* vus_thread_create_handle(void* (*func)(void*), void* arg);
