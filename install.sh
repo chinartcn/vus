@@ -249,8 +249,19 @@ if [ "$INSTALL_FROM_SOURCE" -eq 1 ]; then
     # 编译 VUS 编译器
     echo ""
     echo "编译 VUS 编译器..."
+    # 核心目标 `vus`（编译器 + LSP）只依赖 libc，任何系统都能编。
+    # GUI 图形运行时(rt/guilite)额外依赖 libpng / FreeType / 桌面 X11，
+    # 仅在检测到 png.h + ft2build.h 时才尝试全量构建(包含 GUI)，否则跳过，
+    # 避免在缺少图形库或不支持桌面的系统(如 ACode 的 Alpine)上编译失败。
+    if [ -f /usr/include/png.h ] || [ -f /usr/local/include/png.h ]; then
+        MAKE_TARGET="all"
+        echo "  (检测到 libpng，构建含 GUI 图形运行时)"
+    else
+        MAKE_TARGET="vus"
+        echo "  (未检测到 libpng，仅构建编译器+LSP，跳过 GUI 运行时)"
+    fi
     progress "编译中..."
-    if make -C "$INSTALL_DIR" 2>&1; then
+    if make -C "$INSTALL_DIR" "$MAKE_TARGET" 2>&1; then
         echo "  ✅ 编译成功"
     else
         echo "  ❌ 编译失败"
