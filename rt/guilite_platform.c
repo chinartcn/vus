@@ -19,6 +19,7 @@
 #ifdef VUS_GUI_X11
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <X11/keysym.h>
 #include <X11/Xft/Xft.h>
 
 #ifdef VUS_GUI_GLES
@@ -73,6 +74,11 @@ static int s_gles = 0;
 #endif
 #endif
 
+/* 调试开关：VUS_GUI_DEBUG=1 时每次 redraw 打印帧缓冲概要并导出 PPM。
+ * 默认关闭，避免 60fps 下每帧写日志/写盘导致终端与 logcat 数据堆积、
+ * CPU 持续空转无法休眠、进而触发 Android 异常耗电杀进程。 */
+static int s_dbg = 0;
+
 /* 把 ARGB8888 帧缓冲导出为 PPM P6 图像（RGB 各 8bit） */
 static void export_ppm(const char* path, int width, int height, const unsigned int* fb)
 {
@@ -95,6 +101,12 @@ static void export_ppm(const char* path, int width, int height, const unsigned i
 int vus_gui_platform_init(int width, int height, const char* title)
 {
     (void)title;
+    /* 调试开关：仅当 VUS_GUI_DEBUG 非空且非 "0" 时输出绘制日志与 PPM */
+    s_dbg = 0;
+    {
+        const char* dbg = getenv("VUS_GUI_DEBUG");
+        if (dbg && dbg[0] && strcmp(dbg, "0") != 0) s_dbg = 1;
+    }
 #ifdef VUS_GUI_X11
     s_dpy = XOpenDisplay(NULL);
     if (!s_dpy)
@@ -282,11 +294,14 @@ void vus_gui_platform_redraw(int width, int height, const unsigned int* fb)
 {
     if (!fb) { return; }
 
-    /* 导出 PPM 到当前目录（Termux 可写），供检查帧缓冲内容 */
-    export_ppm("gui_out.ppm", width, height, fb);
-    fprintf(stderr, "[redraw] w=%d h=%d fb[0]=0x%08X fb[%d]=0x%08X fb[mid]=0x%08X\n",
-            width, height, fb[0], width * height - 1,
-            fb[(size_t)(width / 2) * (size_t)width + (size_t)(height / 2)]);
+    /* 调试模式才导出 PPM 并打印每帧帧缓冲概要，默认关闭（避免高频写盘/日志耗电） */
+    if (s_dbg)
+    {
+        export_ppm("gui_out.ppm", width, height, fb);
+        fprintf(stderr, "[redraw] w=%d h=%d fb[0]=0x%08X fb[%d]=0x%08X fb[mid]=0x%08X\n",
+                width, height, fb[0], width * height - 1,
+                fb[(size_t)(width / 2) * (size_t)width + (size_t)(height / 2)]);
+    }
 
 #ifdef VUS_GUI_X11
 #ifdef VUS_GUI_GLES
@@ -418,15 +433,51 @@ static void vus_gui_platform_handle_event(XEvent *ev, int width, int height, con
         }
         break;
     case KeyPress:
-        /* 任意按键退出事件循环，便于测试 */
-        s_running = 0;
+        /* 键盘输入：记录按键（可打印字符 + keycode），并派发给桥接层。
+         * Esc 键退出事件循环，便于测试；其余按键作为输入继续轮询。 */
+        {
+            KeySym keysym = XLookupKeysym(&ev->xkey, 0);
+            if (keysym == XK_Escape)
+            {
+                s_running = 0;
+                break;
+            }
+            /* 用 XKB/keysym 把按键转成可打印 UTF-8 字符串（大写/移位已由 keysym 处理） */
+            char buf[16] = { 0 };
+            const char* symstr = NULL;
+            int len = XLookupString(&ev->xkey, buf, sizeof(buf) - 1, NULL, NULL);
+            if (len > 0)
+            {
+                buf[len] = '\0';
+                symstr = buf;
+            }
+            else if (keysym >= XK_space && keysym <= XK_asciitilde)
+            {
+                /* 单字符合法可打印区（ASCII 打印字符，含空格） */
+                char one = (char)(keysym & 0x7F);
+                buf[0] = one; buf[1] = '\0';
+                symstr = buf;
+            }
+            vus_gui_platform_emit_key(symstr, (unsigned int)keysym,
+                                      (unsigned int)ev->xkey.state);
+        }
         break;
     case ButtonPress:
-        /* 鼠标/触摸按下：记录坐标供 图形_按钮点击 命中，并触发 事件_点击 回调 */
+        /* 鼠标/触摸按下：记录坐标供 图形_按钮点击 命中。
+         * X 滚轮作为 ButtonPress 的 button 4(上)/5(下) 到达，单独派发滚轮，
+         * 不污染普通点击的命中检测。 */
+        if (ev->xbutton.button == 4 || ev->xbutton.button == 5)
+        {
+            int dy = (ev->xbutton.button == 4) ? 1 : -1;
+            vus_gui_platform_emit_wheel(ev->xbutton.x, ev->xbutton.y, dy);
+            break;
+        }
+        vus_gui_platform_emit_button(ev->xbutton.x, ev->xbutton.y, ev->xbutton.button);
         vus_gui_platform_emit_click(ev->xbutton.x, ev->xbutton.y);
         break;
     case MotionNotify:
-        /* 指针移动：可选的连续回调，当前不派发，保留作后续扩展 */
+        /* 指针移动：记录鼠标位置（供 图形_鼠标x/y、悬停检测） */
+        vus_gui_platform_emit_motion(ev->xmotion.x, ev->xmotion.y, (unsigned int)ev->xmotion.state);
         break;
     default:
         break;

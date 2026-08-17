@@ -28,6 +28,27 @@ VusString* vus_gui_draw_rect(int x, int y, int width, int height, unsigned int c
 VusString* vus_gui_fill_rect(int x, int y, int width, int height, unsigned int color);
 VusString* vus_gui_draw_text(int x, int y, const char* text, unsigned int color);
 
+/* 外部字体：加载 TTF/OTF 到全局活动字体并设置字号（像素）。返回 "1" / "0"。 */
+VusString* vus_gui_font(const char* path, int size_px);
+/* 外部字体是否已加载：返回 "1" / "0"。 */
+VusString* vus_gui_font_loaded(void);
+
+/* ============ 阶段E：多页导航（页面栈） ============
+ * 页面概念：脚本对每页定义约定式函数 `页_<名>()`，编译为 `vus_页_<sanitized名>`
+ * 全局符号（与语言 导入 结合即可接入外部 .vus 页面）。桥接层维护一个页面栈，
+ * 切换/绘制通过 dlsym 反查当前页函数并调用。 */
+
+/* 图形_页面_打开(名)：把名为"名"的页置为当前页。若该页已在栈中，则弹出其上方
+ * 所有层（回到该页，避免 tab 往返无限增栈）；否则压栈。返回 "1" / "0"。 */
+VusString* vus_gui_page_open(const char* name);
+/* 图形_页面_返回()：弹栈回到上一页。有上一页返回 "1"；已在首页返回 "0"。 */
+VusString* vus_gui_page_back(void);
+/* 图形_页面_当前()：返回当前页名字符串；无页返回空串。 */
+VusString* vus_gui_page_current(void);
+/* 图形_页面_绘制()：dlsym 当前页对应 `页_<名>` 函数并调用（无参绘制）。找到并
+ * 调用返回 "1"；无当前页或函数缺失返回 "0"（不崩溃）。 */
+VusString* vus_gui_page_draw(void);
+
 /* 刷新：把帧缓冲送到显示后端（X11 送窗 / headless 导出 PPM）。 */
 VusString* vus_gui_redraw(void);
 
@@ -58,8 +79,76 @@ void vus_gui_platform_poll(int width, int height, const unsigned int* fb);
 
 /* 点击事件派发：平台层（X11 事件循环）捕获鼠标点击后回调本接口，
  * 本接口负责按约定函数名反查 VUS 回调（事件_点击）并调用（见 guilite_bridge.c）。
- * x / y 为窗口内坐标（像素，左上为原点）。 */
+ * x / y 为窗口内坐标（像素，左上为原点）。
+ * button 为 X 按钮号：1=左键 2=中键 3=右键 4=滚轮上 5=滚轮下。滚轮事件的
+ * x/y 也一并传入（用于区分是点击还是滚动）。 */
 void vus_gui_platform_emit_click(int x, int y);
+void vus_gui_platform_emit_button(int x, int y, int button);
+
+/* ============ 阶段4：X11 多输入支持 ============ */
+
+/* 按键事件派发：平台层收到 KeyPress 后回调本接口，记录最近一次按键。
+ * symstr 为 KeySym 对应的可打印 UTF-8 字符串（无法打印时为 NULL）；
+ * keycode 为 X 键码（物理键）；state 为修饰键掩码（Shift/Ctrl/Alt 位）。
+ * 本接口存储键盘状态供 图形_按键/图形_按键码 轮询读取，并触发 事件_按键 回调。 */
+void vus_gui_platform_emit_key(const char* symstr, unsigned int keycode, unsigned int state);
+
+/* 指针移动派发：平台层收到 MotionNotify 后回调本接口，记录鼠标位置。
+ * x / y 为窗口内坐标；state 为修饰键掩码。 */
+void vus_gui_platform_emit_motion(int x, int y, unsigned int state);
+
+/* 滚轮派发：滚轮作为 ButtonPress 的 button 4/5 到达，平台层分离后回调本接口。
+ * dy 为滚动增量：+1 上滚、-1 下滚；x/y 为滚动时机标位置。 */
+void vus_gui_platform_emit_wheel(int x, int y, int dy);
+
+/* 轮询读取 API：供 图形_* 内建映射（阶段4，X11 多输入）。
+ * 全部返回 VusString*，headless 下返回合理默认值。 */
+VusString* vus_gui_last_key(void);             /* 图形_按键：最近按键字符 */
+VusString* vus_gui_last_keycode(void);         /* 图形_按键码：最近按键 KeySym（无则 -1） */
+VusString* vus_gui_mouse_pos(void);            /* 图形_鼠标位置："x,y" / "-1,-1" */
+VusString* vus_gui_mouse_x(void);              /* 图形_鼠标x：鼠标 X / -1 */
+VusString* vus_gui_mouse_y(void);              /* 图形_鼠标y：鼠标 Y / -1 */
+VusString* vus_gui_wheel(void);                /* 图形_滚轮：滚轮增量（读取后清零） */
+VusString* vus_gui_button_pressed(int button); /* 图形_键按下(btn)：某键是否按下并消费 */
+VusString* vus_gui_hover(const char* name);    /* 图形_悬停(名)：鼠标是否悬停控件上 */
+
+/* ============ 阶段B：样式/主题模板 ============ */
+/* 图形_主题(背景, 边框, 高亮, 正文, 文字)：设置全局主题色（0xRRGGBB）。
+ * 任一传 -1 表示保持该通道不变。返回 VusString*："1" 成功 / "0" 失败。 */
+VusString* vus_gui_set_theme(int bg, int border, int highlight, int fg, int text);
+
+/* ============ 阶段C：控件组合模板 ============ */
+VusString* vus_gui_card(const char* name, int x, int y, int w, int h, const char* title); /* 图形_卡片 */
+VusString* vus_gui_panel(const char* name, int x, int y, int w, int h, const char* title);/* 图形_面板 */
+VusString* vus_gui_form_row(const char* name, const char* label, int x, int y, int w, const char* text); /* 图形_表单行 */
+VusString* vus_gui_row_clicked(const char* name);  /* 图形_行点击 */
+VusString* vus_gui_ring(const char* name, int x, int y, int radius, int pct, int color); /* 图形_圆环 */
+
+/* ============ 阶段D：Markdown 最小集 / 画线增强 / 滚动容器 ============ */
+
+/* 画线增强（图形_画线，后 3 参可省略，默认 线宽=1/虚线=0/箭头=0）。
+ * 直接写 ARGB 帧缓冲，支持线宽、虚线、终点箭头。 */
+VusString* vus_gui_draw_line_ex(int x1, int y1, int x2, int y2,
+    unsigned int color, int width, int dashed, int arrow);
+
+/* 图形_MD(x, y, 宽度, 文本)：Markdown 最小集渲染（标题/列表/引用/代码块/段落与分隔线，
+ * 行内标记当普通文本），按宽度折行，复用 draw_text_xy 文字通道。
+ * 返回占用行数（VusString* 为整数字符串），空文本返回 "0"。 */
+VusString* vus_gui_md(int x, int y, int width, const char* text);
+
+/* 滚动容器（图形_滚动容器）：声明可视区 + 滚动范围，开启内容平移 + 裁剪。
+ * 返回 "1" 成功 / "0" 失败。 */
+VusString* vus_gui_scroll_begin(const char* name, int x, int y, int w, int h, int content_h);
+/* 图形_滚动容器滚(name, dy)：令容器偏移增减 dy（夹在合法范围），返回新偏移整数串。 */
+VusString* vus_gui_scroll_delta(const char* name, int dy);
+/* 图形_滚动容器偏移(name)：返回当前偏移整数串；未登记返回 "0"。 */
+VusString* vus_gui_scroll_offset(const char* name);
+
+/* 图形_背景图(x, y, 宽, 高, PNG路径)：用 libpng 解码 PNG（RGBA），按最近邻
+ * 拉伸填充到目标矩形，作为控件/区域的背景底图。受滚动容器平移与裁剪约束，
+ * 直接写 ARGB 帧缓冲并置脏。返回 "1" 成功 / "0" 失败（文件缺失/非 PNG/解码错）。
+ * PNG 带 alpha 时与帧缓冲当前像素做 alpha 合成。 */
+VusString* vus_gui_draw_png(int x, int y, int w, int h, const char* path);
 
 /* ============ 阶段2：控件与轮询交互 API ============ */
 

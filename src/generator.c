@@ -271,6 +271,8 @@ static void gen_string_escape(const char *input, char *output, size_t out_size) 
 static char *gen_expr(GenBuf *buf, VusAstNode *node);
 static GenStructInfo *s_gen_structs = NULL; /* 结构体类型表，用于成员访问 */
 static int g_uses_gui = 0; /* 是否在代码中使用了 GuiLite 图形内建函数（决定链接参数） */
+static int g_uses_png = 0; /* 是否使用 图形_背景图（决定追加 -lpng -lz 链接库） */
+static int g_uses_freetype = 0; /* 是否使用 图形_字体_加载（决定追加 -lfreetype 链接库） */
 
 static char *gen_expr_access(GenBuf *buf, VusAstAccess *access) {
     /* 生成成员访问表达式
@@ -520,11 +522,13 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
             char *arg = gen_expr(buf, call->args->items[0]);
             size_t sz = strlen(arg) + 64;
             char *result = (char *)malloc(sz);
-            snprintf(result, sz, "vus_to_int(%s, &_err)", arg);
+            /* 包装为 VusString*，保证在赋值/打印/算术等所有语境下
+             * 类型一致；算术场合 vus_to_int 会再次解出数值，语义不变。 */
+            snprintf(result, sz, "vus_to_string(vus_to_int(%s, &_err))", arg);
             free(arg);
             return result;
         }
-        return strdup("(int64_t)0");
+        return strdup("vus_to_string(0)");
     }
     if (strcmp(call->func_name, "转文本") == 0) {
         if (call->args && call->args->count > 0) {
@@ -644,11 +648,18 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
             char *x2 = gen_expr(buf, call->args->items[2]);
             char *y2 = gen_expr(buf, call->args->items[3]);
             char *c  = gen_expr(buf, call->args->items[4]);
+            /* 后 3 参可省略：线宽默认 1、虚线默认 0、箭头默认 0。
+             * 缺省值用与 gen_expr 同构的 VusString* 表达式（vus_to_string(N)），
+             * 避免 (int) 强转指针产生垃圾值。 */
+            char *wd  = (call->args->count > 5) ? gen_expr(buf, call->args->items[5]) : strdup("vus_to_string(1)");
+            char *ds  = (call->args->count > 6) ? gen_expr(buf, call->args->items[6]) : strdup("vus_to_string(0)");
+            char *ar  = (call->args->count > 7) ? gen_expr(buf, call->args->items[7]) : strdup("vus_to_string(0)");
             char result[4096];
             snprintf(result, sizeof(result),
-                "vus_gui_draw_line((int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (unsigned int)vus_to_int(%s, &_err))",
-                x1, y1, x2, y2, c);
+                "vus_gui_draw_line_ex((int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (unsigned int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err))",
+                x1, y1, x2, y2, c, wd, ds, ar);
             free(x1); free(y1); free(x2); free(y2); free(c);
+            free(wd); free(ds); free(ar);
             g_uses_gui = 1;
             return strdup(result);
         }
@@ -708,6 +719,132 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
         g_uses_gui = 1;
         return strdup("vus_gui_run()");
     }
+    /* 图形_MD(x, y, 宽度, 文本)：Markdown 最小集渲染，按宽度折行，返回占用行数整数串。 */
+    if (strcmp(call->func_name, "图形_MD") == 0) {
+        if (call->args && call->args->count >= 4) {
+            char *x = gen_expr(buf, call->args->items[0]);
+            char *y = gen_expr(buf, call->args->items[1]);
+            char *w = gen_expr(buf, call->args->items[2]);
+            char *txt = gen_expr(buf, call->args->items[3]);
+            char result[4096];
+            snprintf(result, sizeof(result),
+                "vus_gui_md((int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), vus_string_cstr(%s))",
+                x, y, w, txt);
+            free(x); free(y); free(w); free(txt);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    /* 图形_滚动容器(name, x, y, w, h, content_h)：登记可视区 + 滚动范围。 */
+    if (strcmp(call->func_name, "图形_滚动容器") == 0) {
+        if (call->args && call->args->count >= 6) {
+            char *nm = gen_expr(buf, call->args->items[0]);
+            char *x  = gen_expr(buf, call->args->items[1]);
+            char *y  = gen_expr(buf, call->args->items[2]);
+            char *w  = gen_expr(buf, call->args->items[3]);
+            char *h  = gen_expr(buf, call->args->items[4]);
+            char *ch = gen_expr(buf, call->args->items[5]);
+            char result[4096];
+            snprintf(result, sizeof(result),
+                "vus_gui_scroll_begin(vus_string_cstr(%s), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err))",
+                nm, x, y, w, h, ch);
+            free(nm); free(x); free(y); free(w); free(h); free(ch);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    /* 图形_滚动容器滚(name, dy)：令容器偏移增减 dy，返回新偏移整数串。 */
+    if (strcmp(call->func_name, "图形_滚动容器滚") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *nm = gen_expr(buf, call->args->items[0]);
+            char *dy = gen_expr(buf, call->args->items[1]);
+            char result[1024];
+            snprintf(result, sizeof(result),
+                "vus_gui_scroll_delta(vus_string_cstr(%s), (int)vus_to_int(%s, &_err))",
+                nm, dy);
+            free(nm); free(dy);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    /* 图形_滚动容器偏移(name)：返回当前偏移整数串。 */
+    if (strcmp(call->func_name, "图形_滚动容器偏移") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *nm = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result),
+                "vus_gui_scroll_offset(vus_string_cstr(%s))", nm);
+            free(nm);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    /* 图形_背景图(x, y, 宽, 高, PNG路径)：解码 PNG 拉伸铺作控件/区域背景。 */
+    if (strcmp(call->func_name, "图形_背景图") == 0) {
+        if (call->args && call->args->count >= 5) {
+            char *x = gen_expr(buf, call->args->items[0]);
+            char *y = gen_expr(buf, call->args->items[1]);
+            char *w = gen_expr(buf, call->args->items[2]);
+            char *h = gen_expr(buf, call->args->items[3]);
+            char *path = gen_expr(buf, call->args->items[4]);
+            char result[4096];
+            snprintf(result, sizeof(result),
+                "vus_gui_draw_png((int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), vus_string_cstr(%s))",
+                x, y, w, h, path);
+            free(x); free(y); free(w); free(h); free(path);
+            g_uses_gui = 1;
+            g_uses_png = 1;
+            return strdup(result);
+        }
+    }
+
+    /* 图形_字体_加载(路径, 字号)：加载外部 TTF/OTF 到全局活动字体。 */
+    if (strcmp(call->func_name, "图形_字体_加载") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *path = gen_expr(buf, call->args->items[0]);
+            char *sz   = gen_expr(buf, call->args->items[1]);
+            char result[2048];
+            snprintf(result, sizeof(result),
+                "vus_gui_font(vus_string_cstr(%s), (int)vus_to_int(%s, &_err))",
+                path, sz);
+            free(path); free(sz);
+            g_uses_gui = 1;
+            g_uses_freetype = 1;
+            return strdup(result);
+        }
+    }
+    /* 图形_字体已加载()：查询外部字体是否已加载。 */
+    if (strcmp(call->func_name, "图形_字体已加载") == 0) {
+        g_uses_gui = 1;
+        g_uses_freetype = 1;
+        return strdup("vus_gui_font_loaded()");
+    }
+
+    /* ===== 阶段E：多页导航（页面栈） =====
+     * 页面概念：脚本对每页定义约定式函数 `页_<名>()`，由桥接层 dlsym 反查并
+     * 调用。配合语言 导入 可接入外部 .vus 页面。 */
+    if (strcmp(call->func_name, "图形_页面_打开") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *nm = gen_expr(buf, call->args->items[0]);
+            char result[2048];
+            snprintf(result, sizeof(result), "vus_gui_page_open(vus_string_cstr(%s))", nm);
+            free(nm);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_页面_返回") == 0) {
+        g_uses_gui = 1;
+        return strdup("vus_gui_page_back()");
+    }
+    if (strcmp(call->func_name, "图形_页面_当前") == 0) {
+        g_uses_gui = 1;
+        return strdup("vus_gui_page_current()");
+    }
+    if (strcmp(call->func_name, "图形_页面_绘制") == 0) {
+        g_uses_gui = 1;
+        return strdup("vus_gui_page_draw()");
+    }
 
     /* ===== 阶段2：控件与轮询交互 =====
      * 图形_按钮(名,x,y,宽,高,文本)：创建并绘制一个按钮，登记命中矩形。
@@ -733,6 +870,143 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
     if (strcmp(call->func_name, "图形_取事件") == 0) {
         g_uses_gui = 1;
         return strdup("vus_gui_poll()");
+    }
+
+    /* ===== 阶段4：X11 多输入 =====
+     * 键盘：图形_按键() 图形_按键码()，鼠标：图形_鼠标x/y() 图形_鼠标位置()
+     * 滚轮：图形_滚轮()，按键：图形_键按下(n)，悬停：图形_悬停(名) */
+    if (strcmp(call->func_name, "图形_按键") == 0) {
+        g_uses_gui = 1;
+        return strdup("vus_gui_last_key()");
+    }
+    if (strcmp(call->func_name, "图形_按键码") == 0) {
+        g_uses_gui = 1;
+        return strdup("vus_gui_last_keycode()");
+    }
+    if (strcmp(call->func_name, "图形_鼠标位置") == 0) {
+        g_uses_gui = 1;
+        return strdup("vus_gui_mouse_pos()");
+    }
+    if (strcmp(call->func_name, "图形_鼠标x") == 0) {
+        g_uses_gui = 1;
+        return strdup("vus_gui_mouse_x()");
+    }
+    if (strcmp(call->func_name, "图形_鼠标y") == 0) {
+        g_uses_gui = 1;
+        return strdup("vus_gui_mouse_y()");
+    }
+    if (strcmp(call->func_name, "图形_滚轮") == 0) {
+        g_uses_gui = 1;
+        return strdup("vus_gui_wheel()");
+    }
+    if (strcmp(call->func_name, "图形_键按下") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *b = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result),
+                "vus_gui_button_pressed((int)vus_to_int(%s, &_err))", b);
+            free(b);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_悬停") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *nm = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result),
+                "vus_gui_hover(vus_string_cstr(%s))", nm);
+            free(nm);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+
+    /* ===== 阶段B：样式/主题模板 =====
+     * 图形_主题(背景, 边框, 高亮, 正文, 文字)：设置全局主题色。 */
+    if (strcmp(call->func_name, "图形_主题") == 0) {
+        int n = call->args ? call->args->count : 0;
+        char* a[6] = { 0 };
+        char defs[6][16] = { "-1","-1","-1","-1","-1" };
+        for (int i = 0; i < 5 && i < n; i++)
+            a[i] = gen_expr(buf, call->args->items[i]);
+        char result[4096];
+        snprintf(result, sizeof(result),
+            "vus_gui_set_theme(%s, %s, %s, %s, %s)",
+            a[0] ? a[0] : defs[0], a[1] ? a[1] : defs[1],
+            a[2] ? a[2] : defs[2], a[3] ? a[3] : defs[3],
+            a[4] ? a[4] : defs[4]);
+        for (int i = 0; i < 5; i++) if (a[i]) free(a[i]);
+        g_uses_gui = 1;
+        return strdup(result);
+    }
+
+    /* ===== 阶段C：控件组合模板 =====
+     * 图形_卡片(名,x,y,宽,高,标题) / 图形_面板(...) /
+     * 图形_表单行(名,标签,x,y,宽,文本) / 图形_行点击(名) / 图形_圆环(名,x,y,半径,比例,颜色) */
+    if (strcmp(call->func_name, "图形_卡片") == 0 ||
+        strcmp(call->func_name, "图形_面板") == 0) {
+        if (call->args && call->args->count >= 6) {
+            char *nm = gen_expr(buf, call->args->items[0]);
+            char *x  = gen_expr(buf, call->args->items[1]);
+            char *y  = gen_expr(buf, call->args->items[2]);
+            char *wd = gen_expr(buf, call->args->items[3]);
+            char *ht = gen_expr(buf, call->args->items[4]);
+            char *ti = gen_expr(buf, call->args->items[5]);
+            char result[4096];
+            const char* fn = (strcmp(call->func_name, "图形_卡片") == 0) ? "vus_gui_card" : "vus_gui_panel";
+            snprintf(result, sizeof(result),
+                "%s(vus_string_cstr(%s), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), vus_string_cstr(%s))",
+                fn, nm, x, y, wd, ht, ti);
+            free(nm); free(x); free(y); free(wd); free(ht); free(ti);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_表单行") == 0) {
+        if (call->args && call->args->count >= 6) {
+            char *nm  = gen_expr(buf, call->args->items[0]);
+            char *lb  = gen_expr(buf, call->args->items[1]);
+            char *x   = gen_expr(buf, call->args->items[2]);
+            char *y   = gen_expr(buf, call->args->items[3]);
+            char *wd  = gen_expr(buf, call->args->items[4]);
+            char *tx  = gen_expr(buf, call->args->items[5]);
+            char result[4096];
+            snprintf(result, sizeof(result),
+                "vus_gui_form_row(vus_string_cstr(%s), vus_string_cstr(%s), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), vus_string_cstr(%s))",
+                nm, lb, x, y, wd, tx);
+            free(nm); free(lb); free(x); free(y); free(wd); free(tx);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_行点击") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *nm = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result),
+                "vus_gui_row_clicked(vus_string_cstr(%s))", nm);
+            free(nm);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_圆环") == 0) {
+        if (call->args && call->args->count >= 5) {
+            char *nm  = gen_expr(buf, call->args->items[0]);
+            char *x   = gen_expr(buf, call->args->items[1]);
+            char *y   = gen_expr(buf, call->args->items[2]);
+            char *r   = gen_expr(buf, call->args->items[3]);
+            char *pct = gen_expr(buf, call->args->items[4]);
+            char *col = (call->args->count >= 6) ? gen_expr(buf, call->args->items[5]) : NULL;
+            char result[4096];
+            snprintf(result, sizeof(result),
+                "vus_gui_ring(vus_string_cstr(%s), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), %s)",
+                nm, x, y, r, pct, col ? col : "-1");
+            free(nm); free(x); free(y); free(r); free(pct); if (col) free(col);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
     }
     if (strcmp(call->func_name, "图形_按钮点击") == 0 ||
         strcmp(call->func_name, "按钮被点击") == 0) {
@@ -1123,6 +1397,14 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
             free(arg);
             return strdup(result);
         }
+    }
+
+    /* ============= Termux-X11 内建（免手敲 termux-x11/zink 启动命令） ============= */
+    if (strcmp(call->func_name, "Termux_启动X11") == 0) {
+        return strdup("vus_termux_start_x11()");
+    }
+    if (strcmp(call->func_name, "Termux_启动GPU") == 0) {
+        return strdup("vus_termux_start_gl()");
     }
 
     /* ============= 日期时间内置函数 ============= */
@@ -2289,7 +2571,9 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
     char gui_src[2048];
     gui_src[0] = '\0';
     const char *gui_def = "";
-    const char *gui_lib = "";
+    /* gui_lib 需要被 strcat 追加 " -lpng -lz"（图形_背景图），必须用可写的固定缓冲，
+       不能用指向字符串字面量的 const char*（strcat 越界写只读页 → SIGSEGV）。 */
+    char gui_lib[128] = "";
     char xft_inc[512] = "";
     if (config->rt_dir[0] && g_uses_gui) {
         snprintf(gui_src, sizeof(gui_src),
@@ -2321,9 +2605,10 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
             }
             pclose(xft_check);
         }
-        /* 捕获 FreeType 头路径（Xft.h 依赖 ft2build.h）。Termux 与 PC 的
-           freetype 目录不同，统一用 pkg-config 解析。 */
-        if (has_xft) {
+        /* 捕获 FreeType 头路径（Xft.h 与 guilite_bridge.c 的 ft2build.h 都依赖它）。
+           Termux 与 PC 的 freetype 目录不同，统一用 pkg-config 解析。凡使用 GUI 均需，
+           因为 guilite_bridge.o/源会无条件 include <ft2build.h>。 */
+        {
             FILE *ftc = popen("pkg-config --cflags freetype2 2>/dev/null", "r");
             if (ftc) {
                 if (fgets(xft_inc, sizeof(xft_inc), ftc)) {
@@ -2338,11 +2623,17 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
            定义的 事件_点击 等回调函数；-ldl 提供 dlsym（Termux bionic 必需）。
            Xft 用于 UTF-8 中文叠加，-lXft -lfontconfig 链入渲染库。 */
         if (has_x11) {
-            gui_lib = "-lX11 -rdynamic -ldl";
-            if (has_xft) { gui_lib = "-lX11 -lXft -lfontconfig -rdynamic -ldl"; }
+            snprintf(gui_lib, sizeof(gui_lib), "-lX11 -rdynamic -ldl");
+            if (has_xft) { snprintf(gui_lib, sizeof(gui_lib), "-lX11 -lXft -lfontconfig -rdynamic -ldl"); }
         } else {
-            gui_lib = "-rdynamic -ldl";
+            snprintf(gui_lib, sizeof(gui_lib), "-rdynamic -ldl");
         }
+        /* 图形_背景图 依赖 libpng（及其 zlib 依赖）。注意：静态库 libvus_rt.a 中的
+           guilite_bridge.o 始终引用 png_* 符号（vus_gui_draw_png），因此凡使用 GUI
+           的用例都必须追加 -lpng -lz，否则链接器会报 png 符号缺失。
+           guilite_bridge.o 同样引用 FreeType 符号（vus_gui_font 的 FT_* 调用），
+           故凡使用 GUI 也一律追加 -lfreetype。 */
+        if (g_uses_gui) { strcat(gui_lib, " -lpng -lz -lfreetype"); }
     }
 
     if (use_static_rt) {

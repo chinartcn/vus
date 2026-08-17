@@ -109,6 +109,11 @@ VusList* vus_dict_keys(VusDict* dict);
  * 供脚本内建「字典_键」使用，避免误把任意对象当 VusDict 解引用。 */
 VusList* vus_dict_keys_of(void* obj);
 
+/* ---- Termux-X11 一键启动（Termux_* 内建） ----
+ * 在脚本里免去手动敲 termux-x11/环境变量/virgl_test_server 的命令。 */
+int vus_termux_start_x11(void);  /* 启动 termux-x11 :0 并设 DISPLAY=:0 */
+int vus_termux_start_gl(void);   /* 灌入 zink MESA/GALLIUM 环境变量并启 virgl_test_server */
+
 // ============ 闭包 ============
 // 闭包参数约定：args 由调用方分配，调用结束后由调用方负责释放（vus_unref）。
 // func 在调用期间持有 args 的引用，但不负责释放。

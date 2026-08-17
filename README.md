@@ -7,7 +7,7 @@
 > **中西合璧，天下无敌**  
 > 让不懂英文的人也能写代码，同时保留对底层硬件的完全控制权
 
-VUS 是面向 Linux、Android Termux、嵌入式 ARM 设备的中文友好多范式**编译型**编程语言。填补 C 与 Python 之间的空白，编译到 C → GCC/Clang → 原生可执行文件。
+VUS 是生成标准 ANSI C 代码的中文友好多范式**编译型**编程语言，运行在带标准 C 库（glibc/musl）与 POSIX 接口的 Linux 环境（含 Android Termux）上，填补 C 与 Python 之间的空白。它只负责生成 ANSI C——至于在哪个平台的 GCC/Clang 上编译、链接哪些库、跑在什么芯片上，那是编译器和系统接口的事，不是 VUS 语言本身的责任。生成的 `.c` 文件可拿到任何支持 GCC/Clang 与 POSIX 的平台上编译，覆盖 Linux、Android/Termux、macOS、WSL2 等操作系统与 x86_64、ARM64、ARM32、RISC-V 等架构，特别适合快速开发 Linux 桌面工具、安卓终端应用和边缘计算脚本。
 
 当前版本：**v1.0-beta**
 

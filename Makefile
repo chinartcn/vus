@@ -168,7 +168,7 @@ $(BUILD_DIR)/elog_port.o: $(RT_DIR)/elog_port.c $(EL_DIR)/inc/elog.h | $(BUILD_D
 
 # 编译 GuiLite 图形库（C 桥接 / C 平台 / C++ 包装）
 $(BUILD_DIR)/guilite_bridge.o: $(RT_DIR)/guilite_bridge.c $(RT_DIR)/guilite_bridge.h | $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(PY_DEF) $(PY_INC) -I$(RT_DIR) -c -o $@ $<
+	$(CC) $(CFLAGS) $(PY_DEF) $(PY_INC) -I$(RT_DIR) $(shell pkg-config --cflags freetype2 2>/dev/null) -DVUS_GUI_X11 $(GLES_DEF) -c -o $@ $<
 
 $(BUILD_DIR)/guilite_platform.o: $(RT_DIR)/guilite_platform.c $(RT_DIR)/guilite_bridge.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(PY_DEF) $(PY_INC) -I$(RT_DIR) $(shell pkg-config --cflags freetype2 2>/dev/null) -DVUS_GUI_X11 $(GLES_DEF) -c -o $@ $<

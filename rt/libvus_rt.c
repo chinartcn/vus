@@ -1151,6 +1151,46 @@ void* vus_json_query(VusString* json, VusString* path) {
 }
 
 /* =====================================================================
+ * Termux-X11 一键启动（Termux_* 内建）
+ * ---------------------------------------------------------------------
+ * 让 GUILT/GLES 脚本免去每次手动敲启动命令与环境变量：
+ *   Termux_启动X11()：启动 termux-x11 :0 后台并设置 DISPLAY=:0
+ *   Termux_启动GPU()：灌入 zink(virgl) 会用到的 MESA/GALLIUM 环境变量，
+ *                     并启动 virgl_test_server(GLES, 无窗口 surface)
+ * 在非 Termux 环境调用无害：命令不存在静默失败，仅 setenv 生效。
+ * ===================================================================== */
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-result"
+#endif
+int vus_termux_start_x11(void)
+{
+    if (!getenv("DISPLAY") || !getenv("DISPLAY")[0])
+    {
+        system("termux-x11 :0 >/dev/null 2>&1 &");
+        system("sleep 1");
+        setenv("DISPLAY", ":0", 1);
+    }
+    return getenv("DISPLAY") ? 1 : 0;
+}
+
+int vus_termux_start_gl(void)
+{
+    setenv("MESA_NO_ERROR", "1", 1);
+    setenv("MESA_LOADER_DRIVER_OVERRIDE", "zink", 1);
+    setenv("MESA_GLES_VERSION_OVERRIDE", "3.2", 1);
+    setenv("GALLIUM_DRIVER", "zink", 1);
+    setenv("ZINK_DESCRIPTORS", "lazy", 1);
+    /* 4.3COMPAT 在 virgl 后台服务器(GLES)由 MESA_GLES_VERSION_OVERRIDE 兜底 */
+    setenv("MESA_GL_VERSION_OVERRIDE", "4.3", 1);
+    system("virgl_test_server --use-egl-surfaceless --use-gles >/dev/null 2>&1 &");
+    return 1;
+}
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
+
+/* =====================================================================
  * 进程内嵌入 Python 解释器
  * ---------------------------------------------------------------------
  * 通过 dlopen 惰性加载 libpython，用 dlsym 定位符号，避免编译期对

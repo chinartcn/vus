@@ -44,6 +44,182 @@ static char *read_file(const char *path, size_t *out_len) {
     return data;
 }
 
+/* ============ import 展开（多文件合并编译） ============
+ * VUS 的 导入 / 从...导入 目前仅作语法解析，不会把外部模块函数编入主程序，
+ * 导致 dlsym（多页导航等回调反查）找不到外部模块符号。这里在词法分析前，
+ * 把源码中的 导入 X / 从 X 导入 行就地替换为对应 X.vus 的源码（递归展开其
+ * 自身的 import），使外部模块的全部函数随主程序一起编译，从而可被 dlsym
+ * 反查，支撑“外部 .vus 页面”等多文件场景。找不到模块时保留原行，不破坏
+ * 既有仅作语法验证的脚本。 */
+#define VUS_IMPORT_MAX_DEPTH 32
+typedef struct {
+    char   path[VUS_IMPORT_MAX_DEPTH][512];
+    int    count;
+} VusImportSet;
+
+typedef struct {
+    char  *buf;
+    size_t len;
+    size_t cap;
+} VusGrow;
+
+static void grow_init(VusGrow *g) { g->buf = NULL; g->len = 0; g->cap = 0; }
+static void grow_add(VusGrow *g, const char *s, size_t n) {
+    if (g->len + n + 1 > g->cap) {
+        size_t nc = g->cap ? g->cap * 2 : 256;
+        while (nc < g->len + n + 1) nc *= 2;
+        char *nb = (char *)realloc(g->buf, nc);
+        if (!nb) return;
+        g->buf = nb; g->cap = nc;
+    }
+    if (n) { memcpy(g->buf + g->len, s, n); g->len += n; }
+    g->buf[g->len] = '\0';
+}
+
+/* 判断行是否为导入语句；是则解析出模块名（mod/mod_len）并返回 1。 */
+static int import_line(const char *line, const char **mod_out, size_t *mod_len) {
+    const char *p = line;
+    while (*p == ' ' || *p == '\t') p++;
+    /* 整模块导入：导入 X / import X */
+    if (strncmp(p, "导入", 6) == 0 && (p[6] == ' ' || p[6] == '\t')) {
+        p += 6; while (*p == ' ' || *p == '\t') p++;
+        *mod_out = p;
+        while (*p && *p != '\n' && *p != '\r' && *p != ' ' && *p != '\t') p++;
+        *mod_len = (size_t)(p - *mod_out);
+        return 1;
+    }
+    if (strncmp(p, "import", 6) == 0 && (p[6] == ' ' || p[6] == '\t')) {
+        p += 6; while (*p == ' ' || *p == '\t') p++;
+        *mod_out = p;
+        while (*p && *p != '\n' && *p != '\r' && *p != ' ' && *p != '\t') p++;
+        *mod_len = (size_t)(p - *mod_out);
+        return 1;
+    }
+    /* from 导入：从 X 导入 Y / from X import Y */
+    if (strncmp(p, "从", 3) == 0 && (p[3] == ' ' || p[3] == '\t')) {
+        p += 3; while (*p == ' ' || *p == '\t') p++;
+        *mod_out = p;
+        while (*p && *p != '\n' && *p != '\r' && *p != ' ' && *p != '\t') p++;
+        const char *q = p; while (*q == ' ' || *q == '\t') q++;
+        /* 必须有后续「导入」限定符，避免误判其他以「从」开头的普通行 */
+        if (strncmp(q, "导入", 6) != 0) return 0;
+        *mod_len = (size_t)(p - *mod_out);
+        return 1;
+    }
+    if (strncmp(p, "from", 4) == 0 && (p[4] == ' ' || p[4] == '\t')) {
+        p += 4; while (*p == ' ' || *p == '\t') p++;
+        *mod_out = p;
+        while (*p && *p != '\n' && *p != '\r' && *p != ' ' && *p != '\t') p++;
+        const char *q = p; while (*q == ' ' || *q == '\t') q++;
+        /* 必须有后续 import 限定符（带词边界），否则诸如 "from xxx" 的普通句子会误判 */
+        if (strncmp(q, "import", 6) != 0 ||
+            (q[6] != ' ' && q[6] != '\t' && q[6] != '\0' && q[6] != '\n' && q[6] != '\r'))
+            return 0;
+        *mod_len = (size_t)(p - *mod_out);
+        return 1;
+    }
+    return 0;
+}
+
+static int set_has(const VusImportSet *s, const char *key) {
+    for (int i = 0; i < s->count; i++) if (strcmp(s->path[i], key) == 0) return 1;
+    return 0;
+}
+static void set_add(VusImportSet *s, const char *key) {
+    if (s->count >= VUS_IMPORT_MAX_DEPTH) return;
+    if (set_has(s, key)) return;
+    snprintf(s->path[s->count], sizeof(s->path[s->count]), "%s", key);
+    s->count++;
+}
+
+/* 递归展开 content：import 行替换为模块源码，其余行原样保留。 */
+static void expand_rec(const char *content, const char *base_dir,
+                       VusImportSet *set, VusGrow *out) {
+    const char *p = content;
+    while (*p) {
+        const char *nl = strchr(p, '\n');
+        size_t linelen = nl ? (size_t)(nl - p) : strlen(p);
+        char *line = (char *)malloc(linelen + 1);
+        if (line) { memcpy(line, p, linelen); line[linelen] = '\0'; }
+
+        const char *mod = NULL; size_t mlen = 0;
+        if (line && import_line(line, &mod, &mlen)) {
+            char modname[256];
+            size_t clen = mlen < sizeof(modname) - 1 ? mlen : sizeof(modname) - 1;
+            memcpy(modname, mod, clen); modname[clen] = '\0';
+
+            char file[1024]; int found = 0;
+            struct stat st;
+            /* 优先主脚本同目录，其次当前工作目录 */
+            if (base_dir && base_dir[0] && strcmp(base_dir, ".") != 0) {
+                snprintf(file, sizeof(file), "%s/%s.vus", base_dir, modname);
+                if (stat(file, &st) == 0 && S_ISREG(st.st_mode)) found = 1;
+                if (!found) {
+                    snprintf(file, sizeof(file), "%s/%s", base_dir, modname);
+                    if (stat(file, &st) == 0 && S_ISREG(st.st_mode)) found = 1;
+                }
+            }
+            if (!found) {
+                snprintf(file, sizeof(file), "%s.vus", modname);
+                if (stat(file, &st) == 0 && S_ISREG(st.st_mode)) found = 1;
+            }
+
+            if (found && !set_has(set, file)) {
+                size_t mco_len = 0;
+                char *mco = read_file(file, &mco_len);
+                if (mco) {
+                    set_add(set, file);
+                    char mdir[1024];
+                    const char *slash = strrchr(file, '/');
+                    if (slash) {
+                        size_t dl = (size_t)(slash - file);
+                        if (dl > 0) snprintf(mdir, sizeof(mdir), "%.*s", (int)dl, file);
+                        else strcpy(mdir, ".");
+                    } else {
+                        strcpy(mdir, ".");
+                    }
+                    expand_rec(mco, mdir, set, out);
+                    free(mco);
+                } else {
+                    grow_add(out, line, linelen);
+                    grow_add(out, "\n", 1);
+                }
+            } else if (found) {
+                /* 已展开过（避免循环 import 重复/无限） */
+            } else {
+                grow_add(out, line, linelen);
+                grow_add(out, "\n", 1);
+            }
+        } else {
+            if (line) grow_add(out, line, linelen);
+            grow_add(out, "\n", 1);
+        }
+        free(line);
+        if (!nl) break;
+        p = nl + 1;
+    }
+}
+
+/* 返回展开后的源码（malloc），失败返回 NULL（此时应沿用原 source）。
+ * 供 main.c 的 vus_compile_to_c 等多条编译流水线共用，保证 import 展开
+ * 在 `vus run` / `vus build` 等路径上行为一致。 */
+char *vus_source_expand_imports(const char *source, const char *source_name) {
+    if (!source) return NULL;
+    VusImportSet set; set.count = 0;
+    char base[1024];
+    const char *slash = source_name ? strrchr(source_name, '/') : NULL;
+    if (slash) {
+        size_t dl = (size_t)(slash - source_name);
+        if (dl > 0) snprintf(base, sizeof(base), "%.*s", (int)dl, source_name);
+        else strcpy(base, ".");
+    } else {
+        strcpy(base, ".");
+    }
+    VusGrow out; grow_init(&out);
+    expand_rec(source, base, &set, &out);
+    return out.buf; /* 可能为 NULL（无内容） */
+}
+
 /* 将 VUS 源码字符串编译为 C 代码，核心编译流水线 */
 static VusResult compile_source(const char *source, size_t source_len,
                                 VusConfig *config, const char *output_c_path,
@@ -58,6 +234,18 @@ static VusResult compile_source(const char *source, size_t source_len,
 
     if (config->language_plugin[0] != '\0') {
         if (vus_lang_preprocess(config->language_plugin, source, &preprocessed) == 0 && preprocessed) {
+            processed_source = preprocessed;
+            processed_len = strlen(preprocessed);
+        }
+    }
+
+    /* import 展开：把 导入 X / 从 X 导入 替换为 X.vus 源码（递归），使外部模块
+     * 函数随主程序一起编译，支撑“外部 .vus 页面”与多文件回调 dlsym 反查。 */
+    {
+        char *expanded = vus_source_expand_imports(processed_source, source_name);
+        if (expanded) {
+            if (preprocessed) free(preprocessed);
+            preprocessed = expanded;
             processed_source = preprocessed;
             processed_len = strlen(preprocessed);
         }
