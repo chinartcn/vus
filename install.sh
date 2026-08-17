@@ -136,34 +136,98 @@ fi
 if [ "$INSTALL_FROM_SOURCE" -eq 1 ]; then
     echo "使用源码编译安装..."
 
-    # 检查依赖
+    # ---------- 自动检测系统并处理缺失依赖 ----------
+    # 读取发行版信息（/etc/os-release），据此给出正确的包管理器与依赖组
+    if [ -r /etc/os-release ]; then
+        . /etc/os-release
+    fi
+    DETECT_UPDATE=""
+    DETECT_INSTALL=""
+    DETECT_GROUP=""
+    case "$ID" in
+        alpine)                       # musl libc：build-base 提供 gcc/make/musl-dev(头文件)
+            DETECT_UPDATE="apk update"
+            DETECT_INSTALL="apk add"
+            DETECT_GROUP="build-base git"
+            ;;
+        debian|ubuntu|linuxmint)
+            DETECT_UPDATE="apt-get update"
+            DETECT_INSTALL="apt-get install -y"
+            DETECT_GROUP="build-essential git"
+            ;;
+        centos|rhel|fedora|rocky|almalinux)
+            DETECT_INSTALL="dnf install -y"
+            DETECT_GROUP="gcc make glibc-devel git"
+            ;;
+        arch|manjaro|endeavouros)
+            DETECT_UPDATE="pacman -Sy"
+            DETECT_INSTALL="pacman -S --noconfirm"
+            DETECT_GROUP="base-devel git"
+            ;;
+        opensuse*|sles)
+            DETECT_INSTALL="zypper install -y"
+            DETECT_GROUP="gcc make glibc-devel git"
+            ;;
+    esac
+
     echo "检查依赖..."
-    if [ "$GIT_AVAILABLE" -eq 0 ]; then
-        echo "错误: 未找到 git，请先安装 Git"
-        echo "  Ubuntu/Debian: sudo apt install git"
-        echo "  CentOS/RHEL:   sudo yum install git"
-        echo "  Termux:        pkg install git"
-        exit 1
-    fi
-    echo "  ✅ git"
+    if [ -n "$DETECT_GROUP" ]; then
+        echo "  检测到系统: ${PRETTY_NAME:-$ID}"
 
-    if ! command -v gcc >/dev/null 2>&1; then
-        echo "错误: 未找到 gcc，请先安装 GCC"
-        echo "  Ubuntu/Debian: sudo apt install gcc"
-        echo "  CentOS/RHEL:   sudo yum install gcc"
-        echo "  Termux:        pkg install gcc"
-        exit 1
-    fi
-    echo "  ✅ gcc"
+        # 逐个检测基础工具是否可用
+        MISSING=""
+        for d in git gcc make; do
+            if ! command -v "$d" >/dev/null 2>&1; then
+                MISSING="$MISSING $d"
+            fi
+        done
 
-    if ! command -v make >/dev/null 2>&1; then
-        echo "错误: 未找到 make，请先安装 make"
-        echo "  Ubuntu/Debian: sudo apt install make"
-        echo "  CentOS/RHEL:   sudo yum install make"
-        echo "  Termux:        pkg install make"
-        exit 1
+        # 检测 C 头文件（如 stdio.h）。只装了 gcc 没装 libc 头时，编译会报
+        # "stdio.h: No such file or directory" —— 这正是缺失依赖的表现。
+        if ! printf '#include <stdio.h>\n' | gcc -x c -E - >/dev/null 2>&1; then
+            MISSING="$MISSING libc-dev(C 头文件)"
+        fi
+
+        if [ -z "$MISSING" ]; then
+            echo "  ✅ 依赖齐全 (git / gcc / make / C 头文件)"
+        else
+            echo "  ⚠️  缺失依赖:${MISSING}"
+            echo "  建议安装: $DETECT_INSTALL $DETECT_GROUP"
+
+            # 决定是否自动安装：环境变量 VUS_AUTO_INSTALL=1，或交互输入 y
+            DO_INSTALL="n"
+            if [ "$VUS_AUTO_INSTALL" = "1" ]; then
+                DO_INSTALL="y"
+            elif [ -t 1 ]; then
+                printf "  是否自动安装? (y 立即安装 / 其它 手动安装后退出) [y/N] "
+                read -r ans
+                case "$ans" in
+                    y|Y) DO_INSTALL="y" ;;
+                esac
+            fi
+
+            if [ "$DO_INSTALL" = "y" ]; then
+                # 非 root 时加 sudo 前缀
+                PRFX=""
+                [ "$(id -u)" = "0" ] || PRFX="sudo "
+                if [ -n "$DETECT_UPDATE" ]; then
+                    ${PRFX}${DETECT_UPDATE} || true
+                fi
+                if ${PRFX}${DETECT_INSTALL} $DETECT_GROUP; then
+                    echo "  ✅ 依赖安装完成，继续编译"
+                else
+                    echo "  ❌ 依赖安装失败，请手动执行: ${PRFX}${DETECT_INSTALL} $DETECT_GROUP"
+                    exit 1
+                fi
+            else
+                echo "  已跳过自动安装，请先手动执行: $DETECT_INSTALL $DETECT_GROUP"
+                echo "  之后重跑本脚本即可；或设置 VUS_AUTO_INSTALL=1 让脚本自动安装。"
+                exit 1
+            fi
+        fi
+    else
+        echo "  ⚠️  未能自动识别系统 ($ID)，请手动确认已安装: git / gcc / make / libc 头文件"
     fi
-    echo "  ✅ make"
     echo ""
 
     # 克隆仓库
