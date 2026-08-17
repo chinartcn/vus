@@ -10,10 +10,12 @@
  *   参考 scripts/build_lsp_android.sh 得到 arm64-v8a / armeabi-v7a 二进制，
  *   放置到 Termux 的 ~/.local/bin，或用绝对路径覆盖下方 command。
  */
-const lsp = acode.require("lsp");
-// 语言模式注册 API（CodeMirror 6 版）。把 .vus 关联到 "vus" languageId，
-// LSP 客户端按此 id 路由到下方登记的服务器，补全才能弹出。
-const editorLanguages = acode.require("editorLanguages");
+/**
+ * 注意：不要在模块顶层调用 acode.require(...)。
+ * 任一 API 在当前 ACode 版本不存在时，顶层抛错会让整个插件加载失败、
+ * init() 永不执行。因此所有 acode.require 都放到函数内并用 try 保护，
+ * 保证插件始终能加载、至少完成语言注册。
+ */
 
 /**
  * 设备上 vus 可执行文件的绝对路径。
@@ -46,18 +48,21 @@ function registerLanguage() {
   // loader 返回 CodeMirror 语言扩展。这里返回空扩展，仅负责把 .vus 关联到
   // "vus" languageId；若想给中英文高亮，可在此改用 @lezer/lr 的 StreamLanguage。
   const loader = () => Promise.resolve([]);
+  let editorLanguages = null;
+  try { editorLanguages = acode.require("editorLanguages"); } catch (_) {}
   if (editorLanguages && typeof editorLanguages.register === "function") {
     editorLanguages.register("vus", ["vus"], "VUS", loader);
+    console.log("[vus-lsp] 已注册 .vus 语言模式 (languageId=vus)");
   } else {
     // 兼容旧版 ACode（Ace 时代）的 mode 注册
     try {
       const aceModes = acode.require("aceModes");
       aceModes.addMode("vus", ["vus"], "VUS");
+      console.log("[vus-lsp] 已注册 .vus 语言模式 (aceModes)");
     } catch (e) {
       console.warn("[vus-lsp] 无法注册 .vus 语言模式", e);
     }
   }
-  console.log("[vus-lsp] 已注册 .vus 语言模式 (languageId=vus)");
 }
 
 /**
@@ -81,6 +86,8 @@ function applyVusModeToActiveFile() {
 }
 
 async function init() {
+  console.log("[vus-lsp] 插件正在初始化 ...");
+  const lsp = (() => { try { return acode.require("lsp"); } catch (_) { return null; } })();
   // 先注册语言模式，确保 .vus 能被识别，LSP 才会为其启动
   registerLanguage();
   // 立即对当前打开的文件兜底 setMode，保证 languageId 是 vus
@@ -105,7 +112,7 @@ async function init() {
   // 若设了 VUS_BRIDGE_URL，以 WebSocket 直连外部 ws-lsp-bridge
   // （需在设备上先运行 wslsp；bridge 按 args= 拉起 vus lsp）。
   // 否则 defineServer 把 command/args 自动转成 ACode 内置 AXS 桥接。
-  if (typeof lsp.defineServer === "function") {
+  if (lsp && typeof lsp.defineServer === "function") {
     const server = lsp.defineServer(
       VUS_BRIDGE_URL
         ? {
@@ -149,14 +156,18 @@ async function init() {
     enabled: true,
     initializationOptions: { provideFormatter: false },
   };
-  if (typeof lsp.registerServer === "function") {
+  if (lsp && typeof lsp.registerServer === "function") {
     lsp.registerServer(legacy, { replace: true });
-  } else if (typeof lsp.upsert === "function") {
+    console.log("[vus-lsp] 已注册 (legacy/registerServer) command=" + command + " lsp");
+  } else if (lsp && typeof lsp.upsert === "function") {
     lsp.upsert(legacy);
-  } else if (typeof lsp.register === "function") {
+    console.log("[vus-lsp] 已注册 (legacy/upsert) command=" + command + " lsp");
+  } else if (lsp && typeof lsp.register === "function") {
     lsp.register(legacy);
+    console.log("[vus-lsp] 已注册 (legacy/register) command=" + command + " lsp");
+  } else {
+    console.error("[vus-lsp] 未找到可用的 LSP 注册 API（acode.require(\"lsp\") 为 null 或缺少方法）");
   }
-  console.log("[vus-lsp] 已注册 (legacy) command=" + command + " lsp");
 }
 
 module.exports = { init };
