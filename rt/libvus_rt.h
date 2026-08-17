@@ -101,6 +101,14 @@ void* vus_dict_get(VusDict* dict, VusString* key);
 void vus_dict_remove(VusDict* dict, VusString* key);
 int vus_dict_len(VusDict* dict);
 
+/* 返回字典所有键（VusString*）构成的列表（内部新建，调用方负责 vus_unref）。
+ * 元素为键副本，供遍历（v0.1 补充的遍历接口）。 */
+VusList* vus_dict_keys(VusDict* dict);
+
+/* 取结构化字典（VusObject* 的 TYPE_DICT）的键列表；非字典容器返回空列表。
+ * 供脚本内建「字典_键」使用，避免误把任意对象当 VusDict 解引用。 */
+VusList* vus_dict_keys_of(void* obj);
+
 // ============ 闭包 ============
 // 闭包参数约定：args 由调用方分配，调用结束后由调用方负责释放（vus_unref）。
 // func 在调用期间持有 args 的引用，但不负责释放。
@@ -229,6 +237,9 @@ void* vus_json_parse(VusString* s);
 
 /* 结构化 VusObject* -> JSON 字符串，失败返回空串 */
 VusString* vus_json_generate(void* obj);
+
+/* 根据路径查询 JSON（path 形如 "a.b[0].c"），返回结构化结果，失败返回 NULL */
+void* vus_json_query(VusString* json, VusString* path);
 
 /* 返回结构化值的类型名（整数/浮点/字符串/布尔/列表/字典/空） */
 VusString* vus_typeof(void* obj);
