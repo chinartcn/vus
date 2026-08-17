@@ -86,6 +86,18 @@ function applyVusModeToActiveFile() {
 }
 
 async function init() {
+  // ===== 诊断探针：证明插件 init() 确实被执行 =====
+  // 只要本节代码运行，就会向本机 ws://127.0.0.1:3030 发一次连接。
+  // 先跑 `wslsp`（ws-lsp-bridge），重装插件并重启 ACode 后，
+  // 若 wslsp 终端出现 "New connection: ...vus-lsp-probe..." 即证明插件在跑。
+  // 定位完成后可删除本节。
+  try {
+    if (typeof WebSocket !== "undefined") {
+      const p = new WebSocket("ws://127.0.0.1:3030/vus-lsp-probe");
+      p.onclose = p.onerror = function () {};
+    }
+  } catch (_) {}
+
   console.log("[vus-lsp] 插件正在初始化 ...");
   const lsp = (() => { try { return acode.require("lsp"); } catch (_) { return null; } })();
   // 先注册语言模式，确保 .vus 能被识别，LSP 才会为其启动
