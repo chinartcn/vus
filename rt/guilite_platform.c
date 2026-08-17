@@ -333,6 +333,16 @@ void vus_gui_platform_redraw(int width, int height, const unsigned int* fb)
         }
     }
     XFlush(s_dpy);
+
+    /* 文字列表是按帧快照：重放完本帧条目后立即清空（释放 strdup 内存），
+     * 下一帧从空表重新入队。否则动画循环中各帧文字无限累积，出现
+     * 重叠闪烁/模糊/黑块（缺失字形叠影）。Expose 触发重绘时同理只重放当前帧。 */
+    for (int i = 0; i < s_text_cnt; i++)
+    {
+        free(s_texts[i].text);
+        s_texts[i].text = 0;
+    }
+    s_text_cnt = 0;
 #endif
 }
 
