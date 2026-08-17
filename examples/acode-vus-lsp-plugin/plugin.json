@@ -1,0 +1,9 @@
+{
+  "id": "org.vus.lsp",
+  "name": "VUS 语言服务器 (LSP)",
+  "version": "0.1.0",
+  "main": "main.js",
+  "description": "为 VUS 语言接入 ACode 的 LSP：三层补全、文档符号、命令执行。需设备上存在可执行的 vus（含 lsp 子命令）二进制。",
+  "author": "VUS",
+  "license": "MIT"
+}
