@@ -120,6 +120,16 @@ function registerVusLanguage() {
 
 /* ============ 服务器注册：defineServer + upsert ============ */
 
+/** 向用户弹 Toast（ACode 全局 toast）；不可用时退回 console，保证不打断插件 */
+function notify(msg) {
+  try {
+    if (typeof toast === "function") toast(msg);
+    else console.log("[vus-lsp] " + msg);
+  } catch (err) {
+    console.warn("[vus-lsp] 通知失败：", err);
+  }
+}
+
 function registerVusServer(base, abi) {
   const lsp = acode.require("lsp");
   if (!lsp || typeof lsp.defineServer !== "function") {
@@ -139,6 +149,7 @@ function registerVusServer(base, abi) {
   lsp.upsert(server);
   serversRegistered = true;
   console.log("[vus-lsp] 服务器已注册 command=" + bin + " " + LSP_SUBCOMMAND);
+  return bin;
 }
 
 /** 延迟到编辑器就绪后执行注册（LSP API 依赖码镜编辑器初始化） */
@@ -147,18 +158,22 @@ function registerVus() {
   const abi = detectAbi();
   const base = resolveDir(this?.baseUrl || "");
 
-  // 语言注册失败也不阻断服务器注册，但给出明确日志
+  // 语言注册：失败也继续，但用 Toast 暴露
   try {
     registerVusLanguage();
+    notify("VUS: 语言 .vus 已注册");
   } catch (err) {
     console.error("[vus-lsp] 语言注册失败：", err);
+    notify("VUS: 语言注册失败 → " + err.message);
   }
 
-  // 服务器注册失败需要保留重试机会（不置 serversRegistered）
+  // 服务器注册：失败保留重试机会（不置 serversRegistered）
   try {
-    registerVusServer(base, abi);
+    const bin = registerVusServer(base, abi);
+    notify("VUS LSP 已就绪: " + bin + " " + LSP_SUBCOMMAND);
   } catch (err) {
     console.error("[vus-lsp] 服务器注册失败：", err);
+    notify("VUS LSP 注册失败: " + err.message);
   }
 }
 
