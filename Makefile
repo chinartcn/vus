@@ -54,6 +54,22 @@ GUI_SRC = $(RT_DIR)/guilite_bridge.c $(RT_DIR)/guilite_platform.c $(RT_DIR)/guil
 GUI_OBJ = $(BUILD_DIR)/guilite_bridge.o $(BUILD_DIR)/guilite_platform.o $(BUILD_DIR)/guilite_wrapper.o
 GUI_INC = -I$(RT_DIR) -I$(GUI_DIR)
 
+# EGL + OpenGL ES 底层 GPU 上屏（可选，默认关闭）：
+#   启用：make VUS_GUI_GLES=1
+#   运行：VUS_GUI_GLES=1 ./vus run <脚本>
+#   使 redraw 走纹理上屏(GL)，替换逐像素 XPutImage；EGL 初始化失败自动回退软渲染。
+GLES_SRC = $(RT_DIR)/guilite_gles.c
+GLES_OBJ = $(BUILD_DIR)/guilite_gles.o
+ifdef VUS_GUI_GLES
+GLES_DEF = -DVUS_GUI_GLES
+GLES_LIBS = -lEGL -lGLESv2
+GLES_ARCHIVE_OBJ = $(GLES_OBJ)
+else
+GLES_DEF =
+GLES_LIBS =
+GLES_ARCHIVE_OBJ =
+endif
+
 # 头文件依赖（所有 .o 都依赖这些通用头）
 COMMON_H = $(SRC_DIR)/token.h $(SRC_DIR)/ast.h $(SRC_DIR)/config.h
 
@@ -155,7 +171,10 @@ $(BUILD_DIR)/guilite_bridge.o: $(RT_DIR)/guilite_bridge.c $(RT_DIR)/guilite_brid
 	$(CC) $(CFLAGS) $(PY_DEF) $(PY_INC) -I$(RT_DIR) -c -o $@ $<
 
 $(BUILD_DIR)/guilite_platform.o: $(RT_DIR)/guilite_platform.c $(RT_DIR)/guilite_bridge.h | $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(PY_DEF) $(PY_INC) -I$(RT_DIR) $(shell pkg-config --cflags freetype2 2>/dev/null) -DVUS_GUI_X11 -c -o $@ $<
+	$(CC) $(CFLAGS) $(PY_DEF) $(PY_INC) -I$(RT_DIR) $(shell pkg-config --cflags freetype2 2>/dev/null) -DVUS_GUI_X11 $(GLES_DEF) -c -o $@ $<
+
+$(BUILD_DIR)/guilite_gles.o: $(RT_DIR)/guilite_gles.c $(RT_DIR)/guilite_gles.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(PY_DEF) $(PY_INC) -I$(RT_DIR) -DVUS_GUI_X11 -DVUS_GUI_GLES -c -o $@ $<
 
 $(BUILD_DIR)/guilite_wrapper.o: $(RT_DIR)/guilite_wrapper.cpp $(GUI_DIR)/GuiLite.h | $(BUILD_DIR)
 	$(CXX) -Wall -Wextra -g -O2 $(GUI_INC) -c -o $@ $<
@@ -165,7 +184,7 @@ $(YYJSON_OBJ): $(YYJSON_SRC) | $(BUILD_DIR)
 	$(CC) -Wall -Wextra -O2 -std=c11 $(YYJSON_INC) -c -o $@ $<
 
 # 运行时库静态归档（含 vus_coro.o、yyjson、easylogger elog.o 与 GuiLite 图形库）
-$(RT_LIB): $(RT_OBJ) $(RT_CORO_OBJ) $(YYJSON_OBJ) $(EL_OBJ) $(GUI_OBJ)
+$(RT_LIB): $(RT_OBJ) $(RT_CORO_OBJ) $(YYJSON_OBJ) $(EL_OBJ) $(GUI_OBJ) $(GLES_ARCHIVE_OBJ)
 	ar rcs $@ $^
 
 # =============================================================================
