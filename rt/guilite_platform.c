@@ -19,6 +19,7 @@
 #ifdef VUS_GUI_X11
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <X11/Xft/Xft.h>
 
 static Display* s_dpy = 0;
 static Window   s_win = 0;
@@ -27,10 +28,12 @@ static XImage*  s_img = 0;
 static Atom     s_wm_delete = 0;
 static int      s_running = 0;
 
-/* X11 文字叠加：X11 下用 XDrawString（X 核心字体）直接画到窗口，避免依赖
- * GuiLite 字形呈现（其在 Termux GL 层存在方向异常）。文字请求先入队，
- * redraw 时在 XPutImage 之后重放，避免被帧缓冲覆盖。X 字体不可用时返回 0，
- * 由桥接层回退到 GuiLite 帧缓冲绘制。 */
+/* X11 文字叠加：优先用 Xft（FontConfig + FreeType）按 UTF-8 叠加文本，支持
+ * 中英文混合与系统中文字体自动回退；Xft 不可用时回退 XDrawString（X 核心
+ * 字体，仅 ASCII）。文字请求先入队，redraw 时在 XPutImage 之后重放，避免
+ * 被帧缓冲覆盖。两者都不可用时返回 0，由桥接层回退到 GuiLite 帧缓冲。 */
+static XftDraw*   s_xft = 0;
+static XftFont*   s_xftfont = 0;
 static XFontStruct* s_xfont = 0;
 #define VUS_TEXT_MAX 256
 typedef struct { int x; int y; unsigned long color; char* text; } VUS_XText;
@@ -128,9 +131,45 @@ int vus_gui_platform_init(int width, int height, const char* title)
     s_wm_delete = XInternAtom(s_dpy, "WM_DELETE_WINDOW", False);
     XSetWMProtocols(s_dpy, s_win, &s_wm_delete, 1);
 
-    /* 加载 X 核心字体用于文字叠加（XDrawString）；失败则回退 GuiLite 帧缓冲 */
-    s_xfont = XLoadQueryFont(s_dpy, "fixed");
-    if (!s_xfont) { s_xfont = XLoadQueryFont(s_dpy, "6x13"); }
+    /* 加载文字渲染字体：
+     * 优先 Xft（FontConfig + FreeType，按 UTF-8 显示中英文，自动回退系统中文字体）；
+     * Xft 不可用时回退 X11 核心字体（XDrawString，仅 ASCII）。 */
+    int screen_for_font = DefaultScreen(s_dpy);
+    s_xft = XftDrawCreate(s_dpy, s_win,
+                          DefaultVisual(s_dpy, screen_for_font),
+                          DefaultColormap(s_dpy, screen_for_font));
+    if (s_xft)
+    {
+        /* FontConfig pattern："sans" 按环境字体配置解析，通常包含系统已装的
+         * CJK 字体（如 Noto CJK / WQY）；-16 指定像素尺寸（对齐 6x13 字号）。
+         * 用按下标的方式从左到右匹配，优先选中文字体。 */
+        s_xftfont = XftFontOpenName(s_dpy, screen_for_font, "sans-16");
+        if (!s_xftfont) { s_xftfont = XftFontOpenName(s_dpy, screen_for_font, "sans"); }
+        if (!s_xftfont) { s_xftfont = XftFontOpenName(s_dpy, screen_for_font, "monospace-16"); }
+    }
+    if (!s_xftfont)
+    {
+        /* Xft 不可用 → 回退 X 核心字体（ASCII only） */
+        if (s_xft) { XftDrawDestroy(s_xft); s_xft = 0; }
+        s_xfont = XLoadQueryFont(s_dpy, "fixed");
+        if (!s_xfont) { s_xfont = XLoadQueryFont(s_dpy, "6x13"); }
+        fprintf(stderr, "[font] Xft 不可用，回退 X11 核心字体（中文乱码）——请确认已安装 xfontconfig + 中文字体\n");
+    }
+    else
+    {
+        /* 诊断：检查字体是否含中文字形（U+4E2D "中"）。缺字形时提示装中文 CJK 字体。 */
+        FcChar32 codepoint = 0x4E2D;
+        int has_cjk = s_xftfont->charset ? FcCharSetHasChar(s_xftfont->charset, codepoint) : 0;
+        fprintf(stderr, "[font] Xft 字体已加载 (size=%d, ascent=%d, 含中文字形=%s)\n",
+                s_xftfont->height, s_xftfont->ascent, has_cjk ? "是" : "否");
+        if (!has_cjk)
+        {
+            fprintf(stderr, "[font] 警告：当前字体无中文字形，中文将显示为方块/乱码。"
+                    "请安装中文字体并刷新字体缓存，例：\n"
+                    "  Termux : pkg install font-noto-cjk && fc-cache -f\n"
+                    "  Ubuntu : apt install fonts-noto-cjk && fc-cache -f\n");
+        }
+    }
     s_text_cnt = 0;
 
     /* 创建与显示匹配的 XImage；XCreateImage(data=NULL) 不会分配数据缓冲，
@@ -167,7 +206,7 @@ int vus_gui_platform_init(int width, int height, const char* title)
 int vus_gui_platform_draw_text(int x, int y, const char* text, unsigned int color)
 {
 #ifdef VUS_GUI_X11
-    if (!s_dpy || !s_gc || !s_xfont || !text || !*text)
+    if (!s_dpy || !s_gc || !(s_xftfont || s_xfont) || !text || !*text)
     {
         return 0;
     }
@@ -228,8 +267,33 @@ void vus_gui_platform_redraw(int width, int height, const unsigned int* fb)
     }
     XPutImage(s_dpy, s_win, s_gc, s_img, 0, 0, 0, 0,
               (unsigned int)width, (unsigned int)height);
-    /* 在帧缓冲之上重放文字（XDrawString），避免被 XPutImage 覆盖 */
-    if (s_xfont)
+    /* 在帧缓冲之上重放文字，避免被 XPutImage 覆盖：
+     * 优先 Xft 按 UTF-8 绘制（支持中文，XftDrawStringUtf8 内部做字形回退）；
+     * Xft 不可用时回退 XDrawString（X 核心字体，仅 ASCII）。 */
+    if (s_xftfont && s_xft)
+    {
+        int ascent = s_xftfont->ascent;
+        for (int i = 0; i < s_text_cnt; i++)
+        {
+            XRenderColor rc;
+            rc.red   = (unsigned short)(((s_texts[i].color >> 16) & 0xFF) << 8);
+            rc.green = (unsigned short)(((s_texts[i].color >> 8)  & 0xFF) << 8);
+            rc.blue  = (unsigned short)((s_texts[i].color & 0xFF) << 8);
+            rc.alpha = 0xFFFF;
+            XftColor fc;
+            if (XftColorAllocValue(s_dpy, DefaultVisual(s_dpy, DefaultScreen(s_dpy)),
+                                   DefaultColormap(s_dpy, DefaultScreen(s_dpy)), &rc, &fc))
+            {
+                XftDrawStringUtf8(s_xft, &fc, s_xftfont,
+                                  s_texts[i].x, s_texts[i].y + ascent,
+                                  (const FcChar8*)s_texts[i].text,
+                                  (int)strlen(s_texts[i].text));
+                XftColorFree(s_dpy, DefaultVisual(s_dpy, DefaultScreen(s_dpy)),
+                             DefaultColormap(s_dpy, DefaultScreen(s_dpy)), &fc);
+            }
+        }
+    }
+    else if (s_xfont)
     {
         int ascent = s_xfont->max_bounds.ascent;
         XSetFont(s_dpy, s_gc, s_xfont->fid);
@@ -324,6 +388,16 @@ void vus_gui_platform_run(int width, int height, const unsigned int* fb)
         s_texts[i].text = 0;
     }
     s_text_cnt = 0;
+    if (s_xftfont)
+    {
+        XftFontClose(s_dpy, s_xftfont);
+        s_xftfont = 0;
+    }
+    if (s_xft)
+    {
+        XftDrawDestroy(s_xft);
+        s_xft = 0;
+    }
     if (s_xfont)
     {
         XFreeFont(s_dpy, s_xfont);

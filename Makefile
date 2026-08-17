@@ -150,7 +150,7 @@ $(BUILD_DIR)/guilite_bridge.o: $(RT_DIR)/guilite_bridge.c $(RT_DIR)/guilite_brid
 	$(CC) $(CFLAGS) $(PY_DEF) $(PY_INC) -I$(RT_DIR) -c -o $@ $<
 
 $(BUILD_DIR)/guilite_platform.o: $(RT_DIR)/guilite_platform.c $(RT_DIR)/guilite_bridge.h | $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(PY_DEF) $(PY_INC) -I$(RT_DIR) -DVUS_GUI_X11 -c -o $@ $<
+	$(CC) $(CFLAGS) $(PY_DEF) $(PY_INC) -I$(RT_DIR) $(shell pkg-config --cflags freetype2 2>/dev/null) -DVUS_GUI_X11 -c -o $@ $<
 
 $(BUILD_DIR)/guilite_wrapper.o: $(RT_DIR)/guilite_wrapper.cpp $(GUI_DIR)/GuiLite.h | $(BUILD_DIR)
 	$(CXX) -Wall -Wextra -g -O2 $(GUI_INC) -c -o $@ $<

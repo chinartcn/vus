@@ -2096,6 +2096,7 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
     gui_src[0] = '\0';
     const char *gui_def = "";
     const char *gui_lib = "";
+    char xft_inc[512] = "";
     if (config->rt_dir[0] && g_uses_gui) {
         snprintf(gui_src, sizeof(gui_src),
                  "\"%s/guilite_bridge.c\" \"%s/guilite_platform.c\" \"%s/guilite_wrapper.cpp\"",
@@ -2113,21 +2114,53 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
             }
             pclose(x11_check);
         }
+        /* Xft 开发库检测：用于按 UTF-8/Unicode 叠加中英文文本（X11 核心字体
+           不含中文字形）。头路径同样兼容 Termux $PREFIX。 */
+        int has_xft = 0;
+        FILE *xft_check = popen(
+            "test -f /usr/include/X11/Xft/Xft.h -o -f \"${PREFIX:-/usr}/include/X11/Xft/Xft.h\" "
+            "-o -f \"$TERMUX_PREFIX/include/X11/Xft/Xft.h\" && echo yes || echo no", "r");
+        if (xft_check) {
+            char line[16] = {0};
+            if (fgets(line, sizeof(line), xft_check)) {
+                has_xft = (strncmp(line, "yes", 3) == 0);
+            }
+            pclose(xft_check);
+        }
+        /* 捕获 FreeType 头路径（Xft.h 依赖 ft2build.h）。Termux 与 PC 的
+           freetype 目录不同，统一用 pkg-config 解析。 */
+        if (has_xft) {
+            FILE *ftc = popen("pkg-config --cflags freetype2 2>/dev/null", "r");
+            if (ftc) {
+                if (fgets(xft_inc, sizeof(xft_inc), ftc)) {
+                    size_t xl = strlen(xft_inc);
+                    while (xl > 0 && (xft_inc[xl-1] == '\n' || xft_inc[xl-1] == ' ')) xft_inc[--xl] = '\0';
+                }
+                pclose(ftc);
+            }
+        }
         gui_def = has_x11 ? "-DVUS_GUI_X11" : "";
         /* -rdynamic：把主程序全局符号导出到 dynsym，dlsym 才能反查用户脚本
-           定义的 事件_点击 等回调函数；-ldl 提供 dlsym（Termux bionic 必需）。 */
-        gui_lib = has_x11 ? "-lX11 -rdynamic -ldl" : "-rdynamic -ldl";
+           定义的 事件_点击 等回调函数；-ldl 提供 dlsym（Termux bionic 必需）。
+           Xft 用于 UTF-8 中文叠加，-lXft -lfontconfig 链入渲染库。 */
+        if (has_x11) {
+            gui_lib = "-lX11 -rdynamic -ldl";
+            if (has_xft) { gui_lib = "-lX11 -lXft -lfontconfig -rdynamic -ldl"; }
+        } else {
+            gui_lib = "-rdynamic -ldl";
+        }
     }
 
     if (extra_objects && extra_objects[0]) {
         n = snprintf(cmd, sizeof(cmd),
-            "gcc %s -g %s %s %s -I\"%s\" %s \"%s\" \"%s\" \"%s\" %s %s %s -o \"%s\" -lm -lpthread %s %s -lstdc++ %s %s 2>&1",
+            "gcc %s -g %s %s %s -I\"%s\" %s %s \"%s\" \"%s\" \"%s\" %s %s %s -o \"%s\" -lm -lpthread %s %s -lstdc++ %s %s 2>&1",
             opt_level,
             curl_def,
             py_def,
             py_inc_str,
             abs_rt_dir,
             elog_inc,
+            xft_inc,
             c_source_path,
             rt_source,
             rt_coro,
@@ -2141,13 +2174,14 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
             gui_lib);
     } else {
         n = snprintf(cmd, sizeof(cmd),
-            "gcc %s -g %s %s %s -I\"%s\" %s \"%s\" \"%s\" \"%s\" %s %s -o \"%s\" -lm -lpthread %s %s -lstdc++ %s %s 2>&1",
+            "gcc %s -g %s %s %s -I\"%s\" %s %s \"%s\" \"%s\" \"%s\" %s %s -o \"%s\" -lm -lpthread %s %s -lstdc++ %s %s 2>&1",
             opt_level,
             curl_def,
             py_def,
             py_inc_str,
             abs_rt_dir,
             elog_inc,
+            xft_inc,
             c_source_path,
             rt_source,
             rt_coro,
