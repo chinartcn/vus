@@ -87,18 +87,28 @@ function applyVusModeToActiveFile() {
 
 async function init() {
   // ===== 诊断探针：证明插件 init() 确实被执行 =====
-  // 只要本节代码运行，就会向本机 ws://127.0.0.1:3030 发一次连接。
-  // 先跑 `wslsp`（ws-lsp-bridge），重装插件并重启 ACode 后，
-  // 若 wslsp 终端出现 "New connection: ...vus-lsp-probe..." 即证明插件在跑。
+  // 用文件系统标记最可靠：init 一开始就试着往几个候选可写路径写标记文件，
+  // 若任一路径写成功，设备终端 cat 该文件即可硬判定插件确实执行过 init。
   // 定位完成后可删除本节。
+  const stamp = "vus-lsp plugins inited " + new Date().toISOString();
+  const candidates = ["/public/.vus-lsp-inited", "/vus-lsp-inited", "/root/.vus-lsp-inited"];
   try {
-    if (typeof WebSocket !== "undefined") {
-      const p = new WebSocket("ws://127.0.0.1:3030/vus-lsp-probe");
-      p.onclose = p.onerror = function () {};
+    const fsmod = (() => { try { return acode.require("fs"); } catch (_) { return null; } })();
+    if (fsmod && typeof fsmod.createFile === "function") {
+      for (const c of candidates) {
+        try { await fsmod.createFile(c, stamp); } catch (_) {}
+      }
+    } else {
+      // 无 fs API 时退回 WebSocket 探针（若可用）
+      if (typeof WebSocket !== "undefined") {
+        const p = new WebSocket("ws://127.0.0.1:3030/vus-lsp-probe");
+        p.onclose = p.onerror = function () {};
+      }
     }
-  } catch (_) {}
+  } catch (_) {
+    // 忽略——即使都失败也不阻断插件后续逻辑
+  }
 
-  // 屏幕级探针：插件被加载执行时必然弹出这条 toast（ACode 全局有 toast 函数）
   try { if (typeof toast === "function") toast("VUS LSP 插件已加载"); } catch (_) {}
 
   console.log("[vus-lsp] 插件正在初始化 ...");
