@@ -38,26 +38,51 @@
 
 ```
 VUS 源码 (.vus)
+    ↓  第 0 步（可选）：语言插件预处理（.vulage，如易语言 → 函数风格）
+[词法分析器] → Token 流（含行号/列号、INDENT/DEDENT）
     ↓
-[词法分析器] → Token 流
+[语法分析器] → AST（递归下降）
     ↓
-[语法分析器] → AST
+[C 代码生成器] → C 源码（引用计数插入、中文标识符 sanitize、异常/协程/泛型支持）
     ↓
-[语义分析器] → 带类型信息的 AST
-    ↓
-[C 代码生成器] → .c 文件
-    ↓
-[GCC] → 可执行文件
+[GCC/Clang] → 可执行文件（可按需走 NDK → APK 打包）
 ```
 
 ### 阶段划分
 
+编译器内核是「词法 → 语法 → 代码生成」三段式，**没有独立的「语义分析」阶段**：类型信息在 AST 与代码生成阶段中酌情处理，不额外建立独立阶段（类型注解目前记录在 AST 中，不作强类型检查，详见 ARCHITECTURE.md）。
+
 | 阶段 | 输入 | 输出 | 职责 |
 |------|------|------|------|
-| 词法分析 | 源码字符串 | Token 流 | 分词、关键字识别、注释/空白过滤 |
-| 语法分析 | Token 流 | AST | 递归下降解析、语法错误检测 |
-| 语义分析 | AST | 带类型信息的 AST | 类型检查、符号表构建、循环依赖检测 |
-| 代码生成 | AST | C 源码 | 生成合法的 C 代码、插入引用计数 |
+| 语言插件预处理（可选） | 源码字符串 | 规范化源码 | 仅当配置了 `language_plugin` 时启用；由语言插件（`.vulage`）将其他书写风格转换为标准函数风格 |
+| 词法分析 | 源码字符串 | Token 流 | 分词、中英文关键字查表合并、注释/空白过滤、缩进（INDENT/DEDENT）处理、UTF-8 中文标识符识别 |
+| 语法分析 | Token 流 | AST | 递归下降解析、语法错误检测；中英文关键字在 token 层已合并，解析器只处理单一 Token 集 |
+| 代码生成 | AST | C 源码 | 生成合法的 C 代码、插入引用计数、中文标识符 sanitize、函数调用包装 |
+| 后端编译 | C 源码 | 可执行文件 / 对象文件 | 调用 GCC/Clang（或 Android NDK）链接为可执行文件 / APK |
+
+### 当前真实模块清单
+
+编译器内核位于 `src/`，对外公开接口在 `include/vus/`，运行时在 `rt/`：
+
+| 模块 | 文件 | 职责 |
+|------|------|------|
+| 入口 / 子命令分发 | `src/main.c` | `build / run / init / test / lang / vux / vusx / update / apk` 等子命令分发 |
+| 词法分析 | `src/token.[c/h]`、`src/lexer.[c/h]` | 分词、Token 类型、中英文关键字查表、缩进、注释/字符串、数字字面量、UTF-8 中文标识符 |
+| 语法分析 | `src/parser.[c/h]` | 递归下降解析，生成 `VusAstProgram` |
+| 抽象语法树 | `src/ast.[c/h]` | tagged-union 节点设计、创建/遍历/销毁 |
+| 代码生成 | `src/generator.[c/h]` | C 源码生成、引用计数插入、ident sanitize、内建函数映射；核心接口 `vus_generate_c` / `vus_compile_c` |
+| 配置系统 | `src/config.[c/h]` | 解析 `vus.json`（内建简单 JSON 解析）、路径构建、风格锁定 |
+| C ABI | `src/vus_abi.[c/h]` + `include/vus/vus_abi.h` | 嵌入式编译入口（`vus_compile_file` / `vus_compile_string` / `vus_eval`），`compile_source()` 即核心流水线 |
+| 插件体系 | `src/vus_plugin.[c/h]`、`src/vus_lang.[c/h]`、`src/vus_vusx.[c/h]` | 编译器插件（`.so`）、语言插件（`.vulage`）、vusx 编译期插件 |
+| APK 打包 | `src/vus_apk.[c/h]` | VUS → Android APK 项目 / NDK 交叉编译 |
+| 运行时库 | `rt/libvus_rt.[c/h]`、`rt/vus_coro.[c/h]`、`rt/easylogger/` | 引用计数、字符串/列表/字典、闭包、错误链、线程/协程、分级日志 |
+
+### 关键实现要点
+
+- **中文标识符 sanitize（__XXXX 规则）**：`gen_sanitize_name` 将 VUS 标识符转为合法 C 标识符。ASCII 字母/数字/下划线保留原样；**数字开头**的名字自动补 `_` 前缀；**多字节 UTF-8 字符**解码为 Unicode 码点后编码为 `_XXXX`（4 位十六进制，如中文 `打印` 转为形如 `_6253_5370`）；其余非字母数字 ASCII 字符替换为下划线。所有生成符号统一加 `vus_` 前缀，避免与系统符号冲突。
+- **引用计数插入**：运行时所有标量以 `VusString*` 表示。代码生成器在**赋值、循环变量更新、函数参数传递、函数返回**等位置显式插入 `vus_ref` / `vus_unref`（对新值 `vus_ref`、对旧值 `vus_unref`，再更新指针），实现自动内存管理；约定所有运行时对象首字段为 `int ref`，`vus_unref` 归零即 `free`。
+- **函数与泛型调用（GNU 语句表达式）**：普通/泛型函数调用生成 `({ ... })` 的 GNU 语句表达式，统一以 `VusString**` 数组传递全部参数（规避 C 不定参类型问题），约定 `_vus_args[0]` 为返回值槽位。**泛型类型实参（`<T>`）目前仅作为注释保留**，不做 C 层特化，也暂无真实类型检查（"泛型"目前只有语法形态）。
+- **双层插件体系**：第一层为**编译期插件**作用于编译流水线——`.so` 编译器插件（`vus_plugin`，导出 `vus_plugin_entry`）、`.vulage` 语言插件（`vus_lang`，在词法前预处理源码）、`.vusx` 编译期插件（其 `.o` 被追加进 GCC 命令）；第二层为**运行期 `.vux` Python 插件**，在生成代码中以内建函数（`插件_运行` 等）形式触发。详见 ARCHITECTURE.md 第九节。
 
 ## 测试策略
 
