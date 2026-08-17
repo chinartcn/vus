@@ -150,6 +150,13 @@ zip -r /tmp/vus-lsp.zip plugin.json main.js
    - `vus lsp` 是否能启动（日志/终端可看到 `[vus-lsp]` 打印）。
    - **语言识别**：插件 `init()` 已调用 `editorLanguages.register("vus", ["vus"], ...)` 自动把 `.vus` 注册为 `vus` 语言，通常无需手动处理。若仍无响应，确认插件版本已含 `registerLanguage()`（见 `main.js`），並检查日志是否有 `[vus-lsp] 已注册 .vus 语言模式` 打印。
 
+> **注意**：ACode（CodeMirror 6）界面上通常不会显示当前文件的语言名，所以不要靠“看不到 vus”来判断。**权威判据是 wslsp 桥终端**：打开 `.vus` 并输入字符后，若桥日志出现
+> ```
+> New connection: vus-... args=vus,lsp&type=stdio
+> 🚀 Starting vus-... server: vus lsp (stdio)
+> ```
+> 就说明客户端已按 vus 语言路由、bridge 已拉起 `vus lsp`——补全随后即弹。若桥日志始终只有 `LSP bridge running...`，则说明客户端根本未发起连接（几乎总归因语言未识别成 `vus`，需装带 `registerLanguage()` 的插件）。
+
 ---
 
 ## 7. 可选：用 ws-lsp-bridge 手动桥接
