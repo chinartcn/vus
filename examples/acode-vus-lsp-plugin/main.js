@@ -55,26 +55,51 @@ async function init() {
   // 先注册语言模式，确保 .vus 能被识别，LSP 才会为其启动
   registerLanguage();
 
-  const server = lsp.defineServer({
+  // 服务器定义（与命令/参数统一，便于新旧 API 共用）
+  const command = VUS_COMMAND;
+  const args = ["lsp"];
+  const checkCommand = VUS_EXECUTABLE ? `test -x "${VUS_EXECUTABLE}"` : "command -v vus";
+
+  // —— 新 API（当前 ACode 推荐）——
+  // defineServer 会把 command/args 自动转成 AXS 桥接 launcher，无需手写 bridge。
+  if (typeof lsp.defineServer === "function") {
+    const server = lsp.defineServer({
+      id: "vus-lsp",
+      label: "VUS",
+      languages: ["vus"],
+      useWorkspaceFolders: true,
+      command,
+      args,
+      checkCommand,
+      initializationOptions: { provideFormatter: false },
+    });
+    lsp.upsert(server); // upsert：已存在同 id 时替换而不报错
+    console.log("[vus-lsp] 已注册 (defineServer) command=" + command + " lsp");
+    return;
+  }
+
+  // —— 老 API（兼容较早内置 LSP）——
+  // 手动声明 websocket transport + AXS stdio 桥接，作用等价于 defineServer。
+  const legacy = {
     id: "vus-lsp",
     label: "VUS",
-    // VUS 源码文件的语言 id；.vus 需在 ACode 中被识别为该语言（见文档）。
     languages: ["vus"],
-    useWorkspaceFolders: true,
-    command: VUS_COMMAND,
-    args: ["lsp"],
-    // 启动前校验可执行文件是否存在
-    checkCommand: VUS_EXECUTABLE
-      ? `test -x "${VUS_EXECUTABLE}"`
-      : "command -v vus",
-    initializationOptions: {
-      provideFormatter: false,
+    transport: { kind: "websocket" },
+    launcher: {
+      bridge: { kind: "axs", command, args },
+      checkCommand,
     },
-  });
-
-  // upsert：可重复安装，已有同 id 定义时替换而不报错
-  lsp.upsert(server);
-  console.log("[vus-lsp] 服务器已注册（command=" + VUS_COMMAND + " lsp）");
+    enabled: true,
+    initializationOptions: { provideFormatter: false },
+  };
+  if (typeof lsp.registerServer === "function") {
+    lsp.registerServer(legacy, { replace: true });
+  } else if (typeof lsp.upsert === "function") {
+    lsp.upsert(legacy);
+  } else if (typeof lsp.register === "function") {
+    lsp.register(legacy);
+  }
+  console.log("[vus-lsp] 已注册 (legacy) command=" + command + " lsp");
 }
 
 module.exports = { init };
