@@ -1,198 +1,151 @@
 /**
- * VUS LSP — ACode 插件主脚本
+ * VUS LSP — ACode 插件（CodeMirror LSP API）
  *
- * 通过 ACode 的 LSP API（acode.require("lsp")）注册 VUS 语言服务器。
- * VUS 服务器以 `vus lsp` 形式从 stdin 读 JSON-RPC、向 stdout 写响应，
- * ACode 通过其 AXS 桥接作为本地 stdio 服务器拉起该命令。
+ * 运行方式：ACode 插件生命周期通过 acode.setPluginInit(id, init) 触发，
+ * 这是 ACode 官方规定的入口（而非 module.exports）。
  *
- * 前置条件：
- *   设备上存在可执行的 `vus`（含 lsp 子命令）并位于 PATH / bin 目录。
- *   参考 scripts/build_lsp_android.sh 得到 arm64-v8a / armeabi-v7a 二进制，
- *   放置到 Termux 的 ~/.local/bin，或用绝对路径覆盖下方 command。
+ * - acode.require("lsp").defineServer() + upsert()
+ *   注册 VUS 语言服务器；ACode 经 AXS bridge 自动拉起 `vus lsp`。
+ * - acode.require("editorLanguages").register()
+ *   把 .vus 映射为 languageId "vus"，LSP 客户端按此路由服务器。
+ * - vus 二进制随插件打包（bin/<abi>/vus），按设备 ABI 选用。
  */
-/**
- * 注意：不要在模块顶层调用 acode.require(...)。
- * 任一 API 在当前 ACode 版本不存在时，顶层抛错会让整个插件加载失败、
- * init() 永不执行。因此所有 acode.require 都放到函数内并用 try 保护，
- * 保证插件始终能加载、至少完成语言注册。
- */
+import plugin from "./plugin.json";
 
-/**
- * 设备上 vus 可执行文件的绝对路径。
- * 若通过 Termux 安装并加入 PATH（command -v vus 可命中），
- * 可将此值留空，走下方 command: "vus"。
- */
-const VUS_EXECUTABLE = "";
+let serversRegistered = false;
 
-/**
- * 启动 VUS 语言服务器的命令 + 参数。
- * 留空 command 时 ACode 会将其解析进 AXS 桥接的 stdio 启动器；
- * 若配了绝对路径，则优先使用该可执行文件。
- */
-const VUS_COMMAND = VUS_EXECUTABLE || "vus";
-
-/**
- * 可选的 WebSocket→LSP 桥地址（ws-lsp-bridge）。
- * 若填了它，就改为直连该 WebSocket（需在设备上先运行 wslsp，
- * bridge 会按 URL 里的 args= 拉起 `vus lsp`），不再依赖 ACode 内置 AXS。
- * 留空则走 ACode 官方自动拉起（command + args）。
- * 例：VUS_BRIDGE_URL = "ws://localhost:3030/vus?args=vus,lsp&type=stdio";
- */
-const VUS_BRIDGE_URL = "";
-
-/**
- * 注册 VUS 语言模式：把扩展名 .vus 映射到 languageId "vus"。
- * 这是补全能弹出的前提——ACode 靠 languageId 决定为哪个文件启动 LSP 客户端。
- */
-function registerLanguage() {
-  // loader 返回 CodeMirror 语言扩展。这里返回空扩展，仅负责把 .vus 关联到
-  // "vus" languageId；若想给中英文高亮，可在此改用 @lezer/lr 的 StreamLanguage。
-  const loader = () => Promise.resolve([]);
-  let editorLanguages = null;
-  try { editorLanguages = acode.require("editorLanguages"); } catch (_) {}
-  if (editorLanguages && typeof editorLanguages.register === "function") {
-    editorLanguages.register("vus", ["vus"], "VUS", loader);
-    console.log("[vus-lsp] 已注册 .vus 语言模式 (languageId=vus)");
-  } else {
-    // 兼容旧版 ACode（Ace 时代）的 mode 注册
-    try {
-      const aceModes = acode.require("aceModes");
-      aceModes.addMode("vus", ["vus"], "VUS");
-      console.log("[vus-lsp] 已注册 .vus 语言模式 (aceModes)");
-    } catch (e) {
-      console.warn("[vus-lsp] 无法注册 .vus 语言模式", e);
-    }
-  }
+/** ABI 探测：arm64-v8a / armeabi-v7a / null */
+function detectAbi() {
+  try {
+    const ua = String(navigator.userAgent || "").toLowerCase();
+    const cpu = (() => {
+      try {
+        return typeof device !== "undefined" && device.cpu
+          ? String(device.cpu).toLowerCase()
+          : "";
+      } catch (_) {
+        return "";
+      }
+    })();
+    const blob = ua + " " + cpu;
+    if (blob.includes("arm64") || blob.includes("aarch64")) return "arm64-v8a";
+    if (
+      blob.includes("armeabi-v7a") ||
+      blob.includes("armv7") ||
+      blob.includes("armeabi")
+    )
+      return "armeabi-v7a";
+  } catch (_) {}
+  return null;
 }
 
-/**
- * 兜底：把当前活动文件强制切到 vus 模式。
- * register() 仅把 .vus 关联为可用语言；对已在编辑器里的文件，CodeMirror
- * 不一定自动应用该模式，而 LSP 客户端是按文件的 languageId 路由服务器的，
- * 所以必须显式 setMode("vus")，否则服务器永远不会被启动、补全不弹。
- * 见 docs.acode.app "Apply A Mode To Active File"。
- */
-function applyVusModeToActiveFile() {
+/** file://baseUrl -> 绝对目录（去掉协议与末尾斜杠） */
+function resolveDir(baseUrl) {
+  let u = String(baseUrl || "");
+  if (u.startsWith("file://")) u = u.slice(7);
+  return u.replace(/\/+$/, "");
+}
+
+/** 从插件安装目录定位 vus 二进制绝对路径 */
+function locateBinary(base, abi) {
+  const fallbackAbi = abi || "arm64-v8a";
+  // 优先精确 ABI；若目录里只有单架构，逐级向上回退
+  const candidates = [fallbackAbi];
+  if (!candidates.includes("arm64-v8a")) candidates.push("arm64-v8a");
+  if (!candidates.includes("armeabi-v7a")) candidates.push("armeabi-v7a");
+  for (const a of candidates) {
+    const p = base + "/bin/" + a + "/vus";
+    // 尽力校验存在；存在则选用，不存在则继续试下一个候选
+    try {
+      const fs = acode.require("fs");
+      if (fs && typeof fs.isFile === "function") {
+        if (fs.isFile(p)) return p;
+        continue; // 明确存在性校验能力，此路径不存在则换 ABI
+      }
+    } catch (_) {}
+    // fs API 不可用时，无校验能力，直接选用最优先候选
+    return p;
+  }
+  return base + "/bin/" + fallbackAbi + "/vus";
+}
+
+/** 延迟到编辑器就绪后再执行注册（LSP API 依赖码镜编辑器初始化） */
+function registerVus() {
+  if (serversRegistered) return;
+  const abi = detectAbi();
+  const base = resolveDir(this?.baseUrl || "");
+
+  // 1) 注册 .vus 语言 -> languageId "vus"
   try {
-    const em = acode.require("editorManager");
-    const f = em && em.activeFile;
-    if (f && (f.extension === "vus" || String(f.name || "").endsWith(".vus"))) {
-      f.setMode("vus");
-      console.log("[vus-lsp] 已对活动文件应用 vus 模式:", f.name);
+    const editorLanguages = acode.require("editorLanguages");
+    if (editorLanguages && typeof editorLanguages.register === "function") {
+      editorLanguages.register(
+        "vus",
+        ["vus"],
+        "VUS",
+        async () => [] // 高亮可选；返回空扩展以保证加载成功
+      );
+      console.log("[vus-lsp] 已注册 .vus 语言");
     }
   } catch (e) {
-    // 某些版本 editorManager API 不同，忽略即可，register 的扩展名映射仍在
+    console.error("[vus-lsp] 语言注册失败", e);
+  }
+
+  // 2) 注册语言服务器（官方 defineServer + upsert）
+  try {
+    const lsp = acode.require("lsp");
+    if (!lsp || typeof lsp.defineServer !== "function") {
+      console.error("[vus-lsp] 当前 ACode 无 defineServer API，请升级至最新版");
+      return;
+    }
+    const bin = locateBinary(base, abi);
+    const server = lsp.defineServer({
+      id: "vus-lsp",
+      label: "VUS",
+      languages: ["vus"],
+      useWorkspaceFolders: true,
+      command: bin,
+      args: ["lsp"],
+      checkCommand: "test -x '" + bin + "'",
+      initializationOptions: { provideFormatter: false },
+    });
+    lsp.upsert(server);
+    serversRegistered = true;
+    console.log("[vus-lsp] 服务器已注册 command=" + bin + " lsp");
+  } catch (e) {
+    console.error("[vus-lsp] 服务器注册失败", e);
   }
 }
 
-async function init() {
-  // ===== 诊断探针：证明插件 init() 确实被执行 =====
-  // 用文件系统标记最可靠：init 一开始就试着往几个候选可写路径写标记文件，
-  // 若任一路径写成功，设备终端 cat 该文件即可硬判定插件确实执行过 init。
-  // 定位完成后可删除本节。
-  const stamp = "vus-lsp plugins inited " + new Date().toISOString();
-  const candidates = ["/public/.vus-lsp-inited", "/vus-lsp-inited", "/root/.vus-lsp-inited"];
+// —— ACode 官方入口：setPluginInit ——
+acode.setPluginInit(plugin.id, (baseUrl, $page, cache) => {
+  // 保存 baseUrl 供注册使用
   try {
-    const fsmod = (() => { try { return acode.require("fs"); } catch (_) { return null; } })();
-    if (fsmod && typeof fsmod.createFile === "function") {
-      for (const c of candidates) {
-        try { await fsmod.createFile(c, stamp); } catch (_) {}
-      }
-    } else {
-      // 无 fs API 时退回 WebSocket 探针（若可用）
-      if (typeof WebSocket !== "undefined") {
-        const p = new WebSocket("ws://127.0.0.1:3030/vus-lsp-probe");
-        p.onclose = p.onerror = function () {};
-      }
-    }
-  } catch (_) {
-    // 忽略——即使都失败也不阻断插件后续逻辑
-  }
-
-  try { if (typeof toast === "function") toast("VUS LSP 插件已加载"); } catch (_) {}
-
-  console.log("[vus-lsp] 插件正在初始化 ...");
-  const lsp = (() => { try { return acode.require("lsp"); } catch (_) { return null; } })();
-  // 先注册语言模式，确保 .vus 能被识别，LSP 才会为其启动
-  registerLanguage();
-  // 立即对当前打开的文件兜底 setMode，保证 languageId 是 vus
-  applyVusModeToActiveFile();
-  // 订阅文件切换，对新打开的 .vus 同样兜底（监听不到也不致命）
-  try {
-    const em = acode.require("editorManager");
-    if (em && typeof em.on === "function") {
-      const events = ["activeFileChange", "file-switch", "file-open"];
-      for (const ev of events) {
-        try { em.on(ev, applyVusModeToActiveFile); } catch (_) {}
-      }
-    }
+    plugin.__baseUrl = baseUrl;
+    // init 接收的第一个参数就是 baseUrl；用一个可复用作用域绑定
   } catch (_) {}
 
-  // 服务器定义（与命令/参数统一，便于新旧 API 共用）
-  const command = VUS_COMMAND;
-  const args = ["lsp"];
-  const checkCommand = VUS_EXECUTABLE ? `test -x "${VUS_EXECUTABLE}"` : "command -v vus";
+  // ：LSP API 需要编辑器可用，最常见做法是延迟到文档打开后注册。
+  // 这里先做一次尝试，失败无副作用。
+  registerVus.call({ baseUrl });
 
-  // —— 新 API（当前 ACode 推荐）——
-  // 若设了 VUS_BRIDGE_URL，以 WebSocket 直连外部 ws-lsp-bridge
-  // （需在设备上先运行 wslsp；bridge 按 args= 拉起 vus lsp）。
-  // 否则 defineServer 把 command/args 自动转成 ACode 内置 AXS 桥接。
-  if (lsp && typeof lsp.defineServer === "function") {
-    const server = lsp.defineServer(
-      VUS_BRIDGE_URL
-        ? {
-            id: "vus-lsp",
-            label: "VUS",
-            languages: ["vus"],
-            transport: { kind: "websocket", url: VUS_BRIDGE_URL },
-            useWorkspaceFolders: false,
-            enabled: true,
-          }
-        : {
-            id: "vus-lsp",
-            label: "VUS",
-            languages: ["vus"],
-            useWorkspaceFolders: true,
-            command,
-            args,
-            checkCommand,
-            initializationOptions: { provideFormatter: false },
-          }
-    );
-    lsp.upsert(server); // upsert：已存在同 id 时替换而不报错
-    console.log(
-      "[vus-lsp] 已注册 (defineServer) " +
-        (VUS_BRIDGE_URL ? "websocket=" + VUS_BRIDGE_URL : "command=" + command + " lsp")
-    );
-    return;
-  }
+  // 监听活动文件切换，确保 .vus 文档语言正确并再次触发注册
+  try {
+    const editorManager = acode.require("editorManager");
+    if (editorManager && typeof editorManager.on === "function") {
+      editorManager.on("activeFileChange", () => {
+        registerVus.call({ baseUrl });
+      });
+    }
+  } catch (_) {}
+});
 
-  // —— 老 API（兼容较早内置 LSP）——
-  // 手动声明 websocket transport + AXS stdio 桥接，作用等价于 defineServer。
-  const legacy = {
-    id: "vus-lsp",
-    label: "VUS",
-    languages: ["vus"],
-    transport: { kind: "websocket" },
-    launcher: {
-      bridge: { kind: "axs", command, args },
-      checkCommand,
-    },
-    enabled: true,
-    initializationOptions: { provideFormatter: false },
-  };
-  if (lsp && typeof lsp.registerServer === "function") {
-    lsp.registerServer(legacy, { replace: true });
-    console.log("[vus-lsp] 已注册 (legacy/registerServer) command=" + command + " lsp");
-  } else if (lsp && typeof lsp.upsert === "function") {
-    lsp.upsert(legacy);
-    console.log("[vus-lsp] 已注册 (legacy/upsert) command=" + command + " lsp");
-  } else if (lsp && typeof lsp.register === "function") {
-    lsp.register(legacy);
-    console.log("[vus-lsp] 已注册 (legacy/register) command=" + command + " lsp");
-  } else {
-    console.error("[vus-lsp] 未找到可用的 LSP 注册 API（acode.require(\"lsp\") 为 null 或缺少方法）");
-  }
-}
-
-module.exports = { init };
+acode.setPluginUnmount(plugin.id, () => {
+  serversRegistered = false;
+  try {
+    const lsp = acode.require("lsp");
+    if (lsp && typeof lsp.servers?.unregister === "function") {
+      lsp.servers.unregister("vus-lsp");
+    }
+  } catch (_) {}
+});

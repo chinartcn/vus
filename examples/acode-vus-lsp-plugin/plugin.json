@@ -3,7 +3,10 @@
   "name": "VUS 语言服务器 (LSP)",
   "version": "0.1.0",
   "main": "main.js",
-  "description": "为 VUS 语言接入 ACode 的 LSP：三层补全、文档符号、命令执行。需设备上存在可执行的 vus（含 lsp 子命令）二进制。",
+  "description": "为 VUS 语言接入 ACode 的官方 LSP API：三层补全、文档符号、命令执行。vus 二进制随插件打包（bin/<abi>/vus），按设备 ABI 自动选用。",
   "author": "VUS",
-  "license": "MIT"
+  "license": "MIT",
+  "minVersionCode": 1002,
+  "readme": "README.md",
+  "files": ["bin/arm64-v8a/vus", "bin/armeabi-v7a/vus"]
 }
