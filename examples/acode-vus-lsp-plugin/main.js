@@ -11,6 +11,9 @@
  *   放置到 Termux 的 ~/.local/bin，或用绝对路径覆盖下方 command。
  */
 const lsp = acode.require("lsp");
+// 语言模式注册 API（CodeMirror 6 版）。把 .vus 关联到 "vus" languageId，
+// LSP 客户端按此 id 路由到下方登记的服务器，补全才能弹出。
+const editorLanguages = acode.require("editorLanguages");
 
 /**
  * 设备上 vus 可执行文件的绝对路径。
@@ -26,7 +29,32 @@ const VUS_EXECUTABLE = "";
  */
 const VUS_COMMAND = VUS_EXECUTABLE || "vus";
 
+/**
+ * 注册 VUS 语言模式：把扩展名 .vus 映射到 languageId "vus"。
+ * 这是补全能弹出的前提——ACode 靠 languageId 决定为哪个文件启动 LSP 客户端。
+ */
+function registerLanguage() {
+  // loader 返回 CodeMirror 语言扩展。这里返回空扩展，仅负责把 .vus 关联到
+  // "vus" languageId；若想给中英文高亮，可在此改用 @lezer/lr 的 StreamLanguage。
+  const loader = () => Promise.resolve([]);
+  if (editorLanguages && typeof editorLanguages.register === "function") {
+    editorLanguages.register("vus", ["vus"], "VUS", loader);
+  } else {
+    // 兼容旧版 ACode（Ace 时代）的 mode 注册
+    try {
+      const aceModes = acode.require("aceModes");
+      aceModes.addMode("vus", ["vus"], "VUS");
+    } catch (e) {
+      console.warn("[vus-lsp] 无法注册 .vus 语言模式", e);
+    }
+  }
+  console.log("[vus-lsp] 已注册 .vus 语言模式 (languageId=vus)");
+}
+
 async function init() {
+  // 先注册语言模式，确保 .vus 能被识别，LSP 才会为其启动
+  registerLanguage();
+
   const server = lsp.defineServer({
     id: "vus-lsp",
     label: "VUS",
