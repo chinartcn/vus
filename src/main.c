@@ -167,6 +167,17 @@ VusResult vus_compile_to_c(const char *vus_file_path, VusConfig *config) {
         }
     }
 
+    /* import 展开：把「导入 X / 从 X 导入」替换为 X.vus 源码（递归），
+     * 使外部模块函数随主程序一起编译，支撑“外部 .vus 页面”dlsym 反查。 */
+    {
+        char *expanded = vus_source_expand_imports(source, vus_file_path);
+        if (expanded) {
+            free(source);
+            source = expanded;
+            source_len = strlen(source);
+        }
+    }
+
     /* 词法分析 */
     VusLexer *lexer = vus_lexer_new(source, source_len);
     if (!lexer) {

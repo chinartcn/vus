@@ -106,6 +106,22 @@ VusResult vus_compile_string_to_exe(const char *source, VusConfig *config);
  */
 VusResult vus_eval(const char *code, VusConfig *config, char *output);
 
+/* ===================================================================
+ * import 源码展开
+ * ===================================================================
+ * 把源码中的「导入 X / 从 X 导入」行就地替换为对应 X.vus 的源码
+ * （递归展开其自身的 import），使外部模块的全部函数随主程序一起编译，
+ * 从而可被 dlsym 反查，支撑「外部 .vus 页面」等多文件场景。
+ *
+ * 返回 malloc 分配的展开后源码；失败返回 NULL（此时应沿用原 source）。
+ * 调用方负责 free 返回值。
+ *
+ * @param source       VUS 源码（'\0' 结尾）
+ * @param source_name  主脚本路径（用于解析同目录模块），可为 NULL
+ * @return             展开后源码，或 NULL
+ */
+char *vus_source_expand_imports(const char *source, const char *source_name);
+
 #ifdef __cplusplus
 }
 #endif
