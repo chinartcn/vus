@@ -30,6 +30,15 @@ const VUS_EXECUTABLE = "";
 const VUS_COMMAND = VUS_EXECUTABLE || "vus";
 
 /**
+ * 可选的 WebSocket→LSP 桥地址（ws-lsp-bridge）。
+ * 若填了它，就改为直连该 WebSocket（需在设备上先运行 wslsp，
+ * bridge 会按 URL 里的 args= 拉起 `vus lsp`），不再依赖 ACode 内置 AXS。
+ * 留空则走 ACode 官方自动拉起（command + args）。
+ * 例：VUS_BRIDGE_URL = "ws://localhost:3030/vus?args=vus,lsp&type=stdio";
+ */
+const VUS_BRIDGE_URL = "";
+
+/**
  * 注册 VUS 语言模式：把扩展名 .vus 映射到 languageId "vus"。
  * 这是补全能弹出的前提——ACode 靠 languageId 决定为哪个文件启动 LSP 客户端。
  */
@@ -61,20 +70,36 @@ async function init() {
   const checkCommand = VUS_EXECUTABLE ? `test -x "${VUS_EXECUTABLE}"` : "command -v vus";
 
   // —— 新 API（当前 ACode 推荐）——
-  // defineServer 会把 command/args 自动转成 AXS 桥接 launcher，无需手写 bridge。
+  // 若设了 VUS_BRIDGE_URL，以 WebSocket 直连外部 ws-lsp-bridge
+  // （需在设备上先运行 wslsp；bridge 按 args= 拉起 vus lsp）。
+  // 否则 defineServer 把 command/args 自动转成 ACode 内置 AXS 桥接。
   if (typeof lsp.defineServer === "function") {
-    const server = lsp.defineServer({
-      id: "vus-lsp",
-      label: "VUS",
-      languages: ["vus"],
-      useWorkspaceFolders: true,
-      command,
-      args,
-      checkCommand,
-      initializationOptions: { provideFormatter: false },
-    });
+    const server = lsp.defineServer(
+      VUS_BRIDGE_URL
+        ? {
+            id: "vus-lsp",
+            label: "VUS",
+            languages: ["vus"],
+            transport: { kind: "websocket", url: VUS_BRIDGE_URL },
+            useWorkspaceFolders: false,
+            enabled: true,
+          }
+        : {
+            id: "vus-lsp",
+            label: "VUS",
+            languages: ["vus"],
+            useWorkspaceFolders: true,
+            command,
+            args,
+            checkCommand,
+            initializationOptions: { provideFormatter: false },
+          }
+    );
     lsp.upsert(server); // upsert：已存在同 id 时替换而不报错
-    console.log("[vus-lsp] 已注册 (defineServer) command=" + command + " lsp");
+    console.log(
+      "[vus-lsp] 已注册 (defineServer) " +
+        (VUS_BRIDGE_URL ? "websocket=" + VUS_BRIDGE_URL : "command=" + command + " lsp")
+    );
     return;
   }
 

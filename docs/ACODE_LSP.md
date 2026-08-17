@@ -152,7 +152,39 @@ zip -r /tmp/vus-lsp.zip plugin.json main.js
 
 ---
 
-## 7. 相关文件
+## 7. 可选：用 ws-lsp-bridge 手动桥接
+
+若你的 ACode 内置 LSP 不会自动拉起本地 stdio 服务器（例如你实际用的是 acode-lsp-client 这类“自定义语言服务器 + WebSocket 地址”界面），可改走独立的 **WebSocket → LSP 桥**（[jobians/websocket-lsp-bridge](https://github.com/Jobians/websocket-lsp-bridge)）：
+
+```text
+ACode ──(WebSocket JSON-RPC)──> ws-lsp-bridge(:3030) ──(stdio Content-Length)──> vus lsp
+```
+
+1. 在设备上安装并常驻桥（需 node/npm）：
+   ```bash
+   npm i -g ws-lsp-bridge
+   wslsp            # 监听 ws://localhost:3030（此终端保持运行）
+   ```
+2. bridge 在每个连接 URL 的 `args=` 里指定要拉起的 LSP。VUS 的连接地址为：
+   ```
+   ws://localhost:3030/vus?args=vus,lsp&type=stdio
+   ```
+3. 在 acode-lsp-client 的“自定义语言服务器 / LSP Settings”新增一条 VUS：
+   ```json
+   {
+     "type": "socket",
+     "serviceName": "vus-lsp",
+     "modes": "vus",
+     "label": "VUS",
+     "socketUrl": "ws://localhost:3030/vus-{workspace}?args=vus,lsp&type=stdio"
+   }
+   ```
+   > `args` 以逗号或空格分隔，`vus,lsp` 即命令 `vus`、参数 `lsp`。语言匹配仍要求 `.vus` 被识别为 `vus`——本仓库插件的 `registerLanguage()` 已替你注册好。
+4. 也可直接用本仓库插件，并在 `main.js` 顶部把 `VUS_BRIDGE_URL` 设为上述地址：插件改为 WebSocket 直连桥（`transport.kind="websocket"`），而语言注册依旧生效。
+
+---
+
+## 8. 相关文件
 
 | 文件 | 说明 |
 | --- | --- |
