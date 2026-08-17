@@ -60,9 +60,41 @@ function registerLanguage() {
   console.log("[vus-lsp] 已注册 .vus 语言模式 (languageId=vus)");
 }
 
+/**
+ * 兜底：把当前活动文件强制切到 vus 模式。
+ * register() 仅把 .vus 关联为可用语言；对已在编辑器里的文件，CodeMirror
+ * 不一定自动应用该模式，而 LSP 客户端是按文件的 languageId 路由服务器的，
+ * 所以必须显式 setMode("vus")，否则服务器永远不会被启动、补全不弹。
+ * 见 docs.acode.app "Apply A Mode To Active File"。
+ */
+function applyVusModeToActiveFile() {
+  try {
+    const em = acode.require("editorManager");
+    const f = em && em.activeFile;
+    if (f && (f.extension === "vus" || String(f.name || "").endsWith(".vus"))) {
+      f.setMode("vus");
+      console.log("[vus-lsp] 已对活动文件应用 vus 模式:", f.name);
+    }
+  } catch (e) {
+    // 某些版本 editorManager API 不同，忽略即可，register 的扩展名映射仍在
+  }
+}
+
 async function init() {
   // 先注册语言模式，确保 .vus 能被识别，LSP 才会为其启动
   registerLanguage();
+  // 立即对当前打开的文件兜底 setMode，保证 languageId 是 vus
+  applyVusModeToActiveFile();
+  // 订阅文件切换，对新打开的 .vus 同样兜底（监听不到也不致命）
+  try {
+    const em = acode.require("editorManager");
+    if (em && typeof em.on === "function") {
+      const events = ["activeFileChange", "file-switch", "file-open"];
+      for (const ev of events) {
+        try { em.on(ev, applyVusModeToActiveFile); } catch (_) {}
+      }
+    }
+  } catch (_) {}
 
   // 服务器定义（与命令/参数统一，便于新旧 API 共用）
   const command = VUS_COMMAND;
