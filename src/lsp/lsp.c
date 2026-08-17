@@ -10,9 +10,14 @@
  * - shutdown 返回 null、exit 优雅退出；stdin EOF 时也优雅退出。
  */
 
+/* 启用 strdup 等 POSIX 声明（C11 下默认不暴露，需在含 string.h 前定义） */
+#define _POSIX_C_SOURCE 200809L
+
 #include "lsp.h"
 #include "vus_builtin.h"
 #include "yyjson/yyjson.h"
+#include "lexer.h"
+#include "token.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,6 +43,91 @@ static const char *const g_keywords[] = {
     "导入", "返回", "真", "假", "空", "并且", "或者", "不是", "共", "步",
     NULL
 };
+
+/* ============ 文档缓冲：按 uri 维护最近打开/修改的文档文本 ============ */
+
+#define VUS_LSP_MAX_DOCS 64     /* 最多同时维护的文档数 */
+#define VUS_LSP_MAX_SYMS 256    /* 单个文档收集的符号数上限 */
+
+/* 单个已打开文档 */
+typedef struct {
+    char  uri[512];      /* 去掉 file:// 前缀后的 key */
+    char *text;          /* 文档全部文本（动态分配） */
+} VusDocBuf;
+
+/* 打开的文档数组 */
+static VusDocBuf g_docs[VUS_LSP_MAX_DOCS];
+static int g_docs_count = 0;
+
+/* 去掉 uri 的 file:// 前缀，得到缓冲的 key（无非前缀则原样返回字符串） */
+static const char *uri_key(const char *uri) {
+    if (!uri) return "";
+    if (strncmp(uri, "file://", 7) == 0) return uri + 7;
+    return uri;
+}
+
+/* 按 uri 查找缓冲文本；找不到返回 NULL */
+static const char *doc_find_text(const char *uri) {
+    if (!uri) return NULL;
+    const char *key = uri_key(uri);
+    for (int i = 0; i < g_docs_count; i++) {
+        if (strcmp(g_docs[i].uri, key) == 0) return g_docs[i].text;
+    }
+    return NULL;
+}
+
+/* 更新/新增文档缓冲（text 会被复制） */
+static void doc_update(const char *uri, const char *text) {
+    if (!uri || !text) return;
+    const char *key = uri_key(uri);
+    for (int i = 0; i < g_docs_count; i++) {
+        if (strcmp(g_docs[i].uri, key) == 0) {
+            char *nb = strdup(text);
+            if (!nb) return;
+            free(g_docs[i].text);
+            g_docs[i].text = nb;
+            return;
+        }
+    }
+    /* 新增；若已满则忽略（保持现有文档） */
+    if (g_docs_count >= VUS_LSP_MAX_DOCS) return;
+    strncpy(g_docs[g_docs_count].uri, key, sizeof(g_docs[g_docs_count].uri) - 1);
+    g_docs[g_docs_count].uri[sizeof(g_docs[g_docs_count].uri) - 1] = '\0';
+    g_docs[g_docs_count].text = strdup(text);
+    if (g_docs[g_docs_count].text) g_docs_count++;
+}
+
+/* 关闭文档：移除缓冲占据的槽位 */
+static void doc_close(const char *uri) {
+    if (!uri) return;
+    const char *key = uri_key(uri);
+    for (int i = 0; i < g_docs_count; i++) {
+        if (strcmp(g_docs[i].uri, key) == 0) {
+            free(g_docs[i].text);
+            /* 用末尾元素回填，保持数组紧凑 */
+            if (g_docs_count > 1) {
+                g_docs[i] = g_docs[g_docs_count - 1];
+            }
+            g_docs_count--;
+            return;
+        }
+    }
+}
+
+/* ============ 符号表：用词法分析器精确收集的文档符号 ============ */
+
+/* 符号内部类别（用于换算 LSP / CompletionItemKind） */
+enum { VUS_SYM_VARIABLE = 0, VUS_SYM_FUNCTION = 1 };
+
+/* 单个带位置的符号（行/列为 0 起步，供 documentSymbol 使用） */
+typedef struct {
+    char name[128];
+    int  kind;         /* VUS_SYM_VARIABLE / VUS_SYM_FUNCTION */
+    int  line;         /* 0 起步 */
+    int  column;       /* 0 起步 */
+    int  end_line;     /* 0 起步 */
+    int  end_column;   /* 0 起步 */
+} VusSymbol;
 
 /* ============ 工具：字节是否为标识符字符（含 UTF-8 多字节与下划线） ============ */
 static int is_ident_byte(unsigned char c) {
@@ -262,8 +352,7 @@ static void collect_defined(const char *text, char names[][128],
         strcpy(tmp, linebuf);
         char *tok = strtok(tmp, " \t(),;:=\"'+-*/<>[]{}");
         while (tok && nw < 64) {
-            strncpy(words[nw], tok, 127);
-            words[nw][127] = '\0';
+            snprintf(words[nw], sizeof(words[nw]), "%s", tok);
             nw++;
             tok = strtok(NULL, " \t(),;:=\"'+-*/<>[]{}");
         }
@@ -275,8 +364,7 @@ static void collect_defined(const char *text, char names[][128],
                 for (int k = 0; k < *count; k++)
                     if (strcmp(names[k], words[1]) == 0) { dup = 1; break; }
                 if (!dup) {
-                    strncpy(names[*count], words[1], 127);
-                    names[*count][127] = '\0';
+                    snprintf(names[*count], sizeof(names[*count]), "%s", words[1]);
                     (*count)++;
                 }
             }
@@ -287,14 +375,136 @@ static void collect_defined(const char *text, char names[][128],
                 for (int k = 0; k < *count; k++)
                     if (strcmp(names[k], words[0]) == 0) { dup = 1; break; }
                 if (!dup) {
-                    strncpy(names[*count], words[0], 127);
-                    names[*count][127] = '\0';
+                    snprintf(names[*count], sizeof(names[*count]), "%s", words[0]);
                     (*count)++;
                 }
             }
         }
         line++;
     }
+}
+
+/* 向符号表追加一个符号；重名（已存在同名）时跳过，返回是否真正加入 */
+static void symbol_add(VusSymbol *out, int *count, int max,
+                       const char *name, size_t nlen, int kind,
+                       int line, int column) {
+    if (*count >= max) return;
+    /* 去重：同名符号只保留第一个 */
+    for (int i = 0; i < *count; i++) {
+        if (strlen(out[i].name) == nlen &&
+            strncmp(out[i].name, name, nlen) == 0) return;
+    }
+    if (nlen >= sizeof(out[*count].name)) nlen = sizeof(out[*count].name) - 1;
+    memcpy(out[*count].name, name, nlen);
+    out[*count].name[nlen] = '\0';
+    out[*count].kind = kind;
+    out[*count].line = line;
+    out[*count].column = column;
+    /* 结束位置：名称覆盖范围（该名所在行、起始列起算长度），行同为起始行 */
+    out[*count].end_line = line;
+    out[*count].end_column = column + (int)nlen;
+    (*count)++;
+}
+
+/* 仅含名称、无位置的符号（用于失败回退） */
+static void symbol_add_name(VusSymbol *out, int *count, int max,
+                            const char *name, int kind) {
+    symbol_add(out, count, max, name, strlen(name), kind, 0, 0);
+}
+
+/*
+ * 用 VUS 词法分析器对文档精确收集符号。成功返回 1；tokenize 失败（lexer
+ * 报错）或为空时返回 0，交由调用方回退启发式，保证不崩溃。
+ * 函数定义：`定义 名` / `def 名`（关键字 DEF/CN_DEF 之后紧跟标识符）→ Function。
+ * 变量定义：`名 = 表达式` 且名是标识符，排除属性访问（对象.名）与下标（名[）。
+ */
+static int collect_symbols_lexer(const char *text, VusSymbol *out,
+                                 int *count, int max) {
+    *count = 0;
+    if (!text || text[0] == '\0') return 0; /* 空文档不收集 */
+
+    size_t slen = strlen(text);
+    size_t ntok = 0;
+    VusLexer *lx = vus_lexer_new(text, slen);
+    if (!lx) return 0;
+    VusToken *toks = vus_lexer_tokenize(lx, &ntok);
+    if (lx->error || !toks || ntok == 0) {
+        /* tokenize 失败：回退（调用方负责启发式） */
+        if (toks) vus_lexer_free_tokens(toks, ntok);
+        vus_lexer_free(lx);
+        return 0;
+    }
+
+    for (size_t i = 0; i < ntok; i++) {
+        VusTokenType ty = toks[i].type;
+
+        /* 函数定义：`定义 名` / `def 名`，紧跟标识符 */
+        if ((ty == VUS_TOKEN_CN_DEF || ty == VUS_TOKEN_DEF) &&
+            i + 1 < ntok && toks[i + 1].type == VUS_TOKEN_IDENTIFIER) {
+            VusToken fn = toks[i + 1];
+            symbol_add(out, count, max, fn.start, fn.length,
+                       VUS_SYM_FUNCTION, fn.line - 1, fn.column - 1);
+            i++; /* 跳过函数名，加快遍历 */
+            continue;
+        }
+
+        /* 变量定义/赋值：标识符紧跟赋值号 `=` */
+        if (ty == VUS_TOKEN_IDENTIFIER && i + 1 < ntok &&
+            toks[i + 1].type == VUS_TOKEN_ASSIGN) {
+            /* 排除属性访问：前面是点号，如 `对象.名 = ...` */
+            if (i > 0 && toks[i - 1].type == VUS_TOKEN_DOT) continue;
+            /* 标识符 token 已保证不是关键字（关键字会被识别为专门类型）；
+               下标（名[）因为赋值号不紧随标识符，也自然被排除。 */
+            symbol_add(out, count, max, toks[i].start, toks[i].length,
+                       VUS_SYM_VARIABLE, toks[i].line - 1, toks[i].column - 1);
+            continue;
+        }
+    }
+
+    vus_lexer_free_tokens(toks, ntok);
+    vus_lexer_free(lx);
+    return 1; /* tokenize 成功（即便未收集到符号） */
+}
+
+/* 回退：用原有启发式收集符号（一律视为变量、无位置） */
+static void collect_symbols_fallback(const char *text, VusSymbol *out,
+                                     int *count, int max) {
+    char names[64][128];
+    int n = 0;
+    collect_defined(text, names, &n, 64);
+    for (int i = 0; i < n; i++)
+        symbol_add_name(out, count, max, names[i], VUS_SYM_VARIABLE);
+}
+
+/*
+ * 符号收集主入口：优先取 uri 对应缓冲文本，否则用传入文本；
+ * 先用词法分析器精确分类，失败时回退启发式。
+ */
+static void collect_symbols(const char *text, const char *uri,
+                            VusSymbol *out, int *count, int max) {
+    const char *src = NULL;
+    if (uri) src = doc_find_text(uri);   /* 优先已打开缓冲 */
+    if (!src) src = text;                /* 退而请求内文本 */
+    if (!collect_symbols_lexer(src, out, count, max))
+        collect_symbols_fallback(src, out, count, max);
+}
+
+/* 从请求参数取 textDocument.uri；无则返回 NULL */
+static const char *req_document_uri(yyjson_val *params) {
+    yyjson_val *td = params ? yyjson_obj_get(params, "textDocument") : NULL;
+    if (!td) return NULL;
+    yyjson_val *u = yyjson_obj_get(td, "uri");
+    if (u && yyjson_is_str(u)) return yyjson_get_str(u);
+    return NULL;
+}
+
+/* 解析当前文档文本：优先 uri 对应缓冲，其次请求内 textDocument.text */
+static const char *resolve_text(yyjson_val *params, const char *uri) {
+    if (uri) {
+        const char *t = doc_find_text(uri);
+        if (t) return t;
+    }
+    return req_document_text(params);
 }
 
 /* ============ 构造 Markdown 文档（doc + 示例） ============ */
@@ -402,24 +612,27 @@ static void append_command_item(yyjson_mut_doc *doc, yyjson_mut_val *arr,
     yyjson_mut_arr_append(arr, it);
 }
 
-/* ============ 普通补全：内置函数 + 已定义符号 ============ */
+/* ============ 普通补全：内置函数 + 文档符号（去重，内置优先） ============ */
 static void handle_normal(yyjson_mut_doc *doc, yyjson_mut_val *items,
-                          const char *text, const char *token) {
+                          const char *text, const char *uri,
+                          const char *token) {
     const VusBuiltin *tb = vus_builtin_table();
     for (int i = 0; i < vus_builtin_count(); i++) {
         if (token[0] == '\0' || strncmp(tb[i].name, token, strlen(token)) == 0)
             append_builtin_item(doc, items, &tb[i], token, 0);
     }
 
-    /* 已定义函数 / 变量（普通补全辅助） */
-    char defs[64][128];
-    int ndef = 0;
-    collect_defined(text, defs, &ndef, 64);
-    for (int i = 0; i < ndef; i++) {
-        if (token[0] == '\0' || strncmp(defs[i], token, strlen(token)) == 0) {
-            /* kind 6 = Variable（约定为变量；此处定义为函数/变量通用项） */
-            append_defined_item(doc, items, defs[i], token, 6);
-        }
+    /* 文档符号：函数 kind=3、变量 kind=6；同名时内置优先，故符号跳过 */
+    VusSymbol syms[VUS_LSP_MAX_SYMS];
+    int ns = 0;
+    collect_symbols(text, uri, syms, &ns, VUS_LSP_MAX_SYMS);
+    for (int i = 0; i < ns; i++) {
+        if (token[0] != '\0' &&
+            strncmp(syms[i].name, token, strlen(token)) != 0) continue;
+        /* 与内置同名：跳过（内置优先） */
+        if (vus_builtin_find(syms[i].name)) continue;
+        int ckind = (syms[i].kind == VUS_SYM_FUNCTION) ? 3 : 6; /* 函数=3，变量=6 */
+        append_defined_item(doc, items, syms[i].name, token, ckind);
     }
 }
 
@@ -477,6 +690,7 @@ static void handle_initialize(yyjson_val *req) {
     yyjson_mut_arr_append(cmds, yyjson_mut_str(doc, "vus.executeCommand"));
     yyjson_mut_obj_add_val(doc, ecp, "commands", cmds);
     yyjson_mut_obj_add_val(doc, caps, "executeCommandProvider", ecp);
+    yyjson_mut_obj_add_val(doc, caps, "documentSymbolProvider", yyjson_mut_true(doc));
 
     yyjson_mut_obj_add_val(doc, res, "capabilities", caps);
 
@@ -503,7 +717,8 @@ static void handle_completion(yyjson_val *req) {
         return;
     }
 
-    const char *text = req_document_text(params);
+    const char *uri = req_document_uri(params);
+    const char *text = resolve_text(params, uri); /* 优先取缓冲 */
     int line = req_position_line(params);
     int character = req_position_character(params);
 
@@ -521,12 +736,50 @@ static void handle_completion(yyjson_val *req) {
     switch (mode) {
         case MODE_COMMAND: handle_command(doc, items, token); break;
         case MODE_DETAIL:  handle_detail(doc, items, token);  break;
-        default:           handle_normal(doc, items, text, token); break;
+        default:           handle_normal(doc, items, text, uri, token); break;
     }
 
     yyjson_mut_obj_add_val(doc, res, "isIncomplete", yyjson_mut_false(doc));
     yyjson_mut_obj_add_val(doc, res, "items", items);
     yyjson_mut_obj_add_val(doc, root, "result", res);
+    send_doc(doc);
+}
+
+/* ============ documentSymbol：返回文档符号列表（带范围） ============ */
+static void handle_document_symbol(yyjson_val *req) {
+    yyjson_val *params = yyjson_obj_get(req, "params");
+    const char *uri = req_document_uri(params);
+    const char *text = req_document_text(params);
+
+    VusSymbol syms[VUS_LSP_MAX_SYMS];
+    int ns = 0;
+    collect_symbols(text, uri, syms, &ns, VUS_LSP_MAX_SYMS);
+
+    yyjson_mut_doc *doc = new_response_doc(req);
+    yyjson_mut_val *root = yyjson_mut_doc_get_root(doc);
+    yyjson_mut_val *arr = yyjson_mut_arr(doc);
+
+    for (int i = 0; i < ns; i++) {
+        yyjson_mut_val *it = yyjson_mut_obj(doc);
+        obj_add_str(doc, it, "name", syms[i].name);
+        /* LSP SymbolKind：函数=12、变量=13 */
+        yyjson_mut_obj_add_int(doc, it, "kind",
+                               syms[i].kind == VUS_SYM_FUNCTION ? 12 : 13);
+
+        yyjson_mut_val *rg = yyjson_mut_obj(doc);
+        yyjson_mut_val *st = yyjson_mut_obj(doc);
+        yyjson_mut_val *en = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_int(doc, st, "line", syms[i].line);
+        yyjson_mut_obj_add_int(doc, st, "character", syms[i].column);
+        yyjson_mut_obj_add_int(doc, en, "line", syms[i].end_line);
+        yyjson_mut_obj_add_int(doc, en, "character", syms[i].end_column);
+        yyjson_mut_obj_add_val(doc, rg, "start", st);
+        yyjson_mut_obj_add_val(doc, rg, "end", en);
+        yyjson_mut_obj_add_val(doc, it, "range", rg);
+        yyjson_mut_arr_append(arr, it);
+    }
+
+    yyjson_mut_obj_add_val(doc, root, "result", arr);
     send_doc(doc);
 }
 
@@ -556,7 +809,8 @@ static void handle_hover(yyjson_val *req) {
 
     yyjson_mut_val *result = yyjson_mut_null(doc);
     if (params) {
-        const char *text = req_document_text(params);
+        const char *uri = req_document_uri(params);
+        const char *text = resolve_text(params, uri);
         int line = req_position_line(params);
         int character = req_position_character(params);
 
@@ -575,15 +829,35 @@ static void handle_hover(yyjson_val *req) {
             token[len] = '\0';
         }
 
+        char md[1024];
         const VusBuiltin *b = vus_builtin_find(token);
         if (b) {
-            char md[1024];
             build_markdown(b, md, sizeof(md));
             result = yyjson_mut_obj(doc);
             yyjson_mut_val *content = yyjson_mut_obj(doc);
             obj_add_str(doc, content, "kind", "markdown");
             obj_add_str(doc, content, "value", md);
             yyjson_mut_obj_add_val(doc, result, "contents", content);
+        } else if (token[0]) {
+            /* 内置未命中：查文档符号表，函数命中时返回其签名（名称+类别） */
+            VusSymbol syms[VUS_LSP_MAX_SYMS];
+            int ns = 0;
+            collect_symbols(text, uri, syms, &ns, VUS_LSP_MAX_SYMS);
+            for (int i = 0; i < ns; i++) {
+                if (strcmp(syms[i].name, token) == 0) {
+                    snprintf(md, sizeof(md),
+                             "%s `%s`：用户定义的%s",
+                             syms[i].kind == VUS_SYM_FUNCTION ? "函数" : "变量",
+                             syms[i].name,
+                             syms[i].kind == VUS_SYM_FUNCTION ? "函数" : "变量");
+                    result = yyjson_mut_obj(doc);
+                    yyjson_mut_val *content = yyjson_mut_obj(doc);
+                    obj_add_str(doc, content, "kind", "markdown");
+                    obj_add_str(doc, content, "value", md);
+                    yyjson_mut_obj_add_val(doc, result, "contents", content);
+                    break;
+                }
+            }
         }
     }
 
@@ -602,6 +876,8 @@ static void process_request(yyjson_val *req) {
         handle_initialize(req);
     } else if (strcmp(method, "textDocument/completion") == 0) {
         handle_completion(req);
+    } else if (strcmp(method, "textDocument/documentSymbol") == 0) {
+        handle_document_symbol(req);
     } else if (strcmp(method, "workspace/executeCommand") == 0) {
         handle_execute_command(req);
     } else if (strcmp(method, "textDocument/hover") == 0) {
@@ -616,9 +892,33 @@ static void process_request(yyjson_val *req) {
         g_exit = 1; /* 通知：无响应 */
     } else if (strcmp(method, "textDocument/didOpen") == 0 ||
                strcmp(method, "textDocument/didChange") == 0 ||
-               strcmp(method, "textDocument/didClose") == 0 ||
                strcmp(method, "textDocument/didSave") == 0) {
-        /* 文档同步通知：当前实现无需维护缓冲，忽略即可 */
+        /* 文档同步通知：维护 uri 缓冲，供补全 / documentSymbol 取文本 */
+        yyjson_val *params = yyjson_obj_get(req, "params");
+        const char *uri = req_document_uri(params);
+        if (!uri) return;
+        if (strcmp(method, "textDocument/didChange") == 0) {
+            /* 全量替换：取 contentChanges[0].text（改动总是全量时最稳）；
+               若该结果是增量（带 range 且无 text），暂不合并，保持原文档。 */
+            const char *text = NULL;
+            yyjson_val *cc = params ? yyjson_obj_get(params, "contentChanges") : NULL;
+            if (cc && yyjson_is_arr(cc)) {
+                for (size_t i = 0; i < (size_t)yyjson_arr_size(cc); i++) {
+                    yyjson_val *ch = yyjson_arr_get(cc, i);
+                    yyjson_val *tx = ch ? yyjson_obj_get(ch, "text") : NULL;
+                    if (tx && yyjson_is_str(tx)) { text = yyjson_get_str(tx); break; }
+                }
+            }
+            if (text) doc_update(uri, text);
+        } else {
+            /* didOpen / didSave：直接用请求内 textDocument.text 刷新 */
+            const char *text = req_document_text(params);
+            if (text) doc_update(uri, text);
+        }
+    } else if (strcmp(method, "textDocument/didClose") == 0) {
+        /* 关闭文档：释放缓冲 */
+        yyjson_val *params = yyjson_obj_get(req, "params");
+        doc_close(req_document_uri(params));
     } else if (strcmp(method, "$/cancelRequest") == 0) {
         /* 忽略取消请求 */
     } else {
