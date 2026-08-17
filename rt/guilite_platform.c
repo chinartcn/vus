@@ -21,6 +21,10 @@
 #include <X11/Xutil.h>
 #include <X11/Xft/Xft.h>
 
+#ifdef VUS_GUI_GLES
+#include "guilite_gles.h"
+#endif
+
 static Display* s_dpy = 0;
 static Window   s_win = 0;
 static GC       s_gc = 0;
@@ -62,6 +66,11 @@ static int ffs_pos(unsigned long mask)
     while (mask && !(mask & 1)) { mask >>= 1; pos++; }
     return pos;
 }
+
+#ifdef VUS_GUI_GLES
+/* 是否启用 EGL/GLES 上屏（init 成功后置位；一旦启用 redraw 走 GL，不再走 XImage） */
+static int s_gles = 0;
+#endif
 #endif
 
 /* 把 ARGB8888 帧缓冲导出为 PPM P6 图像（RGB 各 8bit） */
@@ -199,6 +208,17 @@ int vus_gui_platform_init(int width, int height, const char* title)
     }
     s_text_cnt = 0;
 
+#ifdef VUS_GUI_GLES
+    /* 尝试底层 GPU 上屏：EGL+GLES 上下文就绪后，redraw 走纹理上屏；
+     * 任何一步失败 vus_gles_init 返回 0，回退下方 XImage 软路径。 */
+    s_gles = vus_gles_init(s_dpy, s_win, width, height);
+    if (s_gles)
+    {
+        s_running = 1;
+        return 0; /* GL 路径定义上不需要 XImage */
+    }
+#endif
+
     /* 创建与显示匹配的 XImage；XCreateImage(data=NULL) 不会分配数据缓冲，
      * 需自行分配（32bpp 时 bytes_per_line = width*4，与 ARGB 帧缓冲布局一致）。 */
     s_img = XCreateImage(s_dpy, DefaultVisual(s_dpy, screen),
@@ -269,6 +289,37 @@ void vus_gui_platform_redraw(int width, int height, const unsigned int* fb)
             fb[(size_t)(width / 2) * (size_t)width + (size_t)(height / 2)]);
 
 #ifdef VUS_GUI_X11
+#ifdef VUS_GUI_GLES
+    if (s_gles)
+    {
+        /* 底层 GPU 上屏：帧缓冲以纹理形式交给 GL，GPU 完成颜色序与翻转。
+         * 文字随后仍在 X11 上层用 Xft 叠加（EGL 双缓冲下可能被交换，
+         * 属已知限制；后续可把文字合成进纹理彻底解决）。 */
+        vus_gles_redraw(width, height, fb);
+        for (int i = 0; i < s_text_cnt; i++)
+        {
+            XRenderColor rc;
+            rc.red   = (unsigned short)(((s_texts[i].color >> 16) & 0xFF) << 8);
+            rc.green = (unsigned short)(((s_texts[i].color >> 8)  & 0xFF) << 8);
+            rc.blue  = (unsigned short)((s_texts[i].color & 0xFF) << 8);
+            rc.alpha = 0xFFFF;
+            XftColor fc;
+            if (s_xftfont && s_xft && XftColorAllocValue(
+                    s_dpy, DefaultVisual(s_dpy, DefaultScreen(s_dpy)),
+                    DefaultColormap(s_dpy, DefaultScreen(s_dpy)), &rc, &fc))
+            {
+                XftDrawStringUtf8(s_xft, &fc, s_xftfont,
+                                  s_texts[i].x, s_texts[i].y + s_xftfont->ascent,
+                                  (const FcChar8*)s_texts[i].text,
+                                  (int)strlen(s_texts[i].text));
+                XftColorFree(s_dpy, DefaultVisual(s_dpy, DefaultScreen(s_dpy)),
+                             DefaultColormap(s_dpy, DefaultScreen(s_dpy)), &fc);
+            }
+        }
+        XFlush(s_dpy);
+        goto gles_done; /* 跳过下方 XImage 软路径与文字重放 */
+    }
+#endif
     if (!s_dpy || !s_img || !fb) { return; }
     /* 用 XPutPixel 逐像素写入 s_img->data：Xlib 会根据 XImage 的
      * byte_order / bit_order / 各颜色掩码自动换算像素值，从而适配
@@ -343,6 +394,11 @@ void vus_gui_platform_redraw(int width, int height, const unsigned int* fb)
         s_texts[i].text = 0;
     }
     s_text_cnt = 0;
+
+#ifdef VUS_GUI_GLES
+gles_done: ;
+    /* GL 路径跳转来的收尾（复用文字内存清理语义）。 */
+#endif
 #endif
 }
 

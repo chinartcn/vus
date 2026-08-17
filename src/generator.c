@@ -2350,8 +2350,15 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
            libvus_rt.a 已在 make 时以匹配的 PY/GUI flags 编译，故无需再拼 py_inc/gui 源。
            仅 GUI 用例需要追加 X11/Xft/-rdynamic/-ldl 与 -lstdc++（链接 .a 内的 C++ 包装）。 */
         if (g_uses_gui) {
+            /* VUS_GUI_GLES 运行时环境变量：额外链接 EGL/GLES，供 libvus_rt.a
+               内的 guilite_gles.o 解析其依赖（免去运行时 dlopen 硬编码）。
+               仅需判断环境变量：GLES 必然属于 X11 GUI 路径。 */
+            const char *gles_lib = " ";
+            if (getenv("VUS_GUI_GLES") && getenv("VUS_GUI_GLES")[0]) {
+                gles_lib = " -lEGL -lGLESv2";
+            }
             n = snprintf(cmd, sizeof(cmd),
-                "gcc %s -I\"%s\" %s \"%s\" %s \"%s\" -o \"%s\" -lm -lpthread -lstdc++ %s %s %s 2>&1",
+                "gcc %s -I\"%s\" %s \"%s\" %s \"%s\" -o \"%s\" -lm -lpthread -lstdc++ %s %s %s %s 2>&1",
                 opt_level,
                 abs_rt_dir,
                 xft_inc,
@@ -2361,7 +2368,8 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
                 output_path,
                 curl_lib,
                 gui_lib,
-                gui_def);
+                gui_def,
+                gles_lib);
         } else {
             n = snprintf(cmd, sizeof(cmd),
                 "gcc %s -I\"%s\" \"%s\" %s \"%s\" -o \"%s\" -lm -lpthread %s %s 2>&1",
