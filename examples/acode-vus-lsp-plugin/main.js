@@ -98,6 +98,9 @@ async function init() {
     }
   } catch (_) {}
 
+  // 屏幕级探针：插件被加载执行时必然弹出这条 toast（ACode 全局有 toast 函数）
+  try { if (typeof toast === "function") toast("VUS LSP 插件已加载"); } catch (_) {}
+
   console.log("[vus-lsp] 插件正在初始化 ...");
   const lsp = (() => { try { return acode.require("lsp"); } catch (_) { return null; } })();
   // 先注册语言模式，确保 .vus 能被识别，LSP 才会为其启动
