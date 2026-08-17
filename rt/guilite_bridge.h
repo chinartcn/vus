@@ -81,6 +81,52 @@ VusString* vus_gui_button_clicked(const char* name);
  * 返回 VusString*："1" 成功 / "0" 失败。 */
 VusString* vus_gui_sim_click(int x, int y);
 
+/* ============ 阶段3：控件库 ============
+ * 统一控件表：按钮/标签/文本框/复选框/进度条/列表/画布 共享命中检测。
+ * 文本绘制优先 X11（方向正常），失败回退 GuiLite 帧缓冲。 */
+
+/* 标签：绘制一行文本，登记为可命中控件（估宽矩形）。
+ * 返回 VusString*："1" 成功 / "0" 失败。 */
+VusString* vus_gui_label(const char* name, int x, int y, const char* text, unsigned int color);
+
+/* 文本框：白底 + 边框 + 文本，登记矩形。
+ * 返回 VusString*："1" 成功 / "0" 失败。 */
+VusString* vus_gui_textbox(const char* name, int x, int y, int w, int h, const char* text);
+
+/* 复选框：方格 + 勾选标记 + 文本。点击（未消费）切换勾选状态。
+ * 返回 VusString*：切换后状态 "true"/"false"，可作 如果 条件。 */
+VusString* vus_gui_checkbox(const char* name, int x, int y, const char* text, int checked);
+
+/* 进度条：填充底色 + 按 value(0-100) 画比例的进度 + 边框。
+ * 返回 VusString*："1" 成功 / "0" 失败。 */
+VusString* vus_gui_progress(const char* name, int x, int y, int w, int h, int value);
+
+/* 列表：声明列表区域（void），返回 "1" 成功。rows_h 为每行像素高。 */
+VusString* vus_gui_list(const char* name, int x, int y, int w, int h, int row_h);
+
+/* 列表行：在第 line 行（0 起）写入并绘制文本（选中行高亮）。
+ * 返回 VusString*："1" 成功 / "0" 失败（越界/未创建列表）。 */
+VusString* vus_gui_list_row(const char* name, int line, const char* text);
+
+/* 列表选中行：最近一次点击命中的行索引，未命中/无列表返回 "-1"。
+ * 返回 VusString*：整数字符串，脚本用 vus_to_int 或与数字比较。 */
+VusString* vus_gui_list_selected(const char* name);
+
+/* 列表行命中：最近一次点击是否落在 name 列表的第 line 行内。
+ * 返回 VusString*："true"/"false"。 */
+VusString* vus_gui_list_row_clicked(const char* name, int line);
+
+/* 画布：声明一个可命中区域，脚本自行在其内绘制。可选描边。
+ * 返回 VusString*："1" 成功 / "0" 失败。 */
+VusString* vus_gui_canvas(const char* name, int x, int y, int w, int h);
+
+/* 画布命中：最近一次点击是否落在 name 画布内（仅当相对坐标在范围内时）。
+ * 返回 VusString*："true" 命中 / "false" 未命中，可作 如果 条件。 */
+VusString* vus_gui_canvas_hit(const char* name);
+
+/* 画布相对坐标：最近一次画布命中的相对位置，返回 "x,y"；未命中返回 "-1,-1"。 */
+VusString* vus_gui_canvas_pos(const char* name);
+
 #ifdef __cplusplus
 }
 #endif

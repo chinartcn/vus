@@ -762,6 +762,169 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
             return strdup(result);
         }
     }
+
+    /* ===== 阶段3：控件库内建函数 =====
+     * 图形_标签/图形_文本框/图形_复选框/图形_进度/图形_列表/图形_列表行/
+     * 图形_列表选中/图形_列表行点击/图形_画布/图形_画布命中/图形_画布点 */
+    if (strcmp(call->func_name, "图形_标签") == 0) {
+        if (call->args && call->args->count >= 5) {
+            char *nm = gen_expr(buf, call->args->items[0]);
+            char *x  = gen_expr(buf, call->args->items[1]);
+            char *y  = gen_expr(buf, call->args->items[2]);
+            char *tx = gen_expr(buf, call->args->items[3]);
+            char *c  = gen_expr(buf, call->args->items[4]);
+            char result[2048];
+            snprintf(result, sizeof(result),
+                "vus_gui_label(vus_string_cstr(%s), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), vus_string_cstr(%s), (unsigned int)vus_to_int(%s, &_err))",
+                nm, x, y, tx, c);
+            free(nm); free(x); free(y); free(tx); free(c);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_文本框") == 0) {
+        if (call->args && call->args->count >= 6) {
+            char *nm = gen_expr(buf, call->args->items[0]);
+            char *x  = gen_expr(buf, call->args->items[1]);
+            char *y  = gen_expr(buf, call->args->items[2]);
+            char *wd = gen_expr(buf, call->args->items[3]);
+            char *ht = gen_expr(buf, call->args->items[4]);
+            char *tx = gen_expr(buf, call->args->items[5]);
+            char result[4096];
+            snprintf(result, sizeof(result),
+                "vus_gui_textbox(vus_string_cstr(%s), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), vus_string_cstr(%s))",
+                nm, x, y, wd, ht, tx);
+            free(nm); free(x); free(y); free(wd); free(ht); free(tx);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_复选框") == 0) {
+        if (call->args && call->args->count >= 5) {
+            char *nm = gen_expr(buf, call->args->items[0]);
+            char *x  = gen_expr(buf, call->args->items[1]);
+            char *y  = gen_expr(buf, call->args->items[2]);
+            char *tx = gen_expr(buf, call->args->items[3]);
+            char *ck = gen_expr(buf, call->args->items[4]);
+            char result[2048];
+            snprintf(result, sizeof(result),
+                "vus_gui_checkbox(vus_string_cstr(%s), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), vus_string_cstr(%s), (int)vus_to_int(%s, &_err))",
+                nm, x, y, tx, ck);
+            free(nm); free(x); free(y); free(tx); free(ck);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_进度") == 0) {
+        if (call->args && call->args->count >= 6) {
+            char *nm = gen_expr(buf, call->args->items[0]);
+            char *x  = gen_expr(buf, call->args->items[1]);
+            char *y  = gen_expr(buf, call->args->items[2]);
+            char *wd = gen_expr(buf, call->args->items[3]);
+            char *ht = gen_expr(buf, call->args->items[4]);
+            char *vl = gen_expr(buf, call->args->items[5]);
+            char result[4096];
+            snprintf(result, sizeof(result),
+                "vus_gui_progress(vus_string_cstr(%s), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err))",
+                nm, x, y, wd, ht, vl);
+            free(nm); free(x); free(y); free(wd); free(ht); free(vl);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_列表") == 0) {
+        if (call->args && call->args->count >= 6) {
+            char *nm = gen_expr(buf, call->args->items[0]);
+            char *x  = gen_expr(buf, call->args->items[1]);
+            char *y  = gen_expr(buf, call->args->items[2]);
+            char *wd = gen_expr(buf, call->args->items[3]);
+            char *ht = gen_expr(buf, call->args->items[4]);
+            char *rh = gen_expr(buf, call->args->items[5]);
+            char result[4096];
+            snprintf(result, sizeof(result),
+                "vus_gui_list(vus_string_cstr(%s), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err))",
+                nm, x, y, wd, ht, rh);
+            free(nm); free(x); free(y); free(wd); free(ht); free(rh);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_列表行") == 0) {
+        if (call->args && call->args->count >= 3) {
+            char *nm   = gen_expr(buf, call->args->items[0]);
+            char *line = gen_expr(buf, call->args->items[1]);
+            char *tx   = gen_expr(buf, call->args->items[2]);
+            char result[2048];
+            snprintf(result, sizeof(result),
+                "vus_gui_list_row(vus_string_cstr(%s), (int)vus_to_int(%s, &_err), vus_string_cstr(%s))",
+                nm, line, tx);
+            free(nm); free(line); free(tx);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_列表选中") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *nm = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result),
+                "vus_gui_list_selected(vus_string_cstr(%s))", nm);
+            free(nm);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_列表行点击") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *nm   = gen_expr(buf, call->args->items[0]);
+            char *line = gen_expr(buf, call->args->items[1]);
+            char result[1024];
+            snprintf(result, sizeof(result),
+                "vus_gui_list_row_clicked(vus_string_cstr(%s), (int)vus_to_int(%s, &_err))",
+                nm, line);
+            free(nm); free(line);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_画布") == 0) {
+        if (call->args && call->args->count >= 5) {
+            char *nm = gen_expr(buf, call->args->items[0]);
+            char *x  = gen_expr(buf, call->args->items[1]);
+            char *y  = gen_expr(buf, call->args->items[2]);
+            char *wd = gen_expr(buf, call->args->items[3]);
+            char *ht = gen_expr(buf, call->args->items[4]);
+            char result[2048];
+            snprintf(result, sizeof(result),
+                "vus_gui_canvas(vus_string_cstr(%s), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err))",
+                nm, x, y, wd, ht);
+            free(nm); free(x); free(y); free(wd); free(ht);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_画布命中") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *nm = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result),
+                "vus_gui_canvas_hit(vus_string_cstr(%s))", nm);
+            free(nm);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_画布点") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *nm = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result),
+                "vus_gui_canvas_pos(vus_string_cstr(%s))", nm);
+            free(nm);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
     if (strcmp(call->func_name, "tui_清屏") == 0) {
         return strdup("vus_plugin_tui_clear(NULL)");
     }
