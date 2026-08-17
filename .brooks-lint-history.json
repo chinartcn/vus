@@ -9,5 +9,16 @@
       "suggestion": 2
     },
     "scope": "未暂存改动（采样审查，VUS 插件进程内集成）"
+  },
+  {
+    "date": "2026-08-17",
+    "mode": "PR Review",
+    "score": 99,
+    "findings": {
+      "critical": 0,
+      "warning": 0,
+      "suggestion": 1
+    },
+    "scope": "acode-vus-lsp-plugin/main.js（重构后：常量收敛 + 函数拆分 + 可观测日志）"
   }
 ]
