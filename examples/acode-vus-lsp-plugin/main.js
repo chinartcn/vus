@@ -5,16 +5,42 @@
  * 这是 ACode 官方规定的入口（而非 module.exports）。
  *
  * - acode.require("lsp").defineServer() + upsert()
- *   注册 VUS 语言服务器；ACode 经 AXS bridge 自动拉起 `vus lsp`。
+ *   注册 VUS 语言服务器；ACode 经 AXS bridge 代理为 WebSocket 并自动拉起 `vus lsp`。
  * - acode.require("editorLanguages").register()
- *   把 .vus 映射为 languageId "vus"，LSP 客户端按此路由服务器。
+ *   把 .vus 映射为 languageId "vus"，LSP 客户端按此语言路由服务器。
  * - vus 二进制随插件打包（bin/<abi>/vus），按设备 ABI 选用。
+ *
+ * 本文件刻意保持单文件、零依赖，便于 ACode 直接加载。
  */
 import plugin from "./plugin.json";
 
+/* ============ 领域常量（集中声明，避免散落硬编码） ============ */
+
+/** CodeMirror/LSP 内部语言 id 与展示名 */
+const LANGUAGE_ID = "vus";
+const LANGUAGE_EXTENSIONS = ["vus"];
+const LANGUAGE_CAPTION = "VUS";
+
+/** LSP 服务器标识 */
+const SERVER_ID = "vus-lsp";
+const SERVER_LABEL = "VUS";
+
+/** 启动 vus 二进制时附加的子命令 */
+const LSP_SUBCOMMAND = "lsp";
+
+/** 插件内的二进制架构目录名 */
+const ABI_ARM64 = "arm64-v8a";
+const ABI_ARM32 = "armeabi-v7a";
+
+/** 二进制在插件内的路径：<base>/<BIN_DIR>/<abi>/<BIN_NAME> */
+const BIN_DIR = "bin";
+const BIN_NAME = "vus";
+
+/* 全局：服务器是否已成功注册，避免重复注册 */
 let serversRegistered = false;
 
-/** ABI 探测：arm64-v8a / armeabi-v7a / null */
+/* ============ ABI 探测：arm64-v8a / armeabi-v7a / null ============ */
+
 function detectAbi() {
   try {
     const ua = String(navigator.userAgent || "").toLowerCase();
@@ -23,129 +49,146 @@ function detectAbi() {
         return typeof device !== "undefined" && device.cpu
           ? String(device.cpu).toLowerCase()
           : "";
-      } catch (_) {
+      } catch (err) {
+        console.warn("[vus-lsp] 读取 device.cpu 失败", err);
         return "";
       }
     })();
     const blob = ua + " " + cpu;
-    if (blob.includes("arm64") || blob.includes("aarch64")) return "arm64-v8a";
-    if (
-      blob.includes("armeabi-v7a") ||
-      blob.includes("armv7") ||
-      blob.includes("armeabi")
-    )
-      return "armeabi-v7a";
-  } catch (_) {}
+    if (blob.includes("arm64") || blob.includes("aarch64")) return ABI_ARM64;
+    if (blob.includes("armeabi-v7a") || blob.includes("armv7") || blob.includes("armeabi"))
+      return ABI_ARM32;
+  } catch (err) {
+    console.warn("[vus-lsp] ABI 探测异常", err);
+  }
   return null;
 }
 
 /** file://baseUrl -> 绝对目录（去掉协议与末尾斜杠） */
 function resolveDir(baseUrl) {
   let u = String(baseUrl || "");
-  if (u.startsWith("file://")) u = u.slice(7);
+  if (u.startsWith("file://")) u = u.slice("file://".length);
   return u.replace(/\/+$/, "");
+}
+
+/** 插件内二进制目录：<base>/<BIN_DIR>/<abi>/<BIN_NAME> */
+function binaryPath(base, abi) {
+  return base + "/" + BIN_DIR + "/" + abi + "/" + BIN_NAME;
 }
 
 /** 从插件安装目录定位 vus 二进制绝对路径 */
 function locateBinary(base, abi) {
-  const fallbackAbi = abi || "arm64-v8a";
-  // 优先精确 ABI；若目录里只有单架构，逐级向上回退
+  const fallbackAbi = abi || ABI_ARM64;
+  // 优先精确 ABI；若目录里只有单架构，逐级回退
   const candidates = [fallbackAbi];
-  if (!candidates.includes("arm64-v8a")) candidates.push("arm64-v8a");
-  if (!candidates.includes("armeabi-v7a")) candidates.push("armeabi-v7a");
+  if (!candidates.includes(ABI_ARM64)) candidates.push(ABI_ARM64);
+  if (!candidates.includes(ABI_ARM32)) candidates.push(ABI_ARM32);
+
   for (const a of candidates) {
-    const p = base + "/bin/" + a + "/vus";
-    // 尽力校验存在；存在则选用，不存在则继续试下一个候选
+    const p = binaryPath(base, a);
     try {
       const fs = acode.require("fs");
       if (fs && typeof fs.isFile === "function") {
         if (fs.isFile(p)) return p;
-        continue; // 明确存在性校验能力，此路径不存在则换 ABI
+        // 明确有判断能力但不存在，换下个 ABI 候选
+        continue;
       }
-    } catch (_) {}
-    // fs API 不可用时，无校验能力，直接选用最优先候选
+    } catch (err) {
+      console.warn("[vus-lsp] fs.isFile 不可用，采用首个候选", p, err);
+    }
+    // fs 不可用时无校验能力，直接采用当前候选
     return p;
   }
-  return base + "/bin/" + fallbackAbi + "/vus";
+  return binaryPath(base, fallbackAbi);
 }
 
-/** 延迟到编辑器就绪后再执行注册（LSP API 依赖码镜编辑器初始化） */
+/* ============ 语言注册：把 .vus 映射为 languageId "vus" ============ */
+
+function registerVusLanguage() {
+  const editorLanguages = acode.require("editorLanguages");
+  if (!editorLanguages || typeof editorLanguages.register !== "function") {
+    throw new Error("editorLanguages 模块不可用");
+  }
+  editorLanguages.register(
+    LANGUAGE_ID,
+    LANGUAGE_EXTENSIONS,
+    LANGUAGE_CAPTION,
+    async () => [] // 高亮可选；返回空扩展以保证加载成功
+  );
+  console.log("[vus-lsp] 已注册 .vus 语言 (languageId=" + LANGUAGE_ID + ")");
+}
+
+/* ============ 服务器注册：defineServer + upsert ============ */
+
+function registerVusServer(base, abi) {
+  const lsp = acode.require("lsp");
+  if (!lsp || typeof lsp.defineServer !== "function") {
+    throw new Error("当前 ACode 无 defineServer API，请升级至最新版（≥ v1002）");
+  }
+  const bin = locateBinary(base, abi);
+  const server = lsp.defineServer({
+    id: SERVER_ID,
+    label: SERVER_LABEL,
+    languages: [LANGUAGE_ID],
+    useWorkspaceFolders: true,
+    command: bin,
+    args: [LSP_SUBCOMMAND],
+    checkCommand: "test -x '" + bin + "'",
+    initializationOptions: { provideFormatter: false },
+  });
+  lsp.upsert(server);
+  serversRegistered = true;
+  console.log("[vus-lsp] 服务器已注册 command=" + bin + " " + LSP_SUBCOMMAND);
+}
+
+/** 延迟到编辑器就绪后执行注册（LSP API 依赖码镜编辑器初始化） */
 function registerVus() {
   if (serversRegistered) return;
   const abi = detectAbi();
   const base = resolveDir(this?.baseUrl || "");
 
-  // 1) 注册 .vus 语言 -> languageId "vus"
+  // 语言注册失败也不阻断服务器注册，但给出明确日志
   try {
-    const editorLanguages = acode.require("editorLanguages");
-    if (editorLanguages && typeof editorLanguages.register === "function") {
-      editorLanguages.register(
-        "vus",
-        ["vus"],
-        "VUS",
-        async () => [] // 高亮可选；返回空扩展以保证加载成功
-      );
-      console.log("[vus-lsp] 已注册 .vus 语言");
-    }
-  } catch (e) {
-    console.error("[vus-lsp] 语言注册失败", e);
+    registerVusLanguage();
+  } catch (err) {
+    console.error("[vus-lsp] 语言注册失败：", err);
   }
 
-  // 2) 注册语言服务器（官方 defineServer + upsert）
+  // 服务器注册失败需要保留重试机会（不置 serversRegistered）
   try {
-    const lsp = acode.require("lsp");
-    if (!lsp || typeof lsp.defineServer !== "function") {
-      console.error("[vus-lsp] 当前 ACode 无 defineServer API，请升级至最新版");
-      return;
-    }
-    const bin = locateBinary(base, abi);
-    const server = lsp.defineServer({
-      id: "vus-lsp",
-      label: "VUS",
-      languages: ["vus"],
-      useWorkspaceFolders: true,
-      command: bin,
-      args: ["lsp"],
-      checkCommand: "test -x '" + bin + "'",
-      initializationOptions: { provideFormatter: false },
-    });
-    lsp.upsert(server);
-    serversRegistered = true;
-    console.log("[vus-lsp] 服务器已注册 command=" + bin + " lsp");
-  } catch (e) {
-    console.error("[vus-lsp] 服务器注册失败", e);
+    registerVusServer(base, abi);
+  } catch (err) {
+    console.error("[vus-lsp] 服务器注册失败：", err);
   }
 }
 
-// —— ACode 官方入口：setPluginInit ——
-acode.setPluginInit(plugin.id, (baseUrl, $page, cache) => {
-  // 保存 baseUrl 供注册使用
-  try {
-    plugin.__baseUrl = baseUrl;
-    // init 接收的第一个参数就是 baseUrl；用一个可复用作用域绑定
-  } catch (_) {}
+/* ============ ACode 官方入口 ============ */
 
-  // ：LSP API 需要编辑器可用，最常见做法是延迟到文档打开后注册。
-  // 这里先做一次尝试，失败无副作用。
-  registerVus.call({ baseUrl });
-
-  // 监听活动文件切换，确保 .vus 文档语言正确并再次触发注册
+function init(baseUrl) {
   try {
     const editorManager = acode.require("editorManager");
     if (editorManager && typeof editorManager.on === "function") {
-      editorManager.on("activeFileChange", () => {
-        registerVus.call({ baseUrl });
-      });
+      // 编辑器就绪后再注册；activeFileChange 触发时 baseUrl 已可用
+      editorManager.on("activeFileChange", () => registerVus.call({ baseUrl }));
     }
-  } catch (_) {}
-});
+  } catch (err) {
+    console.warn("[vus-lsp] 监听 activeFileChange 失败：", err);
+  }
+  // 先尝试一次，失败无副作用（activeFileChange 会重试直到就绪）
+  registerVus.call({ baseUrl });
+}
 
-acode.setPluginUnmount(plugin.id, () => {
+function unmount() {
   serversRegistered = false;
   try {
     const lsp = acode.require("lsp");
     if (lsp && typeof lsp.servers?.unregister === "function") {
-      lsp.servers.unregister("vus-lsp");
+      lsp.servers.unregister(SERVER_ID);
     }
-  } catch (_) {}
-});
+  } catch (err) {
+    console.warn("[vus-lsp] 卸载时注销服务器失败：", err);
+  }
+}
+
+acode.setPluginInit(plugin.id, init);
+acode.setPluginUnmount(plugin.id, unmount);

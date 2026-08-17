@@ -8,5 +8,6 @@
   "license": "MIT",
   "minVersionCode": 1002,
   "readme": "README.md",
+  "icon": "icon.png",
   "files": ["bin/arm64-v8a/vus", "bin/armeabi-v7a/vus"]
 }
