@@ -95,15 +95,20 @@ release/android/armeabi-v7a/vus: ELF 32-bit LSB pie executable, ARM, EABI5, ... 
 
 ## 4. ACode 插件
 
-仓库已提供最小可用插件：`examples/acode-vus-lsp-plugin/`（`plugin.json` + `main.js`）。核心注册代码如下：
+仓库已提供完整可用插件：`examples/acode-vus-lsp-plugin/`（`plugin.json` + `main.js`）。补全能弹出依赖两件事：**注册语言模式**（把 `.vus` 关联到 `vus` languageId，LSP 才能按语言路由）与**注册服务器**。核心代码如下：
 
 ```js
 const lsp = acode.require("lsp");
+const editorLanguages = acode.require("editorLanguages");
 
+// 1) 注册语言模式：把 .vus 映射到 languageId "vus"（补全前提）
+editorLanguages.register("vus", ["vus"], "VUS", () => Promise.resolve([]));
+
+// 2) 注册服务器：以 `vus lsp` 启动
 const server = lsp.defineServer({
   id: "vus-lsp",
   label: "VUS",
-  languages: ["vus"],                 // .vus 文件需在 ACode 中识别为 vus 语言
+  languages: ["vus"],                 // .vus 经上一步被识别为 vus 语言
   useWorkspaceFolders: true,
   command: "vus",                     // 或绝对路径
   args: ["lsp"],
@@ -143,7 +148,7 @@ zip -r /tmp/vus-lsp.zip plugin.json main.js
 3. 若补全无响应，检查：
    - 设备 ABI 是否与二进制匹配（`uname -m`）。
    - `vus lsp` 是否能启动（日志/终端可看到 `[vus-lsp]` 打印）。
-   - **语言识别**：ACode 须把 `.vus` 识别为 `vus` 语言才会路由 LSP。若列表中无 `vus` 模式，可先注册一个最小 CodeMirror mode（或在插件内扩展语言模式），或将 `languages` 调整为实际识别到的语言 id。
+   - **语言识别**：插件 `init()` 已调用 `editorLanguages.register("vus", ["vus"], ...)` 自动把 `.vus` 注册为 `vus` 语言，通常无需手动处理。若仍无响应，确认插件版本已含 `registerLanguage()`（见 `main.js`），並检查日志是否有 `[vus-lsp] 已注册 .vus 语言模式` 打印。
 
 ---
 
