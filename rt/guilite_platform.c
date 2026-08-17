@@ -34,6 +34,7 @@ static int      s_running = 0;
  * 被帧缓冲覆盖。两者都不可用时返回 0，由桥接层回退到 GuiLite 帧缓冲。 */
 static XftDraw*   s_xft = 0;
 static XftFont*   s_xftfont = 0;
+static XftFont*   s_fallback_font = 0;
 static XFontStruct* s_xfont = 0;
 #define VUS_TEXT_MAX 256
 typedef struct { int x; int y; unsigned long color; char* text; } VUS_XText;
@@ -140,12 +141,38 @@ int vus_gui_platform_init(int width, int height, const char* title)
                           DefaultColormap(s_dpy, screen_for_font));
     if (s_xft)
     {
-        /* FontConfig pattern："sans" 按环境字体配置解析，通常包含系统已装的
-         * CJK 字体（如 Noto CJK / WQY）；-16 指定像素尺寸（对齐 6x13 字号）。
-         * 用按下标的方式从左到右匹配，优先选中文字体。 */
-        s_xftfont = XftFontOpenName(s_dpy, screen_for_font, "sans-16");
-        if (!s_xftfont) { s_xftfont = XftFontOpenName(s_dpy, screen_for_font, "sans"); }
-        if (!s_xftfont) { s_xftfont = XftFontOpenName(s_dpy, screen_for_font, "monospace-16"); }
+        /* FontConfig pattern 候选队列：
+         *  - 前置显式 CJK 字体族（Noto CJK / WenQuanYi 等常见名称），XftFontOpenName
+         *    按族名精确匹配，命中即含中文字形。
+         *  - "sans"/"monospace" 是通用族名，fontconfig 通常命中 DejaVu Sans，
+         *    其不含 CJK 字形且 Xft 单字体不做跨文件回退，故仅作兜底。
+         *  逐个尝试，加载成功且含中文字形(U+4E2D)者即采用。 */
+        const char* candidates[] = {
+            "Noto Sans CJK SC-16",
+            "Noto Sans CJK-16",
+            "Noto Sans SC-16",
+            "WenQuanYi Zen Hei-16",
+            "Noto Sans CJK TC-16",
+            "Noto Sans CJK JP-16",
+            "sans-16",
+            "sans",
+            "monospace-16",
+        };
+        const int cand_cnt = (int)(sizeof(candidates) / sizeof(candidates[0]));
+        FcChar32 codepoint = 0x4E2D; /* "中" */
+        for (int i = 0; i < cand_cnt && !s_xftfont; i++)
+        {
+            XftFont* f = XftFontOpenName(s_dpy, screen_for_font, candidates[i]);
+            if (f && f->charset && FcCharSetHasChar(f->charset, codepoint))
+            {
+                s_xftfont = f;   /* 含中文，采用 */
+                break;
+            }
+            /* 该候选缺中文字形：仍保留第一个能加载的供 ASCII 兜底，继续找中文款 */
+            if (f && !s_fallback_font) { s_fallback_font = f; }
+            else if (f) { XftFontClose(s_dpy, f); }
+        }
+        if (!s_xftfont) { s_xftfont = s_fallback_font; s_fallback_font = 0; }
     }
     if (!s_xftfont)
     {
@@ -392,6 +419,11 @@ void vus_gui_platform_run(int width, int height, const unsigned int* fb)
     {
         XftFontClose(s_dpy, s_xftfont);
         s_xftfont = 0;
+    }
+    if (s_fallback_font)
+    {
+        XftFontClose(s_dpy, s_fallback_font);
+        s_fallback_font = 0;
     }
     if (s_xft)
     {
