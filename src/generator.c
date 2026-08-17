@@ -932,6 +932,26 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
             return strdup(result);
         }
     }
+    if (strcmp(call->func_name, "JSON_查询") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *json = gen_expr(buf, call->args->items[0]);
+            /* 路径按字符串字面量/表达式传递 */
+            char *p = gen_expr(buf, call->args->items[1]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_json_query(%s, %s)", json, p);
+            free(json); free(p);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "字典_键") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *arg = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_dict_keys_of(%s)", arg);
+            free(arg);
+            return strdup(result);
+        }
+    }
     if (strcmp(call->func_name, "typeof") == 0 || strcmp(call->func_name, "类型") == 0) {
         if (call->args && call->args->count >= 1) {
             char *arg = gen_expr(buf, call->args->items[0]);
@@ -2052,6 +2072,17 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
     char cmd[8192];
     int n;
 
+    /* 优先使用预编译静态库（make 产物 build/libvus_rt.a），用户代码仅编译链接，
+       避免每次运行都重编整个运行时（含 yyjson/EasyLogger/GuiLite），大幅提速。
+       仅当静态库存在时启用；否则回退到旧的全源码编译路径。 */
+    char static_rt_lib[2048];
+    int use_static_rt = 0;
+    snprintf(static_rt_lib, sizeof(static_rt_lib), "%s/../build/libvus_rt.a", abs_rt_dir);
+    if (config->rt_dir[0]) {
+        FILE *lib_check = fopen(static_rt_lib, "r");
+        if (lib_check) { use_static_rt = 1; fclose(lib_check); }
+    }
+
     /* 检测系统是否安装了 libcurl 开发头文件 */
     int has_curl = 0;
     FILE *curl_check = popen("curl-config --version >/dev/null 2>&1", "r");
@@ -2151,7 +2182,36 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
         }
     }
 
-    if (extra_objects && extra_objects[0]) {
+    if (use_static_rt) {
+        /* ---- 静态库路径（推荐）：仅编译用户 C，运行时从 build/libvus_rt.a 链接 ----
+           libvus_rt.a 已在 make 时以匹配的 PY/GUI flags 编译，故无需再拼 py_inc/gui 源。
+           仅 GUI 用例需要追加 X11/Xft/-rdynamic/-ldl 与 -lstdc++（链接 .a 内的 C++ 包装）。 */
+        if (g_uses_gui) {
+            n = snprintf(cmd, sizeof(cmd),
+                "gcc %s -I\"%s\" %s \"%s\" %s \"%s\" -o \"%s\" -lm -lpthread -lstdc++ %s %s %s 2>&1",
+                opt_level,
+                abs_rt_dir,
+                xft_inc,
+                c_source_path,
+                extra_objects && extra_objects[0] ? extra_objects : "",
+                static_rt_lib,
+                output_path,
+                curl_lib,
+                gui_lib,
+                gui_def);
+        } else {
+            n = snprintf(cmd, sizeof(cmd),
+                "gcc %s -I\"%s\" \"%s\" %s \"%s\" -o \"%s\" -lm -lpthread %s %s 2>&1",
+                opt_level,
+                abs_rt_dir,
+                c_source_path,
+                extra_objects && extra_objects[0] ? extra_objects : "",
+                static_rt_lib,
+                output_path,
+                curl_lib,
+                gui_lib);
+        }
+    } else if (extra_objects && extra_objects[0]) {
         n = snprintf(cmd, sizeof(cmd),
             "gcc %s -g %s %s %s -I\"%s\" %s %s \"%s\" \"%s\" \"%s\" %s %s %s -o \"%s\" -lm -lpthread %s %s -lstdc++ %s %s 2>&1",
             opt_level,

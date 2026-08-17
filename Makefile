@@ -37,6 +37,11 @@ RT_OBJ   = $(BUILD_DIR)/libvus_rt.o
 RT_CORO_OBJ = $(BUILD_DIR)/vus_coro.o
 RT_LIB   = $(BUILD_DIR)/libvus_rt.a
 
+# yyjson 单头/源：纯 C JSON 解析/生成（并入运行时静态库）
+YYJSON_SRC = $(RT_DIR)/yyjson/yyjson.c
+YYJSON_OBJ = $(BUILD_DIR)/yyjson.o
+YYJSON_INC = -I$(RT_DIR)
+
 # EasyLogger 日志库（VUS 静态集成）
 EL_DIR = $(RT_DIR)/easylogger
 EL_SRC = $(EL_DIR)/src/elog.c $(EL_DIR)/src/elog_utils.c $(RT_DIR)/elog_port.c
@@ -155,8 +160,12 @@ $(BUILD_DIR)/guilite_platform.o: $(RT_DIR)/guilite_platform.c $(RT_DIR)/guilite_
 $(BUILD_DIR)/guilite_wrapper.o: $(RT_DIR)/guilite_wrapper.cpp $(GUI_DIR)/GuiLite.h | $(BUILD_DIR)
 	$(CXX) -Wall -Wextra -g -O2 $(GUI_INC) -c -o $@ $<
 
-# 运行时库静态归档（含 vus_coro.o、easylogger elog.o 与 GuiLite 图形库）
-$(RT_LIB): $(RT_OBJ) $(RT_CORO_OBJ) $(EL_OBJ) $(GUI_OBJ)
+# 编译 yyjson 单文件 JSON 库（纯 C，并入运行时静态库）
+$(YYJSON_OBJ): $(YYJSON_SRC) | $(BUILD_DIR)
+	$(CC) -Wall -Wextra -O2 -std=c11 $(YYJSON_INC) -c -o $@ $<
+
+# 运行时库静态归档（含 vus_coro.o、yyjson、easylogger elog.o 与 GuiLite 图形库）
+$(RT_LIB): $(RT_OBJ) $(RT_CORO_OBJ) $(YYJSON_OBJ) $(EL_OBJ) $(GUI_OBJ)
 	ar rcs $@ $^
 
 # =============================================================================

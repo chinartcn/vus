@@ -6,6 +6,9 @@
 
 #include <elog.h>
 
+/* yyjson：纯 C JSON 解析/生成库（rt/yyjson/，MIT 许可） */
+#include "yyjson/yyjson.h"
+
 // ============ 引用计数通用操作 ============
 
 void vus_ref(void* obj) {
@@ -263,6 +266,30 @@ int vus_dict_len(VusDict* dict) {
     if (!dict) return 0;
     struct DictImpl* impl = (struct DictImpl*)dict->impl;
     return impl->count;
+}
+
+/* 返回字典所有键（VusString*）构成的列表，元素为键副本，调用方负责 vus_unref。 */
+VusList* vus_dict_keys(VusDict* dict) {
+    VusList* keys = vus_list_new(TYPE_STR);
+    if (!dict) return keys;
+    struct DictImpl* impl = (struct DictImpl*)dict->impl;
+    for (int i = 0; i < impl->size; i++) {
+        DictEntry* entry = impl->buckets[i];
+        while (entry) {
+            vus_list_append(keys, vus_string_new_len(entry->key->data, entry->key->len));
+            entry = entry->next;
+        }
+    }
+    return keys;
+}
+
+/* 取结构化字典的键列表。脚本中字典均为 VusObject*（TYPE_DICT），
+ * 直接传裸 VusDict* 不被接受（防误用）。 */
+VusList* vus_dict_keys_of(void* obj) {
+    if (!obj || !vus_is_object(obj)) return vus_list_new(TYPE_STR);
+    VusObject* o = (VusObject*)obj;
+    if (o->type == TYPE_DICT && o->u.dict) return vus_dict_keys(o->u.dict);
+    return vus_list_new(TYPE_STR);
 }
 
 // ============ 闭包 ============
@@ -929,6 +956,201 @@ VusString* vus_plugin_run_vux(VusString* plugin, VusString* cmd) {
 }
 
 /* =====================================================================
+ * JSON 解析 / 生成 / 查询（基于 yyjson 纯 C 库，不依赖 Python）
+ * ---------------------------------------------------------------------
+ * 标量与容器约定与插件结构化数据一致：
+ *   标量（字符串/数字/布尔/空）-> TYPE_STR 的 VusObject，值存字符串；
+ *   对象/数组 -> TYPE_DICT / TYPE_LIST 容器。
+ * ===================================================================== */
+
+static VusObject* vus_json_scalar_wrap(VusString* s) {
+    VusObject* o = (VusObject*)calloc(1, sizeof(VusObject));
+    if (!o) return NULL;
+    o->ref = 1;
+    o->magic = VUS_OBJECT_MAGIC;
+    o->type = TYPE_STR;
+    o->u.str = s;
+    return o;
+}
+
+static VusString* vus_json_number_to_string(double d) {
+    char buf[64];
+    if (d == (double)(long long)d) {
+        snprintf(buf, sizeof(buf), "%lld", (long long)d);
+    } else {
+        snprintf(buf, sizeof(buf), "%.17g", d);
+    }
+    return vus_string_new(buf);
+}
+
+/* JSON 值 -> VusObject（标量转字符串；对象/数组转容器） */
+static VusObject* vus_json_val_to_object(yyjson_val* val) {
+    if (!val || yyjson_is_null(val)) {
+        return vus_json_scalar_wrap(vus_string_new(""));
+    }
+    if (yyjson_is_str(val)) {
+        return vus_json_scalar_wrap(vus_string_new(yyjson_get_str(val)));
+    }
+    if (yyjson_is_int(val)) {
+        return vus_json_scalar_wrap(vus_json_number_to_string((double)yyjson_get_sint(val)));
+    }
+    if (yyjson_is_real(val)) {
+        return vus_json_scalar_wrap(vus_json_number_to_string(yyjson_get_real(val)));
+    }
+    if (yyjson_is_bool(val)) {
+        return vus_json_scalar_wrap(vus_string_new(yyjson_get_bool(val) ? "真" : "假"));
+    }
+    if (yyjson_is_obj(val)) {
+        VusDict* dict = vus_dict_new();
+        yyjson_obj_iter iter;
+        yyjson_obj_iter_init(val, &iter);
+        yyjson_val* key;
+        while ((key = yyjson_obj_iter_next(&iter))) {
+            yyjson_val* v = yyjson_obj_iter_get_val(key);
+            VusObject* sub = vus_json_val_to_object(v);
+            const char* ks = yyjson_get_str(key);
+            VusString* k = vus_string_new(ks);
+            if (sub) {
+                if (sub->type == TYPE_LIST || sub->type == TYPE_DICT) {
+                    vus_dict_set(dict, k, sub);
+                } else {
+                    vus_ref(sub->u.str);
+                    vus_dict_set(dict, k, sub->u.str);
+                    free(sub);
+                }
+            }
+            vus_unref(k);
+        }
+        VusObject* o = (VusObject*)calloc(1, sizeof(VusObject));
+        if (!o) return NULL;
+        o->ref = 1; o->magic = VUS_OBJECT_MAGIC; o->type = TYPE_DICT; o->u.dict = dict;
+        return o;
+    }
+    if (yyjson_is_arr(val)) {
+        VusList* list = vus_list_new(TYPE_MIXED);
+        yyjson_val* v;
+        size_t idx, max = yyjson_arr_size(val);
+        yyjson_arr_foreach(val, idx, max, v) {
+            VusObject* sub = vus_json_val_to_object(v);
+            if (sub) {
+                if (sub->type == TYPE_LIST || sub->type == TYPE_DICT) {
+                    vus_list_append(list, sub);
+                } else {
+                    vus_ref(sub->u.str);
+                    vus_list_append(list, sub->u.str);
+                    free(sub);
+                }
+            }
+        }
+        VusObject* o = (VusObject*)calloc(1, sizeof(VusObject));
+        if (!o) return NULL;
+        o->ref = 1; o->magic = VUS_OBJECT_MAGIC; o->type = TYPE_LIST; o->u.list = list;
+        return o;
+    }
+    return NULL;
+}
+
+/* 将 UTF-8 字节串转为可在 JSON 中安全嵌入的字符串字面量（escape 由 yyjson 内部处理） */
+static yyjson_mut_val* vus_json_mut_str(yyjson_mut_doc* doc, const char* s, int len) {
+    if (!s) return yyjson_mut_null(doc);
+    return yyjson_mut_strncpy(doc, s, (size_t)len);
+}
+
+/* VUS 对象 -> yyjson mut 值。标量（VusString*）直接作为字符串；容器递归展开。 */
+static yyjson_mut_val* vus_json_vus_to_mut(yyjson_mut_doc* doc, void* obj) {
+    if (!vus_is_object(obj)) {
+        VusString* s = (VusString*)obj;
+        return vus_json_mut_str(doc, s ? vus_string_cstr(s) : "", s ? vus_string_len(s) : 0);
+    }
+    VusObject* o = (VusObject*)obj;
+    switch (o->type) {
+        case TYPE_STR:
+            return vus_json_mut_str(doc, vus_string_cstr(o->u.str), vus_string_len(o->u.str));
+        case TYPE_LIST: {
+            yyjson_mut_val* arr = yyjson_mut_arr(doc);
+            VusList* list = o->u.list;
+            if (list) {
+                for (int i = 0; i < list->len; i++) {
+                    yyjson_mut_arr_append(arr, vus_json_vus_to_mut(doc, list->items[i]));
+                }
+            }
+            return arr;
+        }
+        case TYPE_DICT: {
+            yyjson_mut_val* mv = yyjson_mut_obj(doc);
+            VusDict* dict = o->u.dict;
+            if (dict) {
+                VusList* keys = vus_dict_keys(dict);
+                for (int i = 0; i < keys->len; i++) {
+                    VusString* k = (VusString*)keys->items[i];
+                    void* val = vus_dict_get(dict, k);
+                    yyjson_mut_val* mval = vus_json_vus_to_mut(doc, val);
+                    yyjson_mut_val* mkey = yyjson_mut_strncpy(doc, k->data, (size_t)k->len);
+                    yyjson_mut_obj_add(mv, mkey, mval);
+                }
+                vus_unref(keys);
+            }
+            return mv;
+        }
+        default:
+            return yyjson_mut_null(doc);
+    }
+}
+
+/* JSON_解析：解析 JSON 字符串为结构化对象 */
+void* vus_json_parse(VusString* s) {
+    if (!s) return NULL;
+    yyjson_doc* doc = yyjson_read(vus_string_cstr(s), (size_t)vus_string_len(s), 0);
+    if (!doc) return NULL;
+    yyjson_val* root = yyjson_doc_get_root(doc);
+    VusObject* o = root ? vus_json_val_to_object(root) : NULL;
+    yyjson_doc_free(doc);
+    return o;
+}
+
+/* JSON_生成：将结构化对象序列化为 JSON 字符串 */
+VusString* vus_json_generate(void* obj) {
+    yyjson_mut_doc* doc = yyjson_mut_doc_new(NULL);
+    if (!doc) return vus_string_new("");
+    yyjson_mut_val* root = vus_json_vus_to_mut(doc, obj);
+    yyjson_mut_doc_set_root(doc, root);
+    size_t len = 0;
+    char* json = yyjson_mut_write(doc, 0, &len);
+    yyjson_mut_doc_free(doc);
+    if (!json) return vus_string_new("");
+    VusString* out = vus_string_new_len(json, (int)len);
+    free(json);
+    return out;
+}
+
+/* 沿 JSON 取值后递归导航。读取一段：字段名或 [索引]。返回解析后的新 p，或 NULL。 */
+void* vus_json_query(VusString* json, VusString* path) {
+    if (!json || !path) return NULL;
+    yyjson_doc* doc = yyjson_read(vus_string_cstr(json), (size_t)vus_string_len(json), 0);
+    if (!doc) return NULL;
+    yyjson_val* cur = yyjson_doc_get_root(doc);
+    const char* p = vus_string_cstr(path);
+    while (cur && *p) {
+        if (*p == '.') { p++; continue; }
+        if (*p == '[') {
+            p++;
+            long idx = strtol(p, (char**)&p, 10);
+            if (*p == ']') p++;
+            cur = (yyjson_is_arr(cur)) ? yyjson_arr_get(cur, (size_t)idx) : NULL;
+        } else {
+            char name[256];
+            size_t n = 0;
+            while (*p && *p != '.' && *p != '[' && n < sizeof(name) - 1) name[n++] = *p++;
+            name[n] = '\0';
+            cur = (yyjson_is_obj(cur)) ? yyjson_obj_get(cur, name) : NULL;
+        }
+    }
+    VusObject* o = cur ? vus_json_val_to_object(cur) : NULL;
+    yyjson_doc_free(doc);
+    return o;
+}
+
+/* =====================================================================
  * 进程内嵌入 Python 解释器
  * ---------------------------------------------------------------------
  * 通过 dlopen 惰性加载 libpython，用 dlsym 定位符号，避免编译期对
@@ -1053,159 +1275,6 @@ int vus_py_init(void) {
     vus_py_globals = vus_py_PyModule_GetDictFn(vus_py_PyImport_AddModuleFn("__main__"));
     vus_py_inited = 1;
     return 0;
-}
-
-/* ---- PyObject -> VusObject / VusString 转换 ---- */
-
-/* 释放一个 VusObject 容器（不递归释放内部引用，交由 VUS 引用计数管理） */
-static void vus_py_vus_object_free(VusObject* obj) {
-    free(obj);
-}
-
-static VusObject* vus_py_to_vus_object(void* pyobj);
-
-static VusString* vus_py_unicode_to_vus(void* pyobj) {
-    const char* s = vus_py_PyUnicode_AsUTF8Fn(pyobj);
-    if (!s) return vus_string_new("");
-    return vus_string_new(s);
-}
-
-static VusObject* vus_py_to_vus_object(void* pyobj) {
-    if (!pyobj || pyobj == (void*)0x1 || pyobj == (void*)0x0) return NULL;
-    if (vus_py_PyObject_TypeFn(pyobj) == vus_py_PyUnicode_Type) {
-        VusObject* o = (VusObject*)calloc(1, sizeof(VusObject));
-        if (!o) return NULL;
-        o->magic = VUS_OBJECT_MAGIC;
-        o->type = TYPE_STR;
-        o->u.str = vus_py_unicode_to_vus(pyobj);
-        return o;
-    }
-    if (vus_py_PySequence_CheckFn(pyobj)) {
-        long n = vus_py_PyList_SizeFn(pyobj);
-        if (n < 0) return NULL;
-        VusList* list = vus_list_new(TYPE_MIXED);
-        for (long i = 0; i < n; i++) {
-            void* item = vus_py_PyList_GetItemFn(pyobj, i);
-            VusObject* sub = vus_py_to_vus_object(item);
-            if (sub) {
-                /* 展开子对象：标量存字符串，列表/字典存容器 */
-                if (sub->type == TYPE_LIST || sub->type == TYPE_DICT) {
-                    vus_list_append(list, sub);
-                } else {
-                    vus_ref(sub->u.str);
-                    vus_list_append(list, sub->u.str);
-                    vus_py_vus_object_free(sub);
-                }
-            }
-        }
-        VusObject* o = (VusObject*)calloc(1, sizeof(VusObject));
-        if (!o) return NULL;
-        o->magic = VUS_OBJECT_MAGIC;
-        o->type = TYPE_LIST;
-        o->u.list = list;
-        return o;
-    }
-    if (vus_py_PyMapping_CheckFn(pyobj)) {
-        VusDict* dict = vus_dict_new();
-        long pos = 0;
-        void *key, *value;
-        while (vus_py_PyDict_NextFn(pyobj, &pos, &key, &value)) {
-            VusString* k = vus_py_unicode_to_vus(key);
-            VusObject* sub = vus_py_to_vus_object(value);
-            if (k && sub) {
-                if (sub->type == TYPE_LIST || sub->type == TYPE_DICT) {
-                    vus_dict_set(dict, k, sub);
-                } else {
-                    vus_ref(sub->u.str);
-                    vus_dict_set(dict, k, sub->u.str);
-                    vus_py_vus_object_free(sub);
-                }
-            }
-            if (k) vus_unref(k);
-        }
-        VusObject* o = (VusObject*)calloc(1, sizeof(VusObject));
-        if (!o) return NULL;
-        o->magic = VUS_OBJECT_MAGIC;
-        o->type = TYPE_DICT;
-        o->u.dict = dict;
-        return o;
-    }
-    /* 数字/布尔/标量：统一转字符串 */
-    void* s = vus_py_PyObject_StrFn(pyobj);
-    if (s) {
-        VusObject* o = (VusObject*)calloc(1, sizeof(VusObject));
-        if (o) { o->magic = VUS_OBJECT_MAGIC; o->type = TYPE_STR; o->u.str = vus_py_unicode_to_vus(s); }
-        vus_py_Py_XDECREF_Fn(s);
-        return o;
-    }
-    return NULL;
-}
-
-/* ---- JSON 解析 / 生成 ---- */
-
-void* vus_json_parse(VusString* s) {
-    if (!s || vus_py_init() != 0) return NULL;
-    void* json_mod = vus_py_PyImport_ImportModuleFn("json");
-    if (!json_mod) return NULL;
-    void* result = vus_py_PyObject_CallMethodFn(json_mod, "loads", "(s)", vus_string_cstr(s));
-    if (!result) {
-        vus_py_PyErr_PrintFn();
-        vus_py_PyErr_ClearFn();
-        return NULL;
-    }
-    VusObject* obj = vus_py_to_vus_object(result);
-    vus_py_Py_XDECREF_Fn(result);
-    vus_py_Py_XDECREF_Fn(json_mod);
-    return obj;
-}
-
-/* 将 VusObject 容器序列化为 Python 对象（用于 json.dumps） */
-static void* vus_py_vus_to_py(VusObject* obj) {
-    if (!obj) return NULL;
-    if (obj->type == TYPE_STR) {
-        if (obj->u.str) return vus_py_PyUnicode_FromStringFn(vus_string_cstr(obj->u.str));
-        return NULL;
-    }
-    if (obj->type == TYPE_LIST && obj->u.list) {
-        void* py_list = vus_py_PyList_NewFn(0);
-        if (!py_list) return NULL;
-        for (int i = 0; i < vus_list_len(obj->u.list); i++) {
-            void* item = vus_list_get(obj->u.list, i);
-            void* pitem = vus_py_vus_to_py((VusObject*)item);
-            if (pitem) {
-                vus_py_PyList_AppendFn(py_list, pitem);
-                vus_py_Py_XDECREF_Fn(pitem);
-            }
-        }
-        return py_list;
-    }
-    if (obj->type == TYPE_DICT && obj->u.dict) {
-        void* py_dict = vus_py_PyDict_NewFn();
-        if (!py_dict) return NULL;
-        /* 简化字典转换：VUS 字典遍历接口 v0.1 未提供，返回空 dict */
-        return py_dict;
-    }
-    return NULL;
-}
-
-VusString* vus_json_generate(void* obj) {
-    if (!obj) return vus_string_new("");
-    if (vus_py_init() != 0) return vus_string_new("");
-    void* json_mod = vus_py_PyImport_ImportModuleFn("json");
-    if (!json_mod) return vus_string_new("");
-    void* pyval = vus_py_vus_to_py((VusObject*)obj);
-    if (!pyval) return vus_string_new("");
-    void* result = vus_py_PyObject_CallMethodFn(json_mod, "dumps", "(O)", pyval);
-    if (!result) {
-        vus_py_PyErr_PrintFn();
-        vus_py_PyErr_ClearFn();
-        return vus_string_new("");
-    }
-    VusString* out = vus_py_unicode_to_vus(result);
-    vus_py_Py_XDECREF_Fn(result);
-    vus_py_Py_XDECREF_Fn(pyval);
-    vus_py_Py_XDECREF_Fn(json_mod);
-    return out;
 }
 
 /* ---- 进程内插件调用 ---- */
@@ -1360,8 +1429,6 @@ void* vus_plugin_run_vux_json(VusString* plugin, VusString* cmd) {
     return NULL;
 }
 
-void* vus_json_parse(VusString* s) { (void)s; return NULL; }
-VusString* vus_json_generate(void* obj) { (void)obj; return vus_string_new(""); }
 VusString* vus_typeof(void* obj) { (void)obj; return vus_string_new("空"); }
 
 #endif /* VUS_USE_PY */
