@@ -29,7 +29,8 @@ endif
 SRCS     = $(SRC_DIR)/main.c $(SRC_DIR)/token.c $(SRC_DIR)/lexer.c \
            $(SRC_DIR)/parser.c $(SRC_DIR)/generator.c $(SRC_DIR)/config.c \
            $(SRC_DIR)/ast.c $(SRC_DIR)/vus_abi.c $(SRC_DIR)/vus_plugin.c \
-           $(SRC_DIR)/vus_lang.c $(SRC_DIR)/vus_vusx.c $(SRC_DIR)/vus_apk.c
+           $(SRC_DIR)/vus_lang.c $(SRC_DIR)/vus_vusx.c $(SRC_DIR)/vus_apk.c \
+           $(SRC_DIR)/lsp/lsp.c $(SRC_DIR)/lsp/vus_builtin.c
 OBJS     = $(SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
 RT_SRC   = $(RT_DIR)/libvus_rt.c
 RT_CORO  = $(RT_DIR)/vus_coro.c
@@ -92,8 +93,8 @@ all: vus $(RT_LIB)
 # 编译目标
 # =============================================================================
 
-# 链接编译器
-vus: $(OBJS)
+# 链接编译器（含 yyjson：LSP 服务器模块在进程内直接使用该 JSON 库）
+vus: $(OBJS) $(YYJSON_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^ -lm -ldl
 
 # 编译源文件
@@ -147,6 +148,19 @@ APK_H = $(SRC_DIR)/vus_apk.h
 
 $(BUILD_DIR)/vus_apk.o: $(SRC_DIR)/vus_apk.c $(APK_H) $(GEN_H) $(CONFIG_H) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c -o $@ $<
+
+# 语言服务器（LSP）
+LSP_H     = $(SRC_DIR)/lsp/lsp.h
+BUILTIN_H = $(SRC_DIR)/lsp/vus_builtin.h
+
+$(BUILD_DIR)/lsp:
+	mkdir -p $@
+
+$(BUILD_DIR)/lsp/vus_builtin.o: $(SRC_DIR)/lsp/vus_builtin.c $(BUILTIN_H) | $(BUILD_DIR)/lsp
+	$(CC) $(CFLAGS) -I$(SRC_DIR) -c -o $@ $<
+
+$(BUILD_DIR)/lsp/lsp.o: $(SRC_DIR)/lsp/lsp.c $(LSP_H) $(BUILTIN_H) | $(BUILD_DIR)/lsp
+	$(CC) $(CFLAGS) -I$(SRC_DIR) $(YYJSON_INC) -c -o $@ $<
 
 # 编译运行时库（启用进程内嵌入时追加 libpython 头/链接参数）
 $(RT_OBJ): $(RT_SRC) $(RT_H) $(RT_DIR)/vus_coro.h | $(BUILD_DIR)

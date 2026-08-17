@@ -15,6 +15,7 @@
 #include "vus_lang.h"
 #include "vus_vusx.h"
 #include "vus_apk.h"
+#include "lsp/lsp.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1146,6 +1147,11 @@ int main(int argc, char *argv[]) {
 
         fprintf(stderr, "用法: vus vusx <list|info|build> [参数]\n");
         return 1;
+    }
+
+    /* lsp 语言服务器（标准输入输出 JSON-RPC 补全服务） */
+    if (strcmp(cmd, "lsp") == 0) {
+        return vus_lsp_main(argc, argv);
     }
 
     /* 未知命令 */
