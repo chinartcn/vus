@@ -151,7 +151,16 @@ static void sensor_parse_line(const char* line)
         double v = strtod(p, (char**)&p);
         vals[n++] = v;
     }
-    if (n >= 3) { g_sens[0] = vals[0]; g_sens[1] = vals[1]; g_sens[2] = vals[2]; g_sens_got = 1; }
+    if (n >= 3) {
+        g_sens[0] = vals[0]; g_sens[1] = vals[1]; g_sens[2] = vals[2];
+        if (!g_sens_got) {
+            g_sens_got = 1;
+            /* 首次接通打印真实读数（m/s²），便于确认加速度计数据量与动态 */
+            fprintf(stderr,
+                "[vus] 传感器已接通：x=%.1f y=%.1f z=%.1f m/s²（甩动时对应轴读数应变大）\n",
+                vals[0], vals[1], vals[2]);
+        }
+    }
 }
 
 VusString* vus_sensor_read(const char* axis)
