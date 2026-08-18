@@ -38,6 +38,27 @@ C.store = (window.Vue ? Vue.reactive({
   searchEngine: 'local',
   searchResults: [],
 
+  // ---- 代码编辑器状态 ----
+  codeDirty: false,             // 代码是否有未写盘的改动（页签显示实心圆点）
+  cursor: { y: 1, x: 1 },       // 编辑器光标 行:列（状态栏显示）
+
+  // ---- 命令面板 (Ctrl+P) ----
+  palette: { open: false, query: '' },
+
+  // ---- 插件（扩展）管理 ----
+  plugins: (function () {
+    try {
+      var raw = localStorage.getItem('vusPlugins');
+      if (raw) return JSON.parse(raw);
+    } catch (e) { /* 忽略 */ }
+    return [
+      { id: 'meili',       name: 'Meilisearch 文档检索', desc: '接入外部 Meilisearch 服务，自动回退本地索引。', builtin: true,  active: false },
+      { id: 'fsbrowser',   name: '工程文件浏览',           desc: '在设置页浏览/编辑/保存工程目录下的 .vus 文件。', builtin: true,  active: true  },
+      { id: 'terminal',    name: '运行终端（VUS / Shell）', desc: '流式执行 VUS 脚本或 Shell 命令，需后端 Token。',  builtin: true,  active: true  },
+      { id: 'completion',  name: '代码补全 + 语法高亮',    desc: '内置函数名补全、括号匹配、VUS 高亮模式。',      builtin: true,  active: true  },
+    ];
+  })(),
+
   // ---- UI ----
   toast: { show: false, kind: '', text: '' },
 }) : null);
@@ -235,4 +256,42 @@ C.fsWrite = async function (rel, text) {
     body: JSON.stringify({ path: rel, text: text }),
   });
   return r.data || { ok: false };
+};
+
+/* ================= 插件（扩展）管理 ================= */
+C.savePlugins = function () {
+  try {
+    localStorage.setItem('vusPlugins', JSON.stringify(C.store.plugins));
+  } catch (e) { /* 忽略 */ }
+};
+
+C.togglePlugin = function (id) {
+  var p = (C.store.plugins || []).find(function (x) { return x.id === id; });
+  if (p) { p.active = !p.active; C.savePlugins(); }
+};
+
+C.addPlugin = function (o) {
+  var plugins = C.store.plugins || [];
+  var id = String(o && o.name || 'p').trim() || ('p' + (plugins.length + 1));
+  // 生成唯一 id
+  var base = id, n = 1;
+  while (plugins.some(function (x) { return x.id === base; })) { base = id + '_' + (++n); }
+  var item = {
+    id: base,
+    name: (o && o.name || '').trim() || ('扩展 ' + (plugins.filter(function (x) {
+      return !x.builtin; }).length + 1)),
+    desc: (o && o.desc || '').trim(),
+    builtin: false,
+    active: o && o.active !== false,
+  };
+  plugins.push(item);
+  C.store.plugins = plugins;
+  C.savePlugins();
+  return item;
+};
+
+C.removePlugin = function (id) {
+  var plugins = (C.store.plugins || []).filter(function (x) { return !(x.id === id && !x.builtin); });
+  C.store.plugins = plugins;
+  C.savePlugins();
 };
