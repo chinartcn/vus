@@ -136,9 +136,19 @@ VusString* vus_sensor_read(const char* axis)
 }
 
 /* ==================== 音频：mpv IPC 控制 ==================== */
-#define MPV_SOCK "/tmp/vus_xyz_audio.sock"
-static int  g_mpv_fd  = -1;
-static pid_t g_mpv_pid = 0;
+/* IPC socket 放 $TMPDIR（Termux 真机 /tmp 常不可访问/不可写），否则回退 /tmp。
+   每次只计算一次并缓存。 */
+static char   g_mpv_sock[160];
+static pid_t  g_mpv_pid = 0;
+static int    g_mpv_fd  = -1;
+static const char* sock_path(void)
+{
+    if (g_mpv_sock[0]) return g_mpv_sock;
+    const char* tmp = getenv("TMPDIR");
+    snprintf(g_mpv_sock, sizeof(g_mpv_sock), "%s/vus_xyz_audio.sock",
+             (tmp && tmp[0]) ? tmp : "/tmp");
+    return g_mpv_sock;
+}
 
 /* 连接 mpv 的 IPC socket。返回 0 表示失败。*/
 static int mpv_connect(void)
@@ -148,7 +158,7 @@ static int mpv_connect(void)
     struct sockaddr_un sa;
     memset(&sa, 0, sizeof(sa));
     sa.sun_family = AF_UNIX;
-    strncpy(sa.sun_path, MPV_SOCK, sizeof(sa.sun_path) - 1);
+    strncpy(sa.sun_path, sock_path(), sizeof(sa.sun_path) - 1);
     if (connect(fd, (struct sockaddr*)&sa, sizeof(sa)) != 0) {
         close(fd);
         return -1;
@@ -192,11 +202,11 @@ static int64_t mpv_get_num(const char* property)
     return (int64_t)v;
 }
 
-/* 等待 mpv 的 IPC socket 出现（最多约 1 秒）。*/
+/* 等待 mpv 的 IPC socket 出现（最多约 3 秒，兼顾 Android 慢冷启动）。*/
 static int mpv_wait_ready(void)
 {
-    for (int i = 0; i < 50; i++) {
-        if (access(MPV_SOCK, F_OK) == 0) return 0;
+    for (int i = 0; i < 150; i++) {
+        if (access(sock_path(), F_OK) == 0) return 0;
         struct timespec ts = {0, 20 * 1000 * 1000};
         nanosleep(&ts, NULL);
     }
@@ -210,7 +220,7 @@ VusString* vus_audio_open(const char* path)
         waitpid(g_mpv_pid, NULL, 0);
     }
     if (g_mpv_fd >= 0) { close(g_mpv_fd); g_mpv_fd = -1; }
-    unlink(MPV_SOCK);
+    unlink(sock_path());
 
     /* 明确报错：文件不可读时直接提示，避免 mpv 静默失败导致"没放音乐"却无征兆 */
     if (!path || access(path, R_OK) != 0) {
@@ -219,17 +229,23 @@ VusString* vus_audio_open(const char* path)
     }
 
     /* 依次尝试输出后端：Termux 常用 opensles 优先；若 mpv 未编译该 ao 会立即
-       退出（无 IPC socket），则回退到 mpv 默认输出，避免"没声音"与"起不来"二选一。 */
+       退出，则回退默认输出。每次捕获 mpv stderr，失败时打印以便定位。 */
     const char* aos[2] = { "--ao=opensles", NULL };
     for (int attempt = 0; attempt < 2; attempt++) {
-        unlink(MPV_SOCK);
+        unlink(sock_path());
+
+        /* 捕获子进程 stderr：mpv 启动失败时把原因透出给用户 */
+        int errp[2] = { -1, -1 };
+        if (pipe(errp) != 0) { errp[0] = errp[1] = -1; }
+
         pid_t pid = fork();
         if (pid < 0) return vus_to_string(0);
         if (pid == 0) {
+            if (errp[1] >= 0) { dup2(errp[1], STDERR_FILENO); close(errp[0]); close(errp[1]); }
             int devnull = open("/dev/null", O_WRONLY);
-            if (devnull >= 0) { dup2(devnull, STDOUT_FILENO); dup2(devnull, STDERR_FILENO); }
-            char ipc[128];
-            snprintf(ipc, sizeof(ipc), "--input-ipc-server=%s", MPV_SOCK);
+            if (devnull >= 0) { dup2(devnull, STDOUT_FILENO); close(devnull); }
+            char ipc[160];
+            snprintf(ipc, sizeof(ipc), "--input-ipc-server=%s", sock_path());
             if (aos[attempt])
                 execlp("mpv", "mpv", "--no-video", "--quiet", aos[attempt], ipc, path, (char*)NULL);
             else
@@ -237,11 +253,27 @@ VusString* vus_audio_open(const char* path)
             _exit(127);
         }
         g_mpv_pid = pid;
+        if (errp[0] >= 0) fcntl(errp[0], F_SETFL, fcntl(errp[0], F_GETFL, 0) | O_NONBLOCK);
+
+        int connected = 0;
         if (mpv_wait_ready() == 0) {
             g_mpv_fd = mpv_connect();
-            if (g_mpv_fd >= 0) return vus_to_string(1);
+            connected = (g_mpv_fd >= 0);
         }
-        /* 该后端未连通（mpv 未启动/瞬退）：清理后换下一套参数重试 */
+        if (!connected) {
+            /* 把 mpv 的 stderr 读出来，帮助定位起不来的真实原因 */
+            if (errp[0] >= 0) {
+                char tail[1024]; size_t got = 0;
+                ssize_t e;
+                while (got < sizeof(tail) - 1 && (e = read(errp[0], tail + got, sizeof(tail) - 1 - got)) > 0) got += (size_t)e;
+                if (got) { tail[got] = '\0'; fprintf(stderr, "[vus] mpv 启动失败，其输出摘要：\n%.900s\n", tail); }
+                close(errp[0]);
+            }
+        } else if (errp[0] >= 0) {
+            close(errp[0]);
+        }
+        if (connected) return vus_to_string(1);
+
         kill(pid, SIGKILL); waitpid(pid, NULL, 0);
         g_mpv_pid = 0; g_mpv_fd = -1;
     }
