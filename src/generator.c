@@ -926,16 +926,23 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
      * 图形_主题(背景, 边框, 高亮, 正文, 文字)：设置全局主题色。 */
     if (strcmp(call->func_name, "图形_主题") == 0) {
         int n = call->args ? call->args->count : 0;
-        char* a[6] = { 0 };
-        char defs[6][16] = { "-1","-1","-1","-1","-1" };
+        char* a[5] = { 0 };
         for (int i = 0; i < 5 && i < n; i++)
             a[i] = gen_expr(buf, call->args->items[i]);
+        /* 整数颜色参数是 VusString*（如 vus_to_string(0x…)），须用 vus_to_int
+           转成 native int 传给 vus_gui_set_theme(int,…)；缺省 -1 保持通道不变。 */
+        char t[5][128] = { {0} };
+        for (int i = 0; i < 5; i++)
+        {
+            if (a[i])
+                snprintf(t[i], sizeof(t[i]), "(int)vus_to_int(%s, &_err)", a[i]);
+            else
+                snprintf(t[i], sizeof(t[i]), "-1");
+        }
         char result[4096];
         snprintf(result, sizeof(result),
             "vus_gui_set_theme(%s, %s, %s, %s, %s)",
-            a[0] ? a[0] : defs[0], a[1] ? a[1] : defs[1],
-            a[2] ? a[2] : defs[2], a[3] ? a[3] : defs[3],
-            a[4] ? a[4] : defs[4]);
+            t[0], t[1], t[2], t[3], t[4]);
         for (int i = 0; i < 5; i++) if (a[i]) free(a[i]);
         g_uses_gui = 1;
         return strdup(result);
@@ -1195,6 +1202,283 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
             snprintf(result, sizeof(result),
                 "vus_gui_canvas_pos(vus_string_cstr(%s))", nm);
             free(nm);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+
+    /* ===== 阶段G：图片 API + GIF 动画 ===== */
+    if (strcmp(call->func_name, "图形_图片") == 0) {
+        if (call->args && call->args->count >= 5) {
+            char *x = gen_expr(buf, call->args->items[0]);
+            char *y = gen_expr(buf, call->args->items[1]);
+            char *wd = gen_expr(buf, call->args->items[2]);
+            char *ht = gen_expr(buf, call->args->items[3]);
+            char *path = gen_expr(buf, call->args->items[4]);
+            char result[4096];
+            snprintf(result, sizeof(result),
+                "vus_gui_draw_image((int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), vus_string_cstr(%s))",
+                x, y, wd, ht, path);
+            free(x); free(y); free(wd); free(ht); free(path);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_动画_打开") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *nm = gen_expr(buf, call->args->items[0]);
+            char *path = gen_expr(buf, call->args->items[1]);
+            char result[2048];
+            snprintf(result, sizeof(result),
+                "vus_gui_anim_open(vus_string_cstr(%s), vus_string_cstr(%s))", nm, path);
+            free(nm); free(path);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_动画_下一步") == 0) {
+        if (call->args && call->args->count >= 3) {
+            char *nm = gen_expr(buf, call->args->items[0]);
+            char *x = gen_expr(buf, call->args->items[1]);
+            char *y = gen_expr(buf, call->args->items[2]);
+            char result[2048];
+            snprintf(result, sizeof(result),
+                "vus_gui_anim_next(vus_string_cstr(%s), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err))",
+                nm, x, y);
+            free(nm); free(x); free(y);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_动画_帧数") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *nm = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result),
+                "vus_gui_anim_frames(vus_string_cstr(%s))", nm);
+            free(nm);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_动画_关闭") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *nm = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result),
+                "vus_gui_anim_close(vus_string_cstr(%s))", nm);
+            free(nm);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+
+    /* ===== 阶段H：高级交互控件（滑块/开关/微调/单选） ===== */
+    if (strcmp(call->func_name, "图形_滑块") == 0) {
+        if (call->args && call->args->count >= 5) {
+            char *nm = gen_expr(buf, call->args->items[0]);
+            char *x = gen_expr(buf, call->args->items[1]);
+            char *y = gen_expr(buf, call->args->items[2]);
+            char *wd = gen_expr(buf, call->args->items[3]);
+            char *vl = gen_expr(buf, call->args->items[4]);
+            /* min/max 缺省 0/100 */
+            char *mn = (call->args->count > 5) ? gen_expr(buf, call->args->items[5]) : strdup("vus_to_string(0)");
+            char *mx = (call->args->count > 6) ? gen_expr(buf, call->args->items[6]) : strdup("vus_to_string(100)");
+            char result[4096];
+            snprintf(result, sizeof(result),
+                "vus_gui_slider(vus_string_cstr(%s), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err))",
+                nm, x, y, wd, vl, mn, mx);
+            free(nm); free(x); free(y); free(wd); free(vl); free(mn); free(mx);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_滑块值") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *nm = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result),
+                "vus_gui_slider_value(vus_string_cstr(%s))", nm);
+            free(nm);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_开关") == 0) {
+        if (call->args && call->args->count >= 3) {
+            char *nm = gen_expr(buf, call->args->items[0]);
+            char *x = gen_expr(buf, call->args->items[1]);
+            char *y = gen_expr(buf, call->args->items[2]);
+            /* 初始状态缺省 0（关） */
+            char *st = (call->args->count > 3) ? gen_expr(buf, call->args->items[3]) : strdup("vus_to_string(0)");
+            char result[2048];
+            snprintf(result, sizeof(result),
+                "vus_gui_switch(vus_string_cstr(%s), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err))",
+                nm, x, y, st);
+            free(nm); free(x); free(y); free(st);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_开关值") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *nm = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result),
+                "vus_gui_switch_value(vus_string_cstr(%s))", nm);
+            free(nm);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_微调") == 0) {
+        if (call->args && call->args->count >= 4) {
+            char *nm = gen_expr(buf, call->args->items[0]);
+            char *x = gen_expr(buf, call->args->items[1]);
+            char *y = gen_expr(buf, call->args->items[2]);
+            char *vl = gen_expr(buf, call->args->items[3]);
+            /* 步长缺省 1 */
+            char *st = (call->args->count > 4) ? gen_expr(buf, call->args->items[4]) : strdup("vus_to_string(1)");
+            char result[2048];
+            snprintf(result, sizeof(result),
+                "vus_gui_spin(vus_string_cstr(%s), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err))",
+                nm, x, y, vl, st);
+            free(nm); free(x); free(y); free(vl); free(st);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_微调值") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *nm = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result),
+                "vus_gui_spin_value(vus_string_cstr(%s))", nm);
+            free(nm);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_单选") == 0) {
+        if (call->args && call->args->count >= 6) {
+            char *nm = gen_expr(buf, call->args->items[0]);
+            char *x = gen_expr(buf, call->args->items[1]);
+            char *y = gen_expr(buf, call->args->items[2]);
+            char *ih = gen_expr(buf, call->args->items[3]);
+            char *opts = gen_expr(buf, call->args->items[4]);
+            char *sl = gen_expr(buf, call->args->items[5]);
+            char result[4096];
+            snprintf(result, sizeof(result),
+                "vus_gui_radio(vus_string_cstr(%s), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), vus_string_cstr(%s), (int)vus_to_int(%s, &_err))",
+                nm, x, y, ih, opts, sl);
+            free(nm); free(x); free(y); free(ih); free(opts); free(sl);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_单选值") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *nm = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result),
+                "vus_gui_radio_value(vus_string_cstr(%s))", nm);
+            free(nm);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+
+    /* ===== 阶段I：高级外观 ===== */
+    if (strcmp(call->func_name, "图形_圆角矩形") == 0) {
+        if (call->args && call->args->count >= 6) {
+            char *x = gen_expr(buf, call->args->items[0]);
+            char *y = gen_expr(buf, call->args->items[1]);
+            char *wd = gen_expr(buf, call->args->items[2]);
+            char *ht = gen_expr(buf, call->args->items[3]);
+            char *rd = gen_expr(buf, call->args->items[4]);
+            char *c = gen_expr(buf, call->args->items[5]);
+            char result[4096];
+            snprintf(result, sizeof(result),
+                "vus_gui_round_rect((int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (unsigned int)vus_to_int(%s, &_err))",
+                x, y, wd, ht, rd, c);
+            free(x); free(y); free(wd); free(ht); free(rd); free(c);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_圆角填充") == 0) {
+        if (call->args && call->args->count >= 6) {
+            char *x = gen_expr(buf, call->args->items[0]);
+            char *y = gen_expr(buf, call->args->items[1]);
+            char *wd = gen_expr(buf, call->args->items[2]);
+            char *ht = gen_expr(buf, call->args->items[3]);
+            char *rd = gen_expr(buf, call->args->items[4]);
+            char *c = gen_expr(buf, call->args->items[5]);
+            char result[4096];
+            snprintf(result, sizeof(result),
+                "vus_gui_round_fill((int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (unsigned int)vus_to_int(%s, &_err))",
+                x, y, wd, ht, rd, c);
+            free(x); free(y); free(wd); free(ht); free(rd); free(c);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_画圆") == 0) {
+        if (call->args && call->args->count >= 4) {
+            char *cx = gen_expr(buf, call->args->items[0]);
+            char *cy = gen_expr(buf, call->args->items[1]);
+            char *r = gen_expr(buf, call->args->items[2]);
+            char *c = gen_expr(buf, call->args->items[3]);
+            char result[2048];
+            snprintf(result, sizeof(result),
+                "vus_gui_draw_circle((int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (unsigned int)vus_to_int(%s, &_err))",
+                cx, cy, r, c);
+            free(cx); free(cy); free(r); free(c);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_填充圆") == 0) {
+        if (call->args && call->args->count >= 4) {
+            char *cx = gen_expr(buf, call->args->items[0]);
+            char *cy = gen_expr(buf, call->args->items[1]);
+            char *r = gen_expr(buf, call->args->items[2]);
+            char *c = gen_expr(buf, call->args->items[3]);
+            char result[2048];
+            snprintf(result, sizeof(result),
+                "vus_gui_fill_circle((int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (unsigned int)vus_to_int(%s, &_err))",
+                cx, cy, r, c);
+            free(cx); free(cy); free(r); free(c);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_圆弧") == 0) {
+        if (call->args && call->args->count >= 6) {
+            char *cx = gen_expr(buf, call->args->items[0]);
+            char *cy = gen_expr(buf, call->args->items[1]);
+            char *r = gen_expr(buf, call->args->items[2]);
+            char *sd = gen_expr(buf, call->args->items[3]);
+            char *sw = gen_expr(buf, call->args->items[4]);
+            char *c = gen_expr(buf, call->args->items[5]);
+            char result[2048];
+            snprintf(result, sizeof(result),
+                "vus_gui_draw_arc((int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (unsigned int)vus_to_int(%s, &_err))",
+                cx, cy, r, sd, sw, c);
+            free(cx); free(cy); free(r); free(sd); free(sw); free(c);
+            g_uses_gui = 1;
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "图形_外观") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *rd = gen_expr(buf, call->args->items[0]);
+            char *aa = (call->args->count > 1) ? gen_expr(buf, call->args->items[1]) : strdup("vus_to_string(0)");
+            char result[1024];
+            snprintf(result, sizeof(result),
+                "vus_gui_appearance((int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err))",
+                rd, aa);
+            free(rd); free(aa);
             g_uses_gui = 1;
             return strdup(result);
         }
@@ -2577,8 +2861,8 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
     char xft_inc[512] = "";
     if (config->rt_dir[0] && g_uses_gui) {
         snprintf(gui_src, sizeof(gui_src),
-                 "\"%s/guilite_bridge.c\" \"%s/guilite_platform.c\" \"%s/guilite_wrapper.cpp\"",
-                 abs_rt_dir, abs_rt_dir, abs_rt_dir);
+                 "\"%s/guilite_bridge.c\" \"%s/guilite_platform.c\" \"%s/guilite_wrapper.cpp\" \"%s/gifdec/gifdec.c\"",
+                 abs_rt_dir, abs_rt_dir, abs_rt_dir, abs_rt_dir);
         int has_x11 = 0;
         /* X11 开发库检测：同时支持标准路径与 Termux $PREFIX 路径（Termux 的
            X11 头在 $PREFIX/include/X11/Xlib.h，非 /usr/include）。 */

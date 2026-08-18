@@ -1,0 +1,28 @@
+{
+  "name": "我的界面",
+  "width": 480,
+  "height": 320,
+  "theme": {
+    "bg": 16777215,
+    "border": 8947848,
+    "highlight": 21930,
+    "fg": 3355443,
+    "text": 0
+  },
+  "radius": 8,
+  "controls": [
+    { "type": "label", "name": "t1", "x": 20, "y": 10, "text": "你好", "color": 0, "size": "12" },
+    { "type": "button", "name": "b1", "x": 20, "y": 40, "w": 120, "h": 36, "text": "确定" },
+    { "type": "slider", "name": "s1", "x": 20, "y": 90, "w": 160, "value": 50, "min": 0, "max": 100 },
+    { "type": "switch", "name": "sw1", "x": 20, "y": 120, "on": true },
+    { "type": "spin", "name": "sp1", "x": 20, "y": 150, "value": 3, "step": 1 },
+    { "type": "radio", "name": "r1", "x": 20, "y": 180, "item_h": 20, "options": "红;绿;蓝", "sel": 0 },
+    { "type": "round_rect", "name": "rr", "x": 200, "y": 40, "w": 120, "h": 60, "radius": 8, "color": 14737632 },
+    { "type": "fill_rect", "name": "fr", "x": 200, "y": 110, "w": 120, "h": 60, "color": 13430527 },
+    { "type": "circle", "name": "c1", "cx": 260, "cy": 210, "r": 30, "color": 16746496 },
+    { "type": "fill_circle", "name": "fc", "cx": 330, "cy": 210, "r": 30, "color": 4500036 },
+    { "type": "arc", "name": "a1", "cx": 400, "cy": 210, "r": 24, "start": 0, "sweep": 270, "color": 6710886 },
+    { "type": "progress", "name": "p1", "x": 20, "y": 240, "w": 200, "h": 18, "value": 72 },
+    { "type": "textbox", "name": "tb1", "x": 20, "y": 280, "w": 160, "h": 30, "text": "文本框" }
+  ]
+}

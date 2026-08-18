@@ -17,9 +17,22 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 /* 图形_背景图：PNG 解码用 libpng（链接 -lpng -lz，见 src/generator.c GUI 链接参数） */
 #include <png.h>
+
+/* 图形_图片(.gif)/GIF 动画：gifdec 单驱动 GIF 解码（头在 rt/gifdec 子目录，
+ * 已由 Makefile 编译进 libvus_rt.a，这里仅用到它的头，实现无需重复编译）。 */
+#include "gifdec/gifdec.h"
+
+/* 图形_图片(.svg)：nanosvg 纯 C 单头解析 + 栅格化。
+ * NANOSVG_IMPLEMENTATION / NANOSVGRAST_IMPLEMENTATION 各只能定义一次，
+ * 只在本文件展开一次实现，避免与其它源文件的宏冲突。 */
+#define NANOSVG_IMPLEMENTATION
+#include "nanosvg/nanosvg.h"
+#define NANOSVGRAST_IMPLEMENTATION
+#include "nanosvg/nanosvgrast.h"
 
 /* 图形_字体：外部 TTF/OTF 字体加载与栅格化用 FreeType（链接 -lfreetype，
  * 见 src/generator.c GUI 链接参数）。 */
@@ -130,6 +143,9 @@ typedef struct {
 } VusGuiTheme;
 static VusGuiTheme s_theme = { 0xF5F5F5, 0x333333, 0x3399CC, 0x000000, 0xFFFFFF };
 
+/* 全局控件圆角半径（像素），0=直角。由 图形_外观 设置，供 图形_按钮 等控件复用。 */
+static int s_global_radius = 0;
+
 /* ============ 阶段B：样式/主题模板 —— API ============ */
 
 /* 图形_主题(背景, 边框, 高亮, 正文, 文字)：设置全局主题色（0xRRGGBB）。
@@ -152,7 +168,8 @@ VusString* vus_gui_set_theme(int bg, int border, int highlight, int fg, int text
 #define VUS_LINE_MAX    96
 typedef enum {
     CTRL_BUTTON, CTRL_LABEL, CTRL_TEXTBOX,
-    CTRL_CHECKBOX, CTRL_PROGRESS, CTRL_LIST, CTRL_CANVAS
+    CTRL_CHECKBOX, CTRL_PROGRESS, CTRL_LIST, CTRL_CANVAS,
+    CTRL_SLIDER, CTRL_SWITCH, CTRL_SPIN, CTRL_RADIO
 } VusCtrlType;
 typedef struct {
     char name[64];
@@ -165,6 +182,11 @@ typedef struct {
     int touched;                        /* 复选框：是否已被点击过（此后内部 checked 为权威） */
     int progress;                       /* 进度条 0-100 */
     int rel_x, rel_y;                   /* 画布最近命中相对坐标 */
+    int slider_value, slider_min, slider_max; /* 滑块：当前值/最小值/最大值 */
+    int switch_state;                   /* 开关：1 开 / 0 关 */
+    int spin_value, spin_step;          /* 微调：当前值/步长 */
+    int radio_sel, radio_n;             /* 单选：当前选中索引/选项个数 */
+    char radio_opts[16][40];            /* 单选每项文本 */
 } VusControl;
 static VusControl s_ctrls[VUS_CTRL_MAX];
 static int        s_ctrl_cnt = 0;
@@ -464,7 +486,7 @@ static void write_scrolled_pixel(int x, int y, unsigned int argb)
         if (x < s_act_scroll->x || x >= s_act_scroll->x + s_act_scroll->w) return;
         if (y < s_act_scroll->y || y >= s_act_scroll->y + s_act_scroll->h) return;
     }
-    unsigned int* fb = vus_gui_surface_framebuffer();
+    unsigned int* fb = vus_gui_surface_backbuffer();
     if (!fb) return;
     int W = vus_gui_surface_width();
     int H = vus_gui_surface_height();
@@ -473,7 +495,7 @@ static void write_scrolled_pixel(int x, int y, unsigned int argb)
 }
 
 /* 读取 ARGB 像素（同上平移/裁剪语义）：供 PNG alpha 合成读当前底色。
- * 无活动容器/越界返回 0。 */
+ * 无活动容器/越界返回 0。读后台缓冲（绘制累积在此）。 */
 static unsigned int read_scrolled_pixel(int x, int y)
 {
     if (!s_initialized) return 0;
@@ -483,12 +505,99 @@ static unsigned int read_scrolled_pixel(int x, int y)
         if (x < s_act_scroll->x || x >= s_act_scroll->x + s_act_scroll->w) return 0;
         if (y < s_act_scroll->y || y >= s_act_scroll->y + s_act_scroll->h) return 0;
     }
-    unsigned int* fb = vus_gui_surface_framebuffer();
+    unsigned int* fb = vus_gui_surface_backbuffer();
     if (!fb) return 0;
     int W = vus_gui_surface_width();
     int H = vus_gui_surface_height();
     if (x < 0 || y < 0 || x >= W || y >= H) return 0;
     return fb[y * W + x];
+}
+
+/* ============ 阶段I 前置：像素级圆角 / 圆 / 圆弧绘制原语 ============
+ * 全部经 write_scrolled_pixel 逐像素写入（自动应用滚动平移 + 裁剪），
+ * 供阶段I公开函数与 图形_按钮 的圆角外观复用。 */
+
+/* 判断像素是否落在圆角矩形 (x,y,w,h) 内部（r 为四角圆角半径，像素）。
+ * r<=0 时退化为普通矩形判定。 */
+static int in_round_rect(int px, int py, int x, int y, int w, int h, int r)
+{
+    if (px < x || px >= x + w || py < y || py >= y + h) return 0;
+    if (r <= 0) return 1;
+    int l = px - x, rt = x + w - 1 - px, t = py - y, b = y + h - 1 - py;
+    int cap = (r - 1) * (r - 1);
+    if (l < r && t < r)
+        if ((r - 1 - l) * (r - 1 - l) + (r - 1 - t) * (r - 1 - t) > cap) return 0;
+    if (l < r && b < r)
+        if ((r - 1 - l) * (r - 1 - l) + (r - 1 - b) * (r - 1 - b) > cap) return 0;
+    if (rt < r && t < r)
+        if ((r - 1 - rt) * (r - 1 - rt) + (r - 1 - t) * (r - 1 - t) > cap) return 0;
+    if (rt < r && b < r)
+        if ((r - 1 - rt) * (r - 1 - rt) + (r - 1 - b) * (r - 1 - b) > cap) return 0;
+    return 1;
+}
+
+/* 圆角实心填充：遍历本矩形逐像素判定并写入。 */
+static void fill_round_rect_px(int x, int y, int w, int h, int r, unsigned int argb)
+{
+    for (int py = y; py < y + h; py++)
+        for (int px = x; px < x + w; px++)
+            if (in_round_rect(px, py, x, y, w, h, r))
+                write_scrolled_pixel(px, py, argb);
+}
+
+/* 圆角外框（1px）：外圆角矩形减去向内缩 1 的内圆角矩形得到边框。 */
+static void round_rect_outline_px(int x, int y, int w, int h, int r, unsigned int argb)
+{
+    if (w <= 0 || h <= 0) return;
+    int ir = (r - 1 > 0) ? r - 1 : 0;
+    for (int py = y; py < y + h; py++)
+        for (int px = x; px < x + w; px++)
+            if (in_round_rect(px, py, x, y, w, h, r) &&
+                !in_round_rect(px, py, x + 1, y + 1, w - 2, h - 2, ir))
+                write_scrolled_pixel(px, py, argb);
+}
+
+/* 实心圆。 */
+static void fill_circle_px(int cx, int cy, int r, unsigned int argb)
+{
+    int r2 = r * r;
+    for (int py = cy - r; py <= cy + r; py++)
+        for (int px = cx - r; px <= cx + r; px++)
+        {
+            int dx = px - cx, dy = py - cy;
+            if (dx * dx + dy * dy <= r2) write_scrolled_pixel(px, py, argb);
+        }
+}
+
+/* 圆外框（半径 ~1px 环带）。 */
+static void draw_circle_px(int cx, int cy, int r, unsigned int argb)
+{
+    if (r <= 0) { write_scrolled_pixel(cx, cy, argb); return; }
+    int r2 = r * r, r1 = (r - 1) * (r - 1);
+    for (int py = cy - r; py <= cy + r; py++)
+        for (int px = cx - r; px <= cx + r; px++)
+        {
+            int dx = px - cx, dy = py - cy;
+            int dd = dx * dx + dy * dy;
+            if (dd <= r2 && dd >= r1) write_scrolled_pixel(px, py, argb);
+        }
+}
+
+/* 圆弧（线宽 1）：起始角度 0=正东(3点钟)顺时针，跨角度可为负（逆时针）。
+ * 逐角度落点（1° 步进），y 用 cy + r*sin（屏幕坐标 y 向下 → 顺时针）。 */
+static void draw_arc_px(int cx, int cy, int r, int start_deg, int sweep_deg, unsigned int argb)
+{
+    if (r <= 0) { write_scrolled_pixel(cx, cy, argb); return; }
+    int n = (sweep_deg >= 0) ? sweep_deg : -sweep_deg;
+    int step = (sweep_deg >= 0) ? 1 : -1;
+    if (n > 7200) n = 7200; /* 防御异常输入 */
+    for (int k = 0; k <= n; k++)
+    {
+        double a = (double)(start_deg + step * k) * 3.14159265358979323846 / 180.0;
+        int px = cx + (int)lround(r * cos(a));
+        int py = cy + (int)lround(r * sin(a));
+        write_scrolled_pixel(px, py, argb);
+    }
 }
 
 /* 像素级 Bresenham 画线（经 write_scrolled_pixel），供 draw_line_ex 与箭头复用。 */
@@ -1170,9 +1279,18 @@ VusString* vus_gui_button(const char* name, int x, int y, int w, int h, const ch
     c->x = x; c->y = y; c->w = w; c->h = h;
     vus_gui_mark_dirty();
 
-    /* 配色取自主题：底=highlight、边框=border、文字=text */
-    vus_gui_surface_fill_rect(x, y, w, h, argb_from_rgb(s_theme.highlight));
-    vus_gui_surface_draw_rect(x, y, w, h, argb_from_rgb(s_theme.border));
+    /* 配色取自主题：底=highlight、边框=border、文字=text。
+     * 图形_外观 设置全局圆角半径后，改为圆角填充 + 圆角外框。 */
+    if (s_global_radius > 0)
+    {
+        fill_round_rect_px(x, y, w, h, s_global_radius, argb_from_rgb(s_theme.highlight));
+        round_rect_outline_px(x, y, w, h, s_global_radius, argb_from_rgb(s_theme.border));
+    }
+    else
+    {
+        vus_gui_surface_fill_rect(x, y, w, h, argb_from_rgb(s_theme.highlight));
+        vus_gui_surface_draw_rect(x, y, w, h, argb_from_rgb(s_theme.border));
+    }
     int tw = text ? (int)(strlen(text) * 6) : 0; /* 估宽：6px/字符（X 6x13 字体） */
     int tx = x + (tw < w ? (w - tw) / 2 : 0);
     int ty = y + (h - 13) / 2;
@@ -1555,6 +1673,8 @@ VusString* vus_gui_redraw(void)
         return vus_string_new("1");
     }
     s_dirty = 0;
+    /* 双缓冲：先把后台绘制缓冲一次性提交到前台，再把前台送到显示后端。 */
+    vus_gui_surface_present();
     vus_gui_platform_redraw(vus_gui_surface_width(), vus_gui_surface_height(),
                             vus_gui_surface_framebuffer());
     return vus_string_new("1");
@@ -1568,5 +1688,586 @@ VusString* vus_gui_run(void)
     }
     vus_gui_platform_run(vus_gui_surface_width(), vus_gui_surface_height(),
                          vus_gui_surface_framebuffer());
+    return vus_string_new("1");
+}
+
+/* =====================================================================
+ * 阶段G：图片 API + GIF 播放器
+ * ===================================================================== */
+
+/* RGBA（4 字节/像素）近邻拉伸绘制到 (x,y,w,h)，带 alpha 合成（与 draw_png 同法）。 */
+static void blit_rgba_stretch(int x, int y, int w, int h,
+                              const unsigned char* rgba, int sw, int sh)
+{
+    for (int ty = y; ty < y + h; ty++)
+    {
+        int sy = ((ty - y) * sh) / h;
+        if (sy < 0) sy = 0; else if (sy >= sh) sy = sh - 1;
+        for (int tx = x; tx < x + w; tx++)
+        {
+            int sx = ((tx - x) * sw) / w;
+            if (sx < 0) sx = 0; else if (sx >= sw) sx = sw - 1;
+            const unsigned char* p = rgba + ((size_t)sy * (size_t)sw + (size_t)sx) * 4;
+            unsigned int a = p[3];
+            if (a >= 255)
+            {
+                unsigned int argb = 0xFF000000u | ((unsigned)p[0] << 16) |
+                                    ((unsigned)p[1] << 8) | (unsigned)p[2];
+                write_scrolled_pixel(tx, ty, argb);
+            }
+            else
+            {
+                unsigned int dst = read_scrolled_pixel(tx, ty);
+                unsigned int argb = argb_alpha_over(dst, p[0], p[1], p[2], (int)a);
+                write_scrolled_pixel(tx, ty, argb);
+            }
+        }
+    }
+}
+
+/* RGB（3 字节/像素，opaque）近邻拉伸绘制到 (x,y,w,h)（GIF 帧输出为 RGB）。 */
+static void blit_rgb_stretch(int x, int y, int w, int h,
+                             const unsigned char* rgb, int sw, int sh)
+{
+    for (int ty = y; ty < y + h; ty++)
+    {
+        int sy = ((ty - y) * sh) / h;
+        if (sy < 0) sy = 0; else if (sy >= sh) sy = sh - 1;
+        for (int tx = x; tx < x + w; tx++)
+        {
+            int sx = ((tx - x) * sw) / w;
+            if (sx < 0) sx = 0; else if (sx >= sw) sx = sw - 1;
+            const unsigned char* p = rgb + ((size_t)sy * (size_t)sw + (size_t)sx) * 3;
+            unsigned int argb = 0xFF000000u | ((unsigned)p[0] << 16) |
+                                ((unsigned)p[1] << 8) | (unsigned)p[2];
+            write_scrolled_pixel(tx, ty, argb);
+        }
+    }
+}
+
+/* 用 nanosvg 解析 SVG 并栅格化到其自身 viewport 大小，得到 RGBA（non-premultiplied）。
+ * 成功返回 1 并写出 *pw/*ph/*data（需 free）；失败返回 0。 */
+static int svg_load_rgba(const char* path, int* pw, int* ph, unsigned char** data)
+{
+    NSVGimage* img = nsvgParseFromFile(path, "px", 96.0f);
+    if (!img) return 0;
+    int w = (int)img->width, h = (int)img->height;
+    if (w <= 0 || h <= 0) { nsvgDelete(img); return 0; }
+    unsigned char* dst = (unsigned char*)malloc((size_t)w * (size_t)h * 4);
+    NSVGrasterizer* rast = nsvgCreateRasterizer();
+    if (!dst || !rast)
+    {
+        free(dst);
+        if (rast) nsvgDeleteRasterizer(rast);
+        nsvgDelete(img);
+        return 0;
+    }
+    nsvgRasterize(rast, img, 0.0f, 0.0f, 1.0f, dst, w, h, w * 4);
+    nsvgDeleteRasterizer(rast);
+    nsvgDelete(img);
+    *pw = w; *ph = h; *data = dst;
+    return 1;
+}
+
+/* 图形_图片(x, y, 宽, 高, 路径)：按扩展名（.png/.svg/.gif，其它按 PNG）
+ * 解码并最近邻拉伸绘制到矩形。返回 "1" 成功 / "0" 失败。 */
+VusString* vus_gui_draw_image(int x, int y, int w, int h, const char* path)
+{
+    if (!s_initialized || w <= 0 || h <= 0 || !path || !*path)
+    {
+        return vus_string_new("0");
+    }
+    /* 取小写扩展名 */
+    char ext[8] = {0};
+    const char* dot = strrchr(path, '.');
+    if (dot && dot[1])
+    {
+        size_t k = 0;
+        while (dot[1 + k] && k < sizeof(ext) - 1)
+        {
+            ext[k] = (char)tolower((unsigned char)dot[1 + k]);
+            k++;
+        }
+    }
+
+    if (strcmp(ext, "svg") == 0)
+    {
+        int sw = 0, sh = 0;
+        unsigned char* rgba = NULL;
+        if (!svg_load_rgba(path, &sw, &sh, &rgba) || !rgba || sw <= 0 || sh <= 0)
+        {
+            if (rgba) free(rgba);
+            return vus_string_new("0");
+        }
+        blit_rgba_stretch(x, y, w, h, rgba, sw, sh);
+        free(rgba);
+        vus_gui_mark_dirty();
+        return vus_string_new("1");
+    }
+    if (strcmp(ext, "gif") == 0)
+    {
+        gd_GIF* g = gd_open_gif(path);
+        if (!g) return vus_string_new("0");
+        unsigned char* rgb = (unsigned char*)malloc((size_t)g->width * (size_t)g->height * 3);
+        if (!rgb) { gd_close_gif(g); return vus_string_new("0"); }
+        gd_rewind(g);
+        gd_get_frame(g);              /* 加载第 0 帧到 canvas */
+        gd_render_frame(g, rgb);
+        blit_rgb_stretch(x, y, w, h, rgb, (int)g->width, (int)g->height);
+        free(rgb);
+        gd_close_gif(g);
+        vus_gui_mark_dirty();
+        return vus_string_new("1");
+    }
+    /* 默认按 PNG 处理 */
+    {
+        int sw2 = 0, sh2 = 0;
+        unsigned char* rgba2 = NULL;
+        if (!png_load_rgba(path, &sw2, &sh2, &rgba2) || !rgba2 || sw2 <= 0 || sh2 <= 0)
+        {
+            if (rgba2) free(rgba2);
+            return vus_string_new("0");
+        }
+        blit_rgba_stretch(x, y, w, h, rgba2, sw2, sh2);
+        free(rgba2);
+        vus_gui_mark_dirty();
+        return vus_string_new("1");
+    }
+}
+
+/* ---- GIF 播放器：静态槽表 ---- */
+#define VUS_GIF_MAX 8
+typedef struct {
+    char name[64];
+    gd_GIF* gif;
+    int nframes;     /* 总帧数 */
+    int frame_idx;   /* 当前帧索引（下一步推进） */
+    int used;
+} VusGifSlot;
+static VusGifSlot s_gifs[VUS_GIF_MAX];
+
+static VusGifSlot* find_gif(const char* name)
+{
+    if (!name) return NULL;
+    for (int i = 0; i < VUS_GIF_MAX; i++)
+        if (s_gifs[i].used && strcmp(s_gifs[i].name, name) == 0) return &s_gifs[i];
+    return NULL;
+}
+
+/* 统计总帧数：从动画起点迭代至 GIF trailer，并回到起点（加载第 0 帧）。 */
+static int gif_frame_count(gd_GIF* gif)
+{
+    gd_rewind(gif);
+    int n = 0;
+    while (gd_get_frame(gif) == 1) n++;
+    gd_rewind(gif);
+    gd_get_frame(gif);  /* 预载第 0 帧到 canvas，供 render 使用 */
+    return n;
+}
+
+/* 把第 idx 帧渲染进 rgb（RGB，width*height*3）。越界时渲染最后可用帧。 */
+static void gif_render_index(gd_GIF* gif, int idx, unsigned char* rgb)
+{
+    gd_rewind(gif);
+    if (idx < 0) idx = 0;
+    for (int i = 0; i <= idx; i++)
+    {
+        if (gd_get_frame(gif) != 1) break; /* 已到 trailer */
+    }
+    gd_render_frame(gif, rgb);
+}
+
+/* 图形_动画_打开(名, 路径)：gif_open 存入槽表。返回 "1" / "0"。 */
+VusString* vus_gui_anim_open(const char* name, const char* path)
+{
+    if (!name || !*name || !path || !*path) return vus_string_new("0");
+    VusGifSlot* slot = find_gif(name);
+    if (!slot)
+    {
+        for (int i = 0; i < VUS_GIF_MAX; i++)
+        {
+            if (!s_gifs[i].used) { slot = &s_gifs[i]; break; }
+        }
+    }
+    if (!slot) return vus_string_new("0"); /* 槽表满 */
+    if (slot->gif)
+    {
+        gd_close_gif(slot->gif);
+        slot->gif = NULL;
+    }
+    gd_GIF* g = gd_open_gif(path);
+    if (!g) return vus_string_new("0");
+    memset(slot, 0, sizeof(*slot));
+    strncpy(slot->name, name, sizeof(slot->name) - 1);
+    slot->name[sizeof(slot->name) - 1] = '\0';
+    slot->gif = g;
+    slot->nframes = gif_frame_count(g);
+    slot->frame_idx = 0;
+    slot->used = 1;
+    return vus_string_new("1");
+}
+
+/* 图形_动画_下一步(名, x, y)：推进一帧并在 (x,y) 以 GIF 原始尺寸绘制。 */
+VusString* vus_gui_anim_next(const char* name, int x, int y)
+{
+    if (!s_initialized || !name) return vus_string_new("0");
+    VusGifSlot* slot = find_gif(name);
+    if (!slot || !slot->gif || slot->nframes <= 0) return vus_string_new("0");
+    slot->frame_idx = (slot->frame_idx + 1) % slot->nframes;
+    int w = (int)slot->gif->width, h = (int)slot->gif->height;
+    unsigned char* rgb = (unsigned char*)malloc((size_t)w * (size_t)h * 3);
+    if (!rgb) return vus_string_new("0");
+    gif_render_index(slot->gif, slot->frame_idx, rgb);
+    blit_rgb_stretch(x, y, w, h, rgb, w, h);
+    free(rgb);
+    vus_gui_mark_dirty();
+    return vus_string_new("1");
+}
+
+/* 图形_动画_帧数(名)：返回总帧数整数字符串。 */
+VusString* vus_gui_anim_frames(const char* name)
+{
+    if (!name) return vus_string_new("0");
+    VusGifSlot* slot = find_gif(name);
+    if (!slot || !slot->gif) return vus_string_new("0");
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%d", slot->nframes);
+    return vus_string_new(buf);
+}
+
+/* 图形_动画_关闭(名)：关闭并释放槽。 */
+VusString* vus_gui_anim_close(const char* name)
+{
+    VusGifSlot* slot = find_gif(name);
+    if (!slot || !slot->gif) return vus_string_new("0");
+    gd_close_gif(slot->gif);
+    slot->gif = NULL;
+    slot->used = 0;
+    return vus_string_new("1");
+}
+
+/* =====================================================================
+ * 阶段H：高级交互控件（统一控件表）
+ * ===================================================================== */
+
+/* 图形_滑块(名, x, y, 宽, 值[, 最小值, 最大值])：水平轨道 + 滑块块。
+ * 点击（未消费）落在轨道矩形内按 x 换算新值写入控件。返回当前值整数串。 */
+VusString* vus_gui_slider(const char* name, int x, int y, int w, int value, int minv, int maxv)
+{
+    if (!s_initialized || !name || !*name || w <= 0)
+    {
+        return vus_string_new("0");
+    }
+    VusControl* c = register_ctrl(name, CTRL_SLIDER);
+    if (!c)
+    {
+        return vus_string_new("0");
+    }
+    const int sh = 16; /* 滑块控件高（固定） */
+    c->x = x; c->y = y; c->w = w; c->h = sh;
+    int mn = minv, mx = maxv;
+    if (mn >= mx) mx = mn + 1;
+    c->slider_min = mn; c->slider_max = mx;
+    /* 首次被点击前以传入 value 为权威（touched 后内部为准，与复选框同法） */
+    if (!c->touched)
+    {
+        c->slider_value = value;
+    }
+    if (c->slider_value < mn) c->slider_value = mn;
+    if (c->slider_value > mx) c->slider_value = mx;
+    /* 命中轨道 → 按 x 换算新值 */
+    if (s_click_x >= 0 && s_click_y >= 0 && !s_click_consumed &&
+        point_in(s_click_x, s_click_y, x, y, w, sh))
+    {
+        int nx = s_click_x - x;
+        if (nx < 0) nx = 0;
+        if (nx > w) nx = w;
+        c->slider_value = mn + nx * (mx - mn) / w;
+        c->touched = 1;
+        s_click_consumed = 1;
+        vus_gui_mark_dirty();
+    }
+    /* 绘制：轨道 + 滑块块 */
+    vus_gui_surface_fill_rect(x, y, w, sh, argb_from_rgb(0xE0E0E0));
+    vus_gui_surface_draw_rect(x, y, w, sh, argb_from_rgb(s_theme.border));
+    int knob = 12;
+    int kx = x + (c->slider_value - mn) * (w - knob) / (mx - mn);
+    vus_gui_surface_fill_rect(kx, y + 2, knob, sh - 4, argb_from_rgb(s_theme.highlight));
+    vus_gui_surface_draw_rect(kx, y + 2, knob, sh - 4, argb_from_rgb(s_theme.border));
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%d", c->slider_value);
+    return vus_string_new(buf);
+}
+
+/* 图形_滑块值(名)：返回滑块当前值整数串。 */
+VusString* vus_gui_slider_value(const char* name)
+{
+    VusControl* c;
+    if (!s_initialized || !name || !(c = find_ctrl(name)) || c->type != CTRL_SLIDER)
+    {
+        return vus_string_new("0");
+    }
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%d", c->slider_value);
+    return vus_string_new(buf);
+}
+
+/* 图形_开关(名, x, y[, 初始状态])：圆角底 + 圆形旋钮，点击切换。返回 "true"/"false"。 */
+VusString* vus_gui_switch(const char* name, int x, int y, int state)
+{
+    if (!s_initialized || !name || !*name)
+    {
+        return vus_string_new("false");
+    }
+    VusControl* c = register_ctrl(name, CTRL_SWITCH);
+    if (!c)
+    {
+        return vus_string_new("false");
+    }
+    const int sww = 40, swh = 20;
+    c->x = x; c->y = y; c->w = sww; c->h = swh;
+    if (!c->touched)
+    {
+        c->switch_state = (state != 0);
+    }
+    if (s_click_x >= 0 && s_click_y >= 0 && !s_click_consumed &&
+        point_in(s_click_x, s_click_y, x, y, sww, swh))
+    {
+        c->switch_state = !c->switch_state;
+        c->touched = 1;
+        s_click_consumed = 1;
+        vus_gui_mark_dirty();
+    }
+    /* 圆角底（开=绿 / 关=边框灰）+ 白色圆形旋钮 */
+    fill_round_rect_px(x, y, sww, swh, swh / 2,
+                       argb_from_rgb(c->switch_state ? 0x34B84E : 0xB0B0B0));
+    int kx = c->switch_state ? (x + sww - swh) : x;
+    fill_circle_px(kx + swh / 2, y + swh / 2, swh / 2 - 2, 0xFFFFFFFF);
+    return vus_string_new(c->switch_state ? "true" : "false");
+}
+
+/* 图形_开关值(名)：返回 "true"/"false"。 */
+VusString* vus_gui_switch_value(const char* name)
+{
+    VusControl* c;
+    if (!s_initialized || !name || !(c = find_ctrl(name)) || c->type != CTRL_SWITCH)
+    {
+        return vus_string_new("false");
+    }
+    return vus_string_new(c->switch_state ? "true" : "false");
+}
+
+/* 图形_微调(名, x, y, 值[, 步长])：左减右加两个按钮 + 中间数值。返回当前值整数串。 */
+VusString* vus_gui_spin(const char* name, int x, int y, int value, int step)
+{
+    if (!s_initialized || !name || !*name)
+    {
+        return vus_string_new("0");
+    }
+    VusControl* c = register_ctrl(name, CTRL_SPIN);
+    if (!c)
+    {
+        return vus_string_new("0");
+    }
+    const int btn = 24, mid = 42, hgt = 20, wd = btn * 2 + mid;
+    c->x = x; c->y = y; c->w = wd; c->h = hgt;
+    c->spin_step = (step < 1) ? 1 : step;
+    if (!c->touched)
+    {
+        c->spin_value = value;
+    }
+    if (s_click_x >= 0 && s_click_y >= 0 && !s_click_consumed)
+    {
+        if (point_in(s_click_x, s_click_y, x, y, btn, hgt))
+        {
+            c->spin_value -= c->spin_step;   /* 左半：减 */
+            c->touched = 1;
+            s_click_consumed = 1;
+            vus_gui_mark_dirty();
+        }
+        else if (point_in(s_click_x, s_click_y, x + btn + mid, y, btn, hgt))
+        {
+            c->spin_value += c->spin_step;   /* 右半：加 */
+            c->touched = 1;
+            s_click_consumed = 1;
+            vus_gui_mark_dirty();
+        }
+    }
+    /* 绘制：左减钮 + 中间数值 + 右加钮 */
+    vus_gui_surface_fill_rect(x, y, btn, hgt, argb_from_rgb(s_theme.highlight));
+    vus_gui_surface_draw_rect(x, y, btn, hgt, argb_from_rgb(s_theme.border));
+    draw_text_xy(x + (btn - 6) / 2, y + (hgt - 13) / 2, "-", s_theme.text);
+    vus_gui_surface_fill_rect(x + btn + mid, y, btn, hgt, argb_from_rgb(s_theme.highlight));
+    vus_gui_surface_draw_rect(x + btn + mid, y, btn, hgt, argb_from_rgb(s_theme.border));
+    draw_text_xy(x + btn + mid + (btn - 6) / 2, y + (hgt - 13) / 2, "+", s_theme.text);
+    vus_gui_surface_draw_rect(x + btn, y, mid, hgt, argb_from_rgb(s_theme.border));
+    char vb[32];
+    snprintf(vb, sizeof(vb), "%d", c->spin_value);
+    draw_text_xy(x + btn + (mid - (int)strlen(vb) * 6) / 2, y + (hgt - 13) / 2, vb, s_theme.fg);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%d", c->spin_value);
+    return vus_string_new(buf);
+}
+
+/* 图形_微调值(名)：返回整数串。 */
+VusString* vus_gui_spin_value(const char* name)
+{
+    VusControl* c;
+    if (!s_initialized || !name || !(c = find_ctrl(name)) || c->type != CTRL_SPIN)
+    {
+        return vus_string_new("0");
+    }
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%d", c->spin_value);
+    return vus_string_new(buf);
+}
+
+/* 图形_单选(名, x, y, 项高, 选项串, 选中索引)：选项用分号 ";" 分隔。
+ * 绘制一列单选钮（圆圈 + 文字）。返回当前选中索引整数串。 */
+VusString* vus_gui_radio(const char* name, int x, int y, int item_h,
+                         const char* options, int sel)
+{
+    if (!s_initialized || !name || !*name || item_h < 10 || !options || !*options)
+    {
+        return vus_string_new("-1");
+    }
+    VusControl* c = register_ctrl(name, CTRL_RADIO);
+    if (!c)
+    {
+        return vus_string_new("-1");
+    }
+    /* 用分号拆分为多选项 */
+    c->radio_n = 0;
+    const char* p = options;
+    char tmp[256];
+    while (*p && c->radio_n < 16)
+    {
+        while (*p == ';') p++;
+        if (!*p) break;
+        size_t k = 0;
+        while (*p && *p != ';' && k < sizeof(tmp) - 1) tmp[k++] = *p++;
+        tmp[k] = '\0';
+        strncpy(c->radio_opts[c->radio_n], tmp, sizeof(c->radio_opts[0]) - 1);
+        c->radio_opts[c->radio_n][sizeof(c->radio_opts[0]) - 1] = '\0';
+        c->radio_n++;
+    }
+    int rows = (c->radio_n > 0) ? c->radio_n : 1;
+    c->x = x; c->y = y;
+    int w = 120; /* 控件登记宽（用于命中范围） */
+    for (int i = 0; i < rows; i++) { int tw = (int)strlen(c->radio_opts[i]) * 6 + 22; if (tw > w) w = tw; }
+    c->w = w; c->h = rows * item_h;
+    if (!c->touched)
+    {
+        c->radio_sel = (sel >= 0) ? sel : 0;
+    }
+    if (c->radio_sel < 0) c->radio_sel = 0;
+    if (c->radio_sel >= c->radio_n) c->radio_sel = c->radio_n - 1;
+    /* 命中某选项行 → 更新选中（最大 48 行防御） */
+    if (s_click_x >= 0 && s_click_y >= 0 && !s_click_consumed)
+    {
+        for (int i = 0; i < rows && i < 48; i++)
+        {
+            int ry = y + i * item_h;
+            if (point_in(s_click_x, s_click_y, x, ry, w, item_h) &&
+                point_in(s_click_x, s_click_y, c->x, c->y, c->w, c->h))
+            {
+                c->radio_sel = i;
+                c->touched = 1;
+                s_click_consumed = 1;
+                vus_gui_mark_dirty();
+                break;
+            }
+        }
+    }
+    /* 绘制：每行一个圆圈 + 选中填充 + 文字 */
+    for (int i = 0; i < rows; i++)
+    {
+        int ry = y + i * item_h;
+        int cyc = ry + item_h / 2;
+        int sr = (item_h > 16) ? 6 : 5;
+        draw_circle_px(x + sr, cyc, sr, argb_from_rgb(s_theme.border));
+        if (i == c->radio_sel)
+        {
+            fill_circle_px(x + sr, cyc, sr - 2, argb_from_rgb(s_theme.highlight));
+        }
+        draw_text_xy(x + sr * 2 + 6, ry + (item_h - 13) / 2, c->radio_opts[i], s_theme.fg);
+    }
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%d", c->radio_sel);
+    return vus_string_new(buf);
+}
+
+/* 图形_单选值(名)：返回选中索引整数串。 */
+VusString* vus_gui_radio_value(const char* name)
+{
+    VusControl* c;
+    if (!s_initialized || !name || !(c = find_ctrl(name)) || c->type != CTRL_RADIO)
+    {
+        return vus_string_new("-1");
+    }
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%d", c->radio_sel);
+    return vus_string_new(buf);
+}
+
+/* =====================================================================
+ * 阶段I：高级外观
+ * ===================================================================== */
+
+/* 图形_圆角矩形(…)：圆角外框。 */
+VusString* vus_gui_round_rect(int x, int y, int w, int h, int radius, unsigned int color)
+{
+    if (!s_initialized || w <= 0 || h <= 0) return vus_string_new("0");
+    if (radius < 0) radius = 0;
+    round_rect_outline_px(x, y, w, h, radius, argb_from_rgb(color));
+    vus_gui_mark_dirty();
+    return vus_string_new("1");
+}
+
+/* 图形_圆角填充(…)：圆角实心。 */
+VusString* vus_gui_round_fill(int x, int y, int w, int h, int radius, unsigned int color)
+{
+    if (!s_initialized || w <= 0 || h <= 0) return vus_string_new("0");
+    if (radius < 0) radius = 0;
+    fill_round_rect_px(x, y, w, h, radius, argb_from_rgb(color));
+    vus_gui_mark_dirty();
+    return vus_string_new("1");
+}
+
+/* 图形_画圆(圆心x, 圆心y, 半径, 颜色)：圆外框。 */
+VusString* vus_gui_draw_circle(int cx, int cy, int r, unsigned int color)
+{
+    if (!s_initialized || r < 1) return vus_string_new("0");
+    draw_circle_px(cx, cy, r, argb_from_rgb(color));
+    vus_gui_mark_dirty();
+    return vus_string_new("1");
+}
+
+/* 图形_填充圆(圆心x, 圆心y, 半径, 颜色)：实心圆。 */
+VusString* vus_gui_fill_circle(int cx, int cy, int r, unsigned int color)
+{
+    if (!s_initialized || r < 1) return vus_string_new("0");
+    fill_circle_px(cx, cy, r, argb_from_rgb(color));
+    vus_gui_mark_dirty();
+    return vus_string_new("1");
+}
+
+/* 图形_圆弧(圆心x, 圆心y, 半径, 起始角度, 跨角度, 颜色)：线宽 1。 */
+VusString* vus_gui_draw_arc(int cx, int cy, int r, int start_deg, int sweep_deg,
+                            unsigned int color)
+{
+    if (!s_initialized || r < 1) return vus_string_new("0");
+    draw_arc_px(cx, cy, r, start_deg, sweep_deg, argb_from_rgb(color));
+    vus_gui_mark_dirty();
+    return vus_string_new("1");
+}
+
+/* 图形_外观(圆角半径[, 抗锯齿])：设置全局控件圆角半径（默认 0=直角）。
+ * 抗锯齿参数接受但忽略。返回 "1"。 */
+VusString* vus_gui_appearance(int radius, int aa)
+{
+    (void)aa;
+    if (radius < 0) radius = 0;
+    s_global_radius = radius;
     return vus_string_new("1");
 }
