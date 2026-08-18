@@ -37,20 +37,31 @@ window.VUS.EditorView = {
     });
     this.cm.setOption('extraKeys',
       { 'Ctrl-Space': this.autocomplete.bind(this), 'Ctrl-Enter': function(){ self.runVus(); } });
+    // _syncing 用于区分「设计同步/初始载入」setValue 与用户手改，避免误标未保存
+    this._syncing = true;
     this.cm.setValue(this.store.code);
+    // 光标位置 → 状态栏 行/列
+    this.cm.on('cursorActivity', function () {
+      var cur = self.cm.getCursor();
+      self.store.cursor = { y: (cur.line || 0) + 1, x: (cur.ch || 0) + 1 };
+    });
     // 若设计里已有控件但代码尚为空，主动同步一次，避免切页后短暂空白
     if (!this.store.code && this.store.design.controls.length) {
       C.syncDesignToCode();
     }
-    this.cm.on('change', function () {
-      self.store.code = self.cm.getValue();
+    this.cm.on('change', function (cm) {
+      if (self._syncing) { self._syncing = false; return; }  // 同步触发的 change 不算用户改动
+      self.store.code = cm.getValue();
+      self.store.codeDirty = true;
     });
     // 提供补全宿主
     this.cm.on('keyup', this.maybeHint.bind(this));
-    // 外部代码变化（例如设计同步过来）时刷新编辑器
+    // 外部代码变化（例如设计同步/生成代码）时刷新编辑器并清除未保存标记
     this.unwatch = this.$watch(function () { return self.store.code; }, function (v) {
       if (self.cm && v !== self.cm.getValue()) {
+        self._syncing = true;
         self.cm.setValue(v);
+        self.store.codeDirty = false;
       }
     });
     if (typeof this.cm.showHint === 'undefined') {
@@ -189,6 +200,21 @@ window.VUS.EditorView = {
     applyToDesign: function () {
       C.parseCodeToDesign();
     },
+
+    /* 把当前代码写入工程根目录（需 Token），成功后清除未保存标记 */
+    saveToDisk: async function () {
+      if (!this.store.code) return;
+      if (!this.store.token) { C.toast('err', '请先在设置页填写后端 Token，方可写盘'); return; }
+      var name = String(this.store.design.name || '界面').trim().replace(/[\/\\]/g, '_') || '界面';
+      var file = name + '.vus';
+      var r = await C.fsWrite(file, this.store.code);
+      if (r && r.ok) {
+        this.store.codeDirty = false;
+        C.toast('ok', '已保存 ' + file);
+      } else {
+        C.toast('err', (r && r.error) || '保存失败');
+      }
+    },
   },
 
   template: `
@@ -199,6 +225,7 @@ window.VUS.EditorView = {
         <button @click="compile" :disabled="compiling">{{ compiling ? '检查中…' : '编译检查' }}</button>
         <button class="primary" @click="runVus" :disabled="store.running">运行 VUS</button>
         <button class="ghost" @click="applyToDesign">应用到设计</button>
+        <button class="ghost" @click="saveToDisk" :disabled="!store.code">保存到工程</button>
       </div>
       <div class="editor-wrap">
         <textarea ref="codearea" :value="store.code"></textarea>
