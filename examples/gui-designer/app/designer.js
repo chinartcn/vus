@@ -57,6 +57,18 @@ window.VUS.DesignerView = {
       d.controls.forEach(function (c) {
         try { self.drawControl(c, W, H, radius, T); } catch (e) { /* 单个失败不阻断 */ }
       });
+      // 空态引导骨架（虚线网格水印提示）
+      if (!d.controls.length) {
+        ctx.strokeStyle = 'rgba(120,130,140,0.28)';
+        ctx.setLineDash([6, 6]);
+        ctx.font = '13px ui-monospace,monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.strokeText('从左侧控件库点击添加控件，开始搭建界面', W / 2, H / 2 - 12);
+        ctx.strokeStyle = 'rgba(120,130,140,0.18)';
+        ctx.strokeText('或使用画布上方「示例骨架」一键载入起点', W / 2, H / 2 + 14);
+        ctx.setLineDash([]);
+      }
     },
 
     roundRect: function (x, y, w, h, r) {
@@ -109,7 +121,8 @@ window.VUS.DesignerView = {
       switch (t) {
         case "button": {
           self.roundRect(x, y, w, h, R);
-          ctx.fillStyle = C.cssColor(T.fg); ctx.fill();
+          ctx.fillStyle = C.cssColor(typeof c.color === 'number' ? c.color : T.fg);
+          ctx.fill();
           self.roundRect(x, y, w, h, R);
           ctx.strokeStyle = C.cssColor(T.border); ctx.stroke();
           self.centerText(c.text, x, y, w, h, T.text, 13);
@@ -119,15 +132,16 @@ window.VUS.DesignerView = {
           var mx = Number(c.max) || 100, mn = Number(c.min) || 0, v = Number(c.value) || 0;
           var ratio = Math.max(0, Math.min(1, (v - mn) / (mx - mn || 1)));
           self.roundRect(x, y + h * 0.35, w, h * 0.3, h * 0.15);
-          ctx.fillStyle = C.cssColor(T.border); ctx.fill();
+          ctx.fillStyle = C.cssColor(typeof c.color === 'number' ? c.color : T.highlight); ctx.fill();
           var kx = x + (w - 10) * ratio;
           ctx.beginPath(); ctx.arc(kx, y + h / 2, Math.max(5, h * 0.5), 0, Math.PI * 2);
           ctx.fillStyle = C.cssColor(T.highlight); ctx.fill();
           break;
         }
         case "switch": {
+          var onTrack = typeof c.color === 'number' ? c.color : T.highlight;
           self.roundRect(x, y, w, h, h / 2);
-          ctx.fillStyle = c.on ? C.cssColor(T.highlight) : C.cssColor(T.border);
+          ctx.fillStyle = c.on ? C.cssColor(onTrack) : C.cssColor(T.border);
           ctx.fill();
           var swx = c.on ? x + w - h : x;
           ctx.beginPath(); ctx.arc(swx, y + h / 2, h / 2 - 2, 0, Math.PI * 2);
@@ -176,20 +190,23 @@ window.VUS.DesignerView = {
           break;
         }
         case "circle": {
-          ctx.beginPath(); ctx.arc(x, y, w / 2, 0, Math.PI * 2);
-          ctx.strokeStyle = C.cssColor(c.color || 0x888888); ctx.lineWidth = 2; ctx.stroke(); ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.arc(box.cx, box.cy, box.r, 0, Math.PI * 2);
+          ctx.strokeStyle = C.cssColor(typeof c.color === 'number' ? c.color : T.border);
+          ctx.lineWidth = 2; ctx.stroke(); ctx.lineWidth = 1;
           break;
         }
         case "fill_circle": {
-          ctx.beginPath(); ctx.arc(x, y, w / 2, 0, Math.PI * 2);
-          ctx.fillStyle = C.cssColor(c.color || 0x44AA44); ctx.fill();
+          ctx.beginPath(); ctx.arc(box.cx, box.cy, box.r, 0, Math.PI * 2);
+          ctx.fillStyle = C.cssColor(typeof c.color === 'number' ? c.color : (0x44AA44));
+          ctx.fill();
           break;
         }
         case "arc": {
           var st = (Number(c.start) || 0) * Math.PI / 180;
           var sp = (Number(c.sweep) || 270) * Math.PI / 180;
-          ctx.beginPath(); ctx.arc(x, y, w / 2, st, st + sp);
-          ctx.strokeStyle = C.cssColor(c.color || 0x666666); ctx.lineWidth = 2; ctx.stroke(); ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.arc(box.cx, box.cy, box.r, st, st + sp);
+          ctx.strokeStyle = C.cssColor(typeof c.color === 'number' ? c.color : (0x666666));
+          ctx.lineWidth = 2; ctx.stroke(); ctx.lineWidth = 1;
           break;
         }
         case "progress": {
@@ -198,14 +215,14 @@ window.VUS.DesignerView = {
           var pr = Math.max(0, Math.min(1, (Number(c.value) || 0) / 100));
           if (pr > 0) {
             self.roundRect(x, y, w * pr, h, Math.min(R, h / 2));
-            ctx.fillStyle = C.cssColor(T.highlight); ctx.fill();
+            ctx.fillStyle = C.cssColor(typeof c.color === 'number' ? c.color : T.highlight); ctx.fill();
           }
           break;
         }
         case "textbox": {
           self.roundRect(x, y, w, h, R);
           ctx.fillStyle = "#ffffff"; ctx.fill();
-          ctx.strokeStyle = C.cssColor(T.border); ctx.stroke();
+          ctx.strokeStyle = C.cssColor(typeof c.color === 'number' ? c.color : T.border); ctx.stroke();
           ctx.fillStyle = C.cssColor(T.text); ctx.font = "13px sans-serif";
           ctx.textAlign = "left"; ctx.textBaseline = "middle";
           ctx.fillText(String(c.text || ""), x + 8, y + h / 2 + 1);
@@ -239,6 +256,36 @@ window.VUS.DesignerView = {
     },
 
     clearSelect: function () { this.store.selectedIndex = -1; },
+
+    /* ---- 新手示例骨架 / 清空 ---- */
+    loadSample: function () {
+      var d = this.store.design;
+      d.controls = [];
+      var add = function (type, patch) {
+        var c = C.baseFor(type);
+        for (var k in (patch || {})) c[k] = patch[k];
+        d.controls.push(c);
+      };
+      add('label',     { x: 20, y: 8,  text: 'VUS 界面示例', color: 0x0055AA, size: '18' });
+      add('round_rect', { x: 20, y: 40, w: 440, h: 96, radius: 12, color: 0xCCCCCC });
+      add('label',     { x: 36, y: 54,  text: '欢迎！这是一个示例骨架，可自由改动每个控件。', size: '13' });
+      add('button',    { x: 36, y: 92,  w: 110, h: 34, text: '确定', color: 0x0055AA });
+      add('slider',    { x: 170, y: 96, w: 200, value: 66, min: 0, max: 100, color: 0x00806A });
+      add('switch',    { x: 398, y: 100, on: true, color: 0x00806A });
+      add('progress',  { x: 20, y: 158, w: 440, h: 16, value: 72, color: 0x3AD0A0 });
+      add('textbox',   { x: 20, y: 196, w: 200, h: 32, text: '请输入内容', color: 0x888888 });
+      add('fill_rect', { x: 20, y: 244, w: 90,  h: 40, color: 0xCCEEFF });
+      add('fill_circle',{ cx: 400, cy: 264, r: 26, color: 0xDD7733 });
+      add('circle',    { cx: 356, cy: 264, r: 26, color: 0x00806A });
+      add('arc',       { cx: 312, cy: 264, r: 26, start: 0, sweep: 270, color: 0x666666 });
+      this.store.selectedIndex = -1;
+      C.toast('ok', '已载入示例骨架，可替换为你的界面');
+    },
+    clearCanvas: function () {
+      this.store.design.controls = [];
+      this.store.selectedIndex = -1;
+      C.toast('ok', '画布已清空');
+    },
 
     /* ---- 拖拽 / 缩放 ---- */
     startDrag: function (i, ev) {
@@ -390,6 +437,9 @@ window.VUS.DesignerView = {
           {{ store.exporting ? '生成中…' : '生成代码' }}
         </button>
         <button class="ghost" @click="importFromCode">从代码同步</button>
+        <span class="sep">|</span>
+        <button class="ghost" @click="loadSample" title="载入覆盖常用控件的示例骨架，便于新手起步">示例骨架</button>
+        <button class="ghost danger" @click="clearCanvas" title="清空当前画布">清空</button>
       </div>
 
       <div class="canvas-scroll">

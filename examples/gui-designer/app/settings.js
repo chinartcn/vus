@@ -30,6 +30,7 @@ window.VUS.SettingsView = {
     },
     applyTheme: function (name) {
       this.store.themeName = name;
+      document.documentElement.setAttribute('data-theme', name);
       document.body.setAttribute('data-theme', name);
     },
     toggleSync: function () {

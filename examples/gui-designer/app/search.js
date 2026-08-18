@@ -25,7 +25,8 @@ window.VUS.SearchView = {
       var q = (this.query || '').trim();
       this.searching = true;
       this.results = [];
-      var url = C.apiBase() + '/api/search?q=' + encodeURIComponent(q) +
+      // C.http 会自动拼接 C.apiBase()，这里只需传相对路径避免双前缀
+      var url = '/api/search?q=' + encodeURIComponent(q) +
         '&engine=' + encodeURIComponent(this.store.searchEngine);
       if (this.store.meiliUrl) {
         url += '&meili_url=' + encodeURIComponent(this.store.meiliUrl);
