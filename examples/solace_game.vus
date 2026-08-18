@@ -1,7 +1,8 @@
 #// VUS XYZ 体感音游 —— Solace (Feint & Laura Brehm) 专用脚本
 #//
-#// 谱面：examples/solace.chart.json（174 BPM 手铺，约 4 分 22 秒，574 音符）
-#// 音频：把歌曲按节拍导出为 WAV，命名为 examples/solace.wav 与谱面对应。
+#// 谱面：examples/solace.chart.json（vus chart 对 Solace.mp3 真实 FFT 卡点铺面，
+#//       约 4 分 29 秒，405 音符；轴已重标为 X/Y/Z 轮换以提升体感可玩性）
+#// 音频：仓库根目录 Solace.mp3（mpv 播放），真机请放置在可访问路径。
 #// 真机（Termux + termux-sensor + mpv，已启 Termux-X11）：
 #//     ./vus run examples/solace_game.vus
 #// 沙箱/无传感器/mpv 时静默降级（读数为 0、计时改用单调时钟），仅演示渲染与判定逻辑。
@@ -25,8 +26,8 @@ note总数 = 转数字(对象文本(JSON_查询(谱面, "note_count")))
 打印("谱面：" + 标题 + "  节拍数：" + note总数 + "\n")
 
 # ============ 音频与计时 ============
-音频_打开("examples/solace.wav")
-音频_打开("solace.wav")
+音频_打开("Solace.mp3")
+音频_打开("examples/Solace.mp3")
 音频_播放()
 # 沙箱无 mpv 时音频进度恒为 0，改用单调时钟演示计时
 基准 = 转数字(时钟())
