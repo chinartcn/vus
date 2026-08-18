@@ -15,6 +15,7 @@
 #include "vus_lang.h"
 #include "vus_vusx.h"
 #include "vus_apk.h"
+#include "vus_chart.h"
 #include "lsp/lsp.h"
 
 #include <stdio.h>
@@ -635,6 +636,7 @@ static void print_help(void) {
     printf("  vusx list              列出项目中的 vusx 依赖\n");
     printf("  vusx info   <路径>     查看 vusx 插件信息\n");
     printf("  vusx build  <路径>     编译 vusx 插件\n");
+    printf("  chart <音频> [-o 文件] 生成体感音游谱面 chart.json\n");
     printf("  update                 自动更新编译器\n");
     printf("  --version, -v          显示版本信息\n");
     printf("  --help, -h             显示此帮助\n\n");
@@ -1152,6 +1154,11 @@ int main(int argc, char *argv[]) {
     /* lsp 语言服务器（标准输入输出 JSON-RPC 补全服务） */
     if (strcmp(cmd, "lsp") == 0) {
         return vus_lsp_main(argc, argv);
+    }
+
+    /* chart 谱面生成（体感音游） */
+    if (strcmp(cmd, "chart") == 0) {
+        return vus_chart_main(argc - 1, argv + 1);
     }
 
     /* 未知命令 */

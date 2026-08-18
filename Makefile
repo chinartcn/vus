@@ -30,6 +30,7 @@ SRCS     = $(SRC_DIR)/main.c $(SRC_DIR)/token.c $(SRC_DIR)/lexer.c \
            $(SRC_DIR)/parser.c $(SRC_DIR)/generator.c $(SRC_DIR)/config.c \
            $(SRC_DIR)/ast.c $(SRC_DIR)/vus_abi.c $(SRC_DIR)/vus_plugin.c \
            $(SRC_DIR)/vus_lang.c $(SRC_DIR)/vus_vusx.c $(SRC_DIR)/vus_apk.c \
+           $(SRC_DIR)/vus_chart.c \
            $(SRC_DIR)/lsp/lsp.c $(SRC_DIR)/lsp/vus_builtin.c
 OBJS     = $(SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
 RT_SRC   = $(RT_DIR)/libvus_rt.c
@@ -54,6 +55,10 @@ GUI_DIR = $(RT_DIR)/guilite
 GUI_SRC = $(RT_DIR)/guilite_bridge.c $(RT_DIR)/guilite_platform.c $(RT_DIR)/guilite_wrapper.cpp $(RT_DIR)/gifdec/gifdec.c
 GUI_OBJ = $(BUILD_DIR)/guilite_bridge.o $(BUILD_DIR)/guilite_platform.o $(BUILD_DIR)/guilite_wrapper.o $(BUILD_DIR)/gifdec.o
 GUI_INC = -I$(RT_DIR) -I$(GUI_DIR)
+
+# VUS XYZ 体感音游运行时（传感器/时钟/音频控制，并入运行时静态库）
+XYZ_SRC = $(RT_DIR)/vus_xyz.c
+XYZ_OBJ = $(BUILD_DIR)/vus_xyz.o
 
 # EGL + OpenGL ES 底层 GPU 上屏（可选，默认关闭）：
 #   启用：make VUS_GUI_GLES=1
@@ -143,6 +148,12 @@ VUSX_INT = $(SRC_DIR)/vus_vusx.h
 $(BUILD_DIR)/vus_vusx.o: $(SRC_DIR)/vus_vusx.c $(VUSX_H) $(VUSX_INT) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c -o $@ $<
 
+# 谱面生成（体感音游）
+CHART_H = $(SRC_DIR)/vus_chart.h
+
+$(BUILD_DIR)/vus_chart.o: $(SRC_DIR)/vus_chart.c $(CHART_H) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(SRC_DIR) -c -o $@ $<
+
 # APK 打包
 APK_H = $(SRC_DIR)/vus_apk.h
 
@@ -197,12 +208,16 @@ $(BUILD_DIR)/guilite_wrapper.o: $(RT_DIR)/guilite_wrapper.cpp $(GUI_DIR)/GuiLite
 $(BUILD_DIR)/gifdec.o: $(RT_DIR)/gifdec/gifdec.c $(RT_DIR)/gifdec/gifdec.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -I$(RT_DIR) -c -o $@ $<
 
+# 编译 VUS XYZ 体感音游运行时（传感器/时钟/音频控制）
+$(XYZ_OBJ): $(XYZ_SRC) $(RT_H) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(RT_DIR) -c -o $@ $<
+
 # 编译 yyjson 单文件 JSON 库（纯 C，并入运行时静态库）
 $(YYJSON_OBJ): $(YYJSON_SRC) | $(BUILD_DIR)
 	$(CC) -Wall -Wextra -O2 -std=c11 $(YYJSON_INC) -c -o $@ $<
 
 # 运行时库静态归档（含 vus_coro.o、yyjson、easylogger elog.o 与 GuiLite 图形库）
-$(RT_LIB): $(RT_OBJ) $(RT_CORO_OBJ) $(YYJSON_OBJ) $(EL_OBJ) $(GUI_OBJ) $(GLES_ARCHIVE_OBJ)
+$(RT_LIB): $(RT_OBJ) $(RT_CORO_OBJ) $(YYJSON_OBJ) $(EL_OBJ) $(GUI_OBJ) $(XYZ_OBJ) $(GLES_ARCHIVE_OBJ)
 	ar rcs $@ $^
 
 # =============================================================================
