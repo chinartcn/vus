@@ -57,6 +57,51 @@ static int     g_sens_got       = 0;   /* 曾解析到真实读数 */
 static int     g_sens_eof_warn  = 0;   /* 子进程退出(命令缺失)已提示 */
 static int     g_sens_idle_warn = 0;   /* 有进程但长期无数据(未授权)已提示 */
 
+/* 探测设备上加速度计的显示名（termux-sensor 的 -s 按显示名匹配，可能为大写）：
+   运行一次 `termux-sensor -l`，从输出里找含 "accelerometer"（忽略大小写）的名称。
+   返回缓存名；失败返回 NULL（调用方再兜底用小写）。 */
+static const char* sensor_probe_name(void)
+{
+    static char cname[64];
+    if (cname[0]) return cname;
+    int pfd[2];
+    if (pipe(pfd) != 0) return NULL;
+    pid_t pid = fork();
+    if (pid < 0) { close(pfd[0]); close(pfd[1]); return NULL; }
+    if (pid == 0) {
+        dup2(pfd[1], STDOUT_FILENO);
+        dup2(pfd[1], STDERR_FILENO);
+        close(pfd[0]); close(pfd[1]);
+        execlp("termux-sensor", "termux-sensor", "-l", (char*)NULL);
+        _exit(127);
+    }
+    close(pfd[1]);
+    char buf[2048];
+    ssize_t n = read(pfd[0], buf, sizeof(buf) - 1);
+    close(pfd[0]);
+    waitpid(pid, NULL, 0);
+    if (n <= 0) return NULL;
+    buf[n] = '\0';
+    for (char* p = buf; (p = strchr(p, '"')) != NULL;) {
+        char* q = strchr(p + 1, '"');
+        if (!q) break;
+        size_t len = (size_t)(q - p - 1);
+        if (len > 0 && len < sizeof(cname)) {
+            char tmp[68], low[68];
+            memcpy(tmp, p + 1, len); tmp[len] = '\0';
+            memcpy(low, tmp, len + 1);
+            for (char* t = low; *t; t++) if (*t >= 'A' && *t <= 'Z') *t += 32;
+            if (strstr(low, "accelerometer")) {
+                strncpy(cname, tmp, sizeof(cname) - 1);
+                cname[sizeof(cname) - 1] = '\0';
+                return cname;
+            }
+        }
+        p = q + 1;
+    }
+    return NULL;
+}
+
 static void sensor_spawn(void)
 {
     int pfd[2];
@@ -64,11 +109,14 @@ static void sensor_spawn(void)
     pid_t pid = fork();
     if (pid < 0) { close(pfd[0]); close(pfd[1]); return; }
     if (pid == 0) {
+        /* 优先用探测到的真实显示名（可能是大写），否则兜底小写 */
+        const char* sname = sensor_probe_name();
+        if (!sname) sname = "accelerometer";
         /* 子进程：termux-sensor 持续输出加速度计，写管道 */
         dup2(pfd[1], STDOUT_FILENO);
         close(pfd[0]); close(pfd[1]);
         execlp("termux-sensor", "termux-sensor",
-               "-s", "accelerometer", "-n", "100000", "-d", "100", (char*)NULL);
+               "-s", sname, "-n", "100000", "-d", "100", (char*)NULL);
         _exit(127);
     }
     close(pfd[1]);
