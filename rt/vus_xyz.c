@@ -56,6 +56,15 @@ static double  g_sens[3] = {0.0, 0.0, 0.0};   /* x, y, z (m/s²，未换算) */
 static int     g_sens_got       = 0;   /* 曾解析到真实读数 */
 static int     g_sens_eof_warn  = 0;   /* 子进程退出(命令缺失)已提示 */
 static int     g_sens_idle_warn = 0;   /* 有进程但长期无数据(未授权)已提示 */
+static int64_t g_sens_t0        = 0;   /* 上次 spawn 的时刻(ms)，用于首帧缓告警 */
+
+/* 单调毫秒（供传感器首帧缓告警的时序判断） */
+static int64_t now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
 
 /* 探测设备上加速度计的显示名（termux-sensor 的 -s 按显示名匹配，可能为大写）：
    运行一次 `termux-sensor -l`，从输出里找含 "accelerometer"（忽略大小写）的名称。
@@ -123,6 +132,7 @@ static void sensor_spawn(void)
     fcntl(pfd[0], F_SETFL, fcntl(pfd[0], F_GETFL, 0) | O_NONBLOCK);
     g_sens_pid = pid;
     g_sens_fd  = pfd[0];
+    g_sens_t0  = now_ms();   /* 记录 spawn 时刻，供首帧 1.5s 缓告警 */
 }
 
 /* 从一行 termux-sensor JSON 提取 values 前三个元素（加速计 x,y,z）。*/
@@ -166,11 +176,11 @@ VusString* vus_sensor_read(const char* axis)
                 g_sens_eof_warn = 1;
             }
         } else if (!g_sens_got) {
-            /* 有进程但尚未解析到数据：通常为 Termux:API 尚未授权传感器 */
-            if (!g_sens_idle_warn) {
+            /* 有进程但启动 1.5 秒后仍未解析到数据，才提示一次，避免首帧时序误导 */
+            if (!g_sens_idle_warn && (now_ms() - g_sens_t0) > 1500) {
                 fprintf(stderr,
-                    "[vus] 传感器暂无读到数据：请在 Termux 终端运行一次 "
-                    "`termux-sensor -s accelerometer -n 1` 以允许加速度计访问。\n");
+                    "[vus] 传感器启动 1.5 秒后仍无读数：请确认 Termux:API 已授权加速度计，"
+                    "并可先用 `termux-sensor -s accelerometer -n 1` 测试。\n");
                 g_sens_idle_warn = 1;
             }
         }
