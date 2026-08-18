@@ -152,9 +152,10 @@ function registerVusServer(base, abi) {
   return bin;
 }
 
-/** 延迟到编辑器就绪后执行注册（LSP API 依赖码镜编辑器初始化） */
+/** 延迟到编辑器就绪后执行注册（LSP API 依赖码镜编辑器初始化）。
+ * 返回 true 表示本次完成了首次注册；false 表示已注册或已失败（供调用方决定是否重启客户端）。 */
 function registerVus() {
-  if (serversRegistered) return;
+  if (serversRegistered) return false;
   const abi = detectAbi();
   const base = resolveDir(this?.baseUrl || "");
 
@@ -174,23 +175,33 @@ function registerVus() {
   } catch (err) {
     console.error("[vus-lsp] 服务器注册失败：", err);
     notify("VUS LSP 注册失败: " + err.message);
+    return false;
   }
+  return true;
 }
 
 /* ============ ACode 官方入口 ============ */
 
 function init(baseUrl) {
-  try {
-    const editorManager = acode.require("editorManager");
-    if (editorManager && typeof editorManager.on === "function") {
-      // 编辑器就绪后再注册；activeFileChange 触发时 baseUrl 已可用
-      editorManager.on("activeFileChange", () => registerVus.call({ baseUrl }));
-    }
-  } catch (err) {
-    console.warn("[vus-lsp] 监听 activeFileChange 失败：", err);
+  const editorManager = acode.require("editorManager");
+
+  // 首次注册；成功后重启活动文件客户端，让已打开的 .vus 立即连上服务器
+  const fresh = registerVus.call({ baseUrl });
+  if (fresh && editorManager && typeof editorManager.restartLsp === "function") {
+    editorManager.restartLsp();
   }
-  // 先尝试一次，失败无副作用（activeFileChange 会重试直到就绪）
-  registerVus.call({ baseUrl });
+
+  if (editorManager && typeof editorManager.on === "function") {
+    // 用官方事件名 switch-file 重试注册（编辑器就绪前首次可能失败）
+    editorManager.on("switch-file", () => {
+      const next = registerVus.call({ baseUrl });
+      if (next && typeof editorManager.restartLsp === "function") {
+        editorManager.restartLsp();
+      }
+    });
+  } else {
+    console.warn("[vus-lsp] editorManager 不可用，无法在文件切换时重试注册");
+  }
 }
 
 function unmount() {

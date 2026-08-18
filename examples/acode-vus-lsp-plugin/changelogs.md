@@ -1,5 +1,17 @@
 # 更新日志
 
+## v0.1.3 (2026-08-18)
+
+### 修复
+- 监听错误事件名 `activeFileChange` → 官方 `switch-file`，修复「编辑器就绪前注册失败后不重试」的问题。
+- 注册成功后调用 `editorManager.restartLsp()`，让已打开的 `.vus` 文件立即连上服务器（修复「装完仍没补全」的常见原因）。
+- 重读官方 LSP API：确认 `defineServer(command,args)` 即本地 stdio 经 AXS WebSocket 桥的标准用法；`upsert()`、`minVersionCode=1002` 用法不变。
+
+## v0.1.2 (2026-08-17)
+
+### 新增
+- 运行时 Toast 自诊断：注册成功/失败弹出提示（含二进制路径），便于真机定位断点（语言路由 vs 二进制启动）。
+
 ## v0.1.0 (2026-08-17)
 
 首发版本。
