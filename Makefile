@@ -51,8 +51,8 @@ EL_INC = -I$(EL_DIR)/inc
 
 # GuiLite 图形库（VUS GUI 集成）：C++ 包装 + C 桥接 + C 平台层
 GUI_DIR = $(RT_DIR)/guilite
-GUI_SRC = $(RT_DIR)/guilite_bridge.c $(RT_DIR)/guilite_platform.c $(RT_DIR)/guilite_wrapper.cpp
-GUI_OBJ = $(BUILD_DIR)/guilite_bridge.o $(BUILD_DIR)/guilite_platform.o $(BUILD_DIR)/guilite_wrapper.o
+GUI_SRC = $(RT_DIR)/guilite_bridge.c $(RT_DIR)/guilite_platform.c $(RT_DIR)/guilite_wrapper.cpp $(RT_DIR)/gifdec/gifdec.c
+GUI_OBJ = $(BUILD_DIR)/guilite_bridge.o $(BUILD_DIR)/guilite_platform.o $(BUILD_DIR)/guilite_wrapper.o $(BUILD_DIR)/gifdec.o
 GUI_INC = -I$(RT_DIR) -I$(GUI_DIR)
 
 # EGL + OpenGL ES 底层 GPU 上屏（可选，默认关闭）：
@@ -192,6 +192,10 @@ $(BUILD_DIR)/guilite_gles.o: $(RT_DIR)/guilite_gles.c $(RT_DIR)/guilite_gles.h |
 
 $(BUILD_DIR)/guilite_wrapper.o: $(RT_DIR)/guilite_wrapper.cpp $(GUI_DIR)/GuiLite.h | $(BUILD_DIR)
 	$(CXX) -Wall -Wextra -g -O2 $(GUI_INC) -c -o $@ $<
+
+# 编译 gifdec（CC0 单驱动 GIF 解码库，随 GUI 桥接链入静态库）
+$(BUILD_DIR)/gifdec.o: $(RT_DIR)/gifdec/gifdec.c $(RT_DIR)/gifdec/gifdec.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(RT_DIR) -c -o $@ $<
 
 # 编译 yyjson 单文件 JSON 库（纯 C，并入运行时静态库）
 $(YYJSON_OBJ): $(YYJSON_SRC) | $(BUILD_DIR)

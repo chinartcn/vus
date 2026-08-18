@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HTML 高级排版设计器 · VUS</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="toolbar">
+    <div class="brand">VUS 排版设计器</div>
+
+    <div class="tool-group">
+      <span class="tool-label">画布</span>
+      <input type="number" id="canvasW" value="480" min="16" title="逻辑宽度">
+      <span class="sep">×</span>
+      <input type="number" id="canvasH" value="320" min="16" title="逻辑高度">
+      <span class="unit">px</span>
+    </div>
+
+    <div class="tool-group">
+      <span class="tool-label">圆角</span>
+      <input type="number" id="canvasRadius" value="8" min="0" title="全局控件圆角">
+    </div>
+
+    <div class="tool-group theme-group">
+      <span class="tool-label">主题</span>
+      <label class="swatch" title="背景"><input type="color" id="themeBg" value="#ffffff"></label>
+      <label class="swatch" title="边框"><input type="color" id="themeBorder" value="#888888"></label>
+      <label class="swatch" title="高亮"><input type="color" id="themeHl" value="#0055aa"></label>
+      <label class="swatch" title="前景"><input type="color" id="themeFg" value="#333333"></label>
+      <label class="swatch" title="文字"><input type="color" id="themeText" value="#000000"></label>
+    </div>
+
+    <div class="tool-group">
+      <button id="btnExport" class="primary">导出 .vus</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="palette">
+      <h3>控件库 <small>点击添加到画布中心</small></h3>
+      <div id="paletteList" class="palette-list"></div>
+    </aside>
+
+    <section class="canvas-pane">
+      <div class="canvas-scroll">
+        <div id="canvasBox">
+          <canvas id="preview"></canvas>
+          <div id="overlay"></div>
+        </div>
+      </div>
+      <div class="status" id="status">就绪</div>
+    </section>
+
+    <aside class="props">
+      <h3>属性</h3>
+      <div id="propsPanel">
+        <p class="muted">未选中控件。<br>从左侧控件库添加，或在画布中点击一个控件进行编辑。</p>
+      </div>
+    </aside>
+  </main>
+
+  <!-- 导出结果弹窗 -->
+  <div id="exportModal" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-head">
+        <span>导出的 .vus 源码（共 <b id="modalCount"></b> 个控件）</span>
+        <button id="modalClose" class="ghost">关闭</button>
+      </div>
+      <textarea id="exportText" readonly spellcheck="false"></textarea>
+      <div class="modal-foot">
+        <a id="downloadLink" class="link-btn" download="design.vus">下载 .vus</a>
+        <span id="exportError" class="error-text"></span>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

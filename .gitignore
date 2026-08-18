@@ -25,3 +25,11 @@ Thumbs.db
 # Python 缓存
 __pycache__/
 *.pyc
+
+# GUI 运行输出与调试产物
+gui_out.ppm
+**/gui_out.ppm
+examples/gui-designer/构建/
+
+# 运行时日志
+tests/vus.log

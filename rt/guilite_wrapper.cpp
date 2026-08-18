@@ -19,14 +19,20 @@
 #include "guilite_bridge.h"
 
 #include <stdlib.h>
+#include <string.h>
 
 /* 集成的 8x8 位图字体（Public Domain，见 font8x8_basic.h） */
 #include "guilite/font8x8_basic.h"
 
-/* ============ 内部全局状态 ============ */
-static unsigned int* s_fb = 0;      /* ARGB8888 物理帧缓冲 */
+/* ============ 内部全局状态（双缓冲） ============
+ * s_back：后台缓冲（绘制目标）。所有 VUS 绘制调用写入这里。
+ * s_fb  ：前台缓冲（显示目标）。vus_gui_surface_present() 把后台一次性
+ *          memcpy 到前台，platform_redraw 再把前台送上屏/导出 PPM。
+ * 这样整帧绘制完成后再原子上屏，避免绘制过程的部分像素闪现（撕裂/闪烁）。 */
+static unsigned int* s_fb = 0;      /* ARGB8888 前台物理帧缓冲（显示） */
+static unsigned int* s_back = 0;    /* ARGB8888 后台帧缓冲（绘制） */
 static c_display*    s_display = 0; /* GuiLite display（拥有 surface） */
-static c_surface*    s_surface = 0; /* 绘制 surface */
+static c_surface*    s_surface = 0; /* 绘制 surface（绑定后台缓冲） */
 static c_lattice_font_op s_font_op; /* 字体绘制算子 */
 static int           s_width = 0;
 static int           s_height = 0;
@@ -102,15 +108,19 @@ int vus_gui_surface_init(int width, int height)
     s_width = width;
     s_height = height;
     s_fb = (unsigned int*)calloc((size_t)width * (size_t)height, sizeof(unsigned int));
-    if (!s_fb)
+    s_back = (unsigned int*)calloc((size_t)width * (size_t)height, sizeof(unsigned int));
+    if (!s_fb || !s_back)
     {
+        if (s_fb) { free(s_fb); s_fb = 0; }
+        if (s_back) { free(s_back); s_back = 0; }
         return -1;
     }
-    /* 单 surface，color_bytes=4（ARGB8888），driver=NULL（直接写 m_phy_fb） */
-    s_display = new c_display((void*)s_fb, width, height, width, height, 4, 1, NULL);
+    /* 单 surface，color_bytes=4（ARGB8888），driver=NULL（直接写 m_phy_fb）。
+     * surface 挂到后台缓冲 s_back：所有绘制写后台，上屏时再 present 到前台。 */
+    s_display = new c_display((void*)s_back, width, height, width, height, 4, 1, NULL);
     s_surface = s_display->alloc_surface(Z_ORDER_LEVEL_0, c_rect(0, 0, width - 1, height - 1));
     /* 激活 surface：draw_pixel_low_level 仅在 m_is_active 为真时才把像素写进
-     * 物理帧缓冲 m_phy_fb（即 s_fb），否则绘制只在图层缓冲中、ref 不到。 */
+     * 物理帧缓冲 m_phy_fb（即 s_back），否则绘制只在图层缓冲中、ref 不到。 */
     s_surface->set_active(true);
     c_theme::add_font(FONT_DEFAULT, (const void*)&s_font_info);
     return 0;
@@ -127,6 +137,11 @@ void vus_gui_surface_free(void)
     {
         free(s_fb);
         s_fb = 0;
+    }
+    if (s_back)
+    {
+        free(s_back);
+        s_back = 0;
     }
     s_surface = 0;
     s_width = 0;
@@ -171,6 +186,22 @@ void vus_gui_surface_draw_text(int x, int y, const char* text, unsigned int argb
 unsigned int* vus_gui_surface_framebuffer(void)
 {
     return s_fb;
+}
+
+/* 后台绘制缓冲：桥接层逐像素写入（write_scrolled_pixel / read_scrolled_pixel）
+ * 应写入后台，redraw 时 present 到前台再上屏。 */
+unsigned int* vus_gui_surface_backbuffer(void)
+{
+    return s_back;
+}
+
+/* 双缓冲提交：把后台整块拷贝到前台。之后 platform_redraw 读前台送入显示。 */
+void vus_gui_surface_present(void)
+{
+    if (s_fb && s_back && s_width > 0 && s_height > 0)
+    {
+        memcpy(s_fb, s_back, (size_t)s_width * (size_t)s_height * sizeof(unsigned int));
+    }
 }
 
 int vus_gui_surface_width(void)

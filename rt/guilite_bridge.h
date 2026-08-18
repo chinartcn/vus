@@ -63,7 +63,9 @@ void vus_gui_surface_draw_line(int x1, int y1, int x2, int y2, unsigned int argb
 void vus_gui_surface_draw_rect(int x, int y, int width, int height, unsigned int argb);
 void vus_gui_surface_fill_rect(int x, int y, int width, int height, unsigned int argb);
 void vus_gui_surface_draw_text(int x, int y, const char* text, unsigned int argb);
-unsigned int* vus_gui_surface_framebuffer(void);           /* 返回 ARGB8888 帧缓冲指针 */
+unsigned int* vus_gui_surface_framebuffer(void);           /* 返回前台 ARGB8888 帧缓冲指针（显示目标） */
+unsigned int* vus_gui_surface_backbuffer(void);            /* 返回后台 ARGB8888 帧缓冲指针（绘制目标） */
+void vus_gui_surface_present(void);                        /* 双缓冲提交：后台整块拷贝到前台 */
 int vus_gui_surface_width(void);
 int vus_gui_surface_height(void);
 
@@ -215,6 +217,46 @@ VusString* vus_gui_canvas_hit(const char* name);
 
 /* 画布相对坐标：最近一次画布命中的相对位置，返回 "x,y"；未命中返回 "-1,-1"。 */
 VusString* vus_gui_canvas_pos(const char* name);
+
+/* ============ 阶段G：图片 / GIF 动画 ============
+ * 图形_图片(x, y, 宽, 高, 路径)：按扩展名（.png/.svg/.gif，其它按 PNG）解码
+ * 图像并最近邻拉伸绘制到矩形 (x,y,w,h)。返回 "1" 成功 / "0" 失败
+ * （文件缺失/未知格式/解码失败）。 */
+VusString* vus_gui_draw_image(int x, int y, int w, int h, const char* path);
+
+/* GIF 播放器：静态槽表（VUS_GIF_MAX 个），每条用一个 gd_GIF 句柄。 */
+VusString* vus_gui_anim_open(const char* name, const char* path);  /* 图形_动画_打开 */
+VusString* vus_gui_anim_next(const char* name, int x, int y);      /* 图形_动画_下一步 */
+VusString* vus_gui_anim_frames(const char* name);                  /* 图形_动画_帧数 */
+VusString* vus_gui_anim_close(const char* name);                   /* 图形_动画_关闭 */
+
+/* ============ 阶段H：高级交互控件 ============ */
+/* 滑块（图形_滑块）：水平轨道 + 滑块块，min/max 缺省 0/100。
+ * 点击轨道按 x 换算新值写入控件并返回当前值整数字符串。 */
+VusString* vus_gui_slider(const char* name, int x, int y, int w, int value, int minv, int maxv);
+VusString* vus_gui_slider_value(const char* name);   /* 图形_滑块值 */
+
+/* 开关（图形_开关）：圆角底 + 圆形旋钮，点击切换。返回 "true"/"false"。 */
+VusString* vus_gui_switch(const char* name, int x, int y, int state);
+VusString* vus_gui_switch_value(const char* name);   /* 图形_开关值 */
+
+/* 微调（图形_微调）：左减右加两个按钮 + 中间数值，步长缺省 1。 */
+VusString* vus_gui_spin(const char* name, int x, int y, int value, int step);
+VusString* vus_gui_spin_value(const char* name);     /* 图形_微调值 */
+
+/* 单选（图形_单选）：options 用分号 ";" 分隔的多选项，绘制一列单选钮。 */
+VusString* vus_gui_radio(const char* name, int x, int y, int item_h, const char* options, int sel);
+VusString* vus_gui_radio_value(const char* name);    /* 图形_单选值 */
+
+/* ============ 阶段I：高级外观 ============ */
+VusString* vus_gui_round_rect(int x, int y, int w, int h, int radius, unsigned int color); /* 图形_圆角矩形 */
+VusString* vus_gui_round_fill(int x, int y, int w, int h, int radius, unsigned int color); /* 图形_圆角填充 */
+VusString* vus_gui_draw_circle(int cx, int cy, int r, unsigned int color);  /* 图形_画圆 */
+VusString* vus_gui_fill_circle(int cx, int cy, int r, unsigned int color);  /* 图形_填充圆 */
+VusString* vus_gui_draw_arc(int cx, int cy, int r, int start_deg, int sweep_deg, unsigned int color); /* 图形_圆弧 */
+/* 图形_外观(圆角半径[, 抗锯齿])：设置全局控件圆角半径 s_global_radius（默认 0=直角）。
+ * 半径>0 时 图形_按钮 改为圆角外观。返回 "1"。抗锯齿参数可忽略。 */
+VusString* vus_gui_appearance(int radius, int aa);
 
 #ifdef __cplusplus
 }
