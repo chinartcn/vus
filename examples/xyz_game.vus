@@ -28,8 +28,10 @@ note总数 = 转数字(对象文本(JSON_查询(谱面, "note_count")))
 打印("谱面：" + 标题 + "  节拍数：" + note总数 + "\n")
 
 # ============ 音频与计时 ============
-音频_打开("examples/beat_test.wav")
-音频_打开("beat_test.wav")
+r_audio = 0
+r_audio = 转数字(音频_打开("examples/beat_test.wav"))
+如果 r_audio <= 0:
+    转数字(音频_打开("beat_test.wav"))
 音频_播放()
 # 沙箱无 mpv 时音频进度恒为 0，改用单调时钟演示计时
 基准 = 转数字(时钟())
