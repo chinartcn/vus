@@ -24,6 +24,10 @@ typedef struct {
     int     indent;
 } GenBuf;
 
+/* 当前是否正在生成 main 函数体。用于让顶层「返回」生成 `return 0;`，
+ * 避免 int main 中出现无返回值的 `return;` 在严格编译下报错。 */
+static int s_gen_in_main = 0;
+
 /* ============ 缓冲区操作 ============ */
 
 static GenBuf *gen_buf_new(void) {
@@ -2218,6 +2222,7 @@ static void gen_stmt_while(GenBuf *buf, VusAstWhile *wl) {
 }
 
 static void gen_stmt_return(GenBuf *buf, VusAstReturn *ret) {
+    const char *ret_stmt = s_gen_in_main ? "return 0;" : "return;";
     if (ret->value) {
         char *val = gen_expr(buf, ret->value);
         gen_emit_linef(buf, "{ VusString* _tmp = %s;", val);
@@ -2226,11 +2231,11 @@ static void gen_stmt_return(GenBuf *buf, VusAstReturn *ret) {
         gen_emit_line(buf, "vus_unref(_vus_params[0]);");
         gen_emit_line(buf, "_vus_params[0] = _tmp; }");
         gen_emit_line(buf, "vus_stack_pop();");
-        gen_emit_line(buf, "return;");
+        gen_emit_line(buf, ret_stmt);
         free(val);
     } else {
         gen_emit_line(buf, "vus_stack_pop();");
-        gen_emit_line(buf, "return;");
+        gen_emit_line(buf, ret_stmt);
     }
 }
 
@@ -2641,6 +2646,8 @@ static void gen_main_function(GenBuf *buf, VusAstProgram *program, int debug) {
     gen_emit_line(buf, "int main(void) {");
     buf->indent++;
 
+    s_gen_in_main = 1;
+
     if (debug) {
         gen_emit_line(buf, "vus_debug_enabled = 1;");
     }
@@ -2661,6 +2668,8 @@ static void gen_main_function(GenBuf *buf, VusAstProgram *program, int debug) {
     gen_emit_line(buf, "return 0;");
     buf->indent--;
     gen_emit_line(buf, "}");
+
+    s_gen_in_main = 0;
 }
 
 /* ============ 公开 API 实现 ============ */
