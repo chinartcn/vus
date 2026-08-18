@@ -218,28 +218,36 @@ VusString* vus_audio_open(const char* path)
         return vus_to_string(0);
     }
 
-    pid_t pid = fork();
-    if (pid < 0) return vus_to_string(0);
-    if (pid == 0) {
-        int devnull = open("/dev/null", O_WRONLY);
-        if (devnull >= 0) { dup2(devnull, STDOUT_FILENO); dup2(devnull, STDERR_FILENO); }
-        char ipc[128];
-        snprintf(ipc, sizeof(ipc), "--input-ipc-server=%s", MPV_SOCK);
-        /* --ao=opensles：Termux/Android 标准音频输出，避免默认静音导致"没声音" */
-        execlp("mpv", "mpv", "--no-video", "--quiet", "--ao=opensles", ipc, path, (char*)NULL);
-        _exit(127);
+    /* 依次尝试输出后端：Termux 常用 opensles 优先；若 mpv 未编译该 ao 会立即
+       退出（无 IPC socket），则回退到 mpv 默认输出，避免"没声音"与"起不来"二选一。 */
+    const char* aos[2] = { "--ao=opensles", NULL };
+    for (int attempt = 0; attempt < 2; attempt++) {
+        unlink(MPV_SOCK);
+        pid_t pid = fork();
+        if (pid < 0) return vus_to_string(0);
+        if (pid == 0) {
+            int devnull = open("/dev/null", O_WRONLY);
+            if (devnull >= 0) { dup2(devnull, STDOUT_FILENO); dup2(devnull, STDERR_FILENO); }
+            char ipc[128];
+            snprintf(ipc, sizeof(ipc), "--input-ipc-server=%s", MPV_SOCK);
+            if (aos[attempt])
+                execlp("mpv", "mpv", "--no-video", "--quiet", aos[attempt], ipc, path, (char*)NULL);
+            else
+                execlp("mpv", "mpv", "--no-video", "--quiet", ipc, path, (char*)NULL);
+            _exit(127);
+        }
+        g_mpv_pid = pid;
+        if (mpv_wait_ready() == 0) {
+            g_mpv_fd = mpv_connect();
+            if (g_mpv_fd >= 0) return vus_to_string(1);
+        }
+        /* 该后端未连通（mpv 未启动/瞬退）：清理后换下一套参数重试 */
+        kill(pid, SIGKILL); waitpid(pid, NULL, 0);
+        g_mpv_pid = 0; g_mpv_fd = -1;
     }
-    g_mpv_pid = pid;
-    if (mpv_wait_ready() != 0) {
-        kill(pid, SIGKILL); waitpid(pid, NULL, 0); g_mpv_pid = 0;
-        fprintf(stderr,
-            "[vus] 未能启动 mpv 音频：请确认已 `pkg install mpv`；"
-            "若已安装仍无声音，请确认 Termux 音频输出可用（ao=opensles）。\n");
-        return vus_to_string(0);
-    }
-    g_mpv_fd = mpv_connect();
-    if (g_mpv_fd < 0) return vus_to_string(0);
-    return vus_to_string(1);
+    fprintf(stderr,
+        "[vus] 未能启动 mpv 音频：请确认已 `pkg install mpv`；若已安装仍无声音，请确认 Termux 音频输出可用。\n");
+    return vus_to_string(0);
 }
 
 VusString* vus_audio_play(void)     { return vus_to_string(mpv_send("{\"command\":[\"set_property\",\"pause\",false]}") == 0 ? 1 : 0); }

@@ -26,8 +26,12 @@ note总数 = 转数字(对象文本(JSON_查询(谱面, "note_count")))
 打印("谱面：" + 标题 + "  节拍数：" + note总数 + "\n")
 
 # ============ 音频与计时 ============
-音频_打开("Solace.mp3")
-音频_打开("examples/Solace.mp3")
+# 主路径 Solace.mp3 在仓库根目录；失败才尝试 examples/ 下的同名文件。
+# 一旦成功就不再打开 else 分支（避免二次 open 把已起动的 mpv 杀掉）。
+r_audio = 0
+r_audio = 转数字(音频_打开("Solace.mp3"))
+如果 r_audio <= 0:
+    转数字(音频_打开("examples/Solace.mp3"))
 音频_播放()
 # 沙箱无 mpv 时音频进度恒为 0，改用单调时钟演示计时
 基准 = 转数字(时钟())
