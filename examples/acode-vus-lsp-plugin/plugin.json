@@ -1,13 +1,13 @@
 {
   "id": "org.vus.lsp",
   "name": "VUS 语言服务器 (LSP)",
-  "version": "0.1.0",
-  "main": "main.js",
-  "description": "为 VUS 语言接入 ACode 的官方 LSP API：三层补全、文档符号、命令执行。vus 二进制随插件打包（bin/<abi>/vus），按设备 ABI 自动选用。",
+  "version": "0.2.0",
+  "main": "dist/main.js",
+  "description": "为 VUS 语言提供 ACode 本地补全（纯浏览器 JS + CodeMirror autocomplete），无需二进制 / LSP 服务器。内置 69 个函数签名、说明与示例。",
   "author": "VUS",
   "license": "MIT",
-  "minVersionCode": 1002,
+  "minVersionCode": 1000,
   "readme": "README.md",
   "icon": "icon.png",
-  "files": ["bin/arm64-v8a/vus", "bin/armeabi-v7a/vus"]
+  "files": []
 }

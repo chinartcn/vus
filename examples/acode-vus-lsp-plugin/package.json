@@ -1,0 +1,20 @@
+{
+  "name": "acode-vus-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "VUS 语言的 ACode 本地补全插件（纯浏览器 JS + CodeMirror autocomplete）",
+  "scripts": {
+    "build": "webpack --config webpack.config.js",
+    "build:watch": "webpack --config webpack.config.js --watch"
+  },
+  "devDependencies": {
+    "webpack": "^5.91.0",
+    "webpack-cli": "^5.1.4"
+  },
+  "dependencies": {
+    "@codemirror/autocomplete": "^6.16.0",
+    "@codemirror/language": "^6.10.1",
+    "@codemirror/state": "^6.4.1",
+    "@codemirror/view": "^6.26.3"
+  }
+}

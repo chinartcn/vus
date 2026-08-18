@@ -1,0 +1,4 @@
+# 构建依赖
+node_modules/
+# build 缓存
+*.log
