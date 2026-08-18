@@ -4,6 +4,18 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>VUS IDE · 排版设计器</title>
+<!-- 首帧前应用主题，避免刷新时的文字/背景闪烁（FOUC） -->
+<script>
+  (function () {
+    try {
+      var t = ((typeof localStorage !== 'undefined') && localStorage.getItem('vusTheme')) || 'light';
+      document.documentElement.setAttribute('data-theme', t);
+      document.documentElement.classList.add('themed');
+    } catch (e) { document.documentElement.classList.add('themed'); }
+    var h = (typeof window !== 'undefined' && window.location.hash) || '';
+    document.documentElement.setAttribute('data-route', h.replace(/^#\/?/, '') || 'designer');
+  })();
+</script>
 <link rel="stylesheet" href="libs/cm/codemirror.min.css">
 <link rel="stylesheet" href="style.css">
 </head>

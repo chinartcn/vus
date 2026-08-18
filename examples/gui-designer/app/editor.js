@@ -38,6 +38,10 @@ window.VUS.EditorView = {
     this.cm.setOption('extraKeys',
       { 'Ctrl-Space': this.autocomplete.bind(this), 'Ctrl-Enter': function(){ self.runVus(); } });
     this.cm.setValue(this.store.code);
+    // 若设计里已有控件但代码尚为空，主动同步一次，避免切页后短暂空白
+    if (!this.store.code && this.store.design.controls.length) {
+      C.syncDesignToCode();
+    }
     this.cm.on('change', function () {
       self.store.code = self.cm.getValue();
     });

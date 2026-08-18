@@ -43,6 +43,13 @@ C.store = (window.Vue ? Vue.reactive({
 }) : null);
 
 C.apiBase = function () {
+  // 同源部署：页面由后端托管，直接使用当前地址，与启动端口自动一致。
+  if (window.location && window.location.origin &&
+      window.location.protocol.indexOf('http') === 0) {
+    // 去掉尾随斜杠，避免与相对路径（以 / 开头）拼成双斜杠 URL
+    return String(window.location.origin).replace(/\/+$/, '');
+  }
+  // file:// 等场景回退到手动配置的端口
   return 'http://127.0.0.1:' + (C.store.backend.port || 8000);
 };
 
@@ -83,8 +90,11 @@ C.parseColor = function (hex) { return parseInt(hex.slice(1), 16) || 0; };
 C.isCircleType = function (t) { return t === 'circle' || t === 'fill_circle' || t === 'arc'; };
 C.controlBox = function (c) {
   if (C.isCircleType(c.type)) {
+    // 圆/弧/实心圆：返回外接矩形（左上角），以便命中/拖拽/属性框对齐。
     var r = Number(c.r) || 20;
-    return { x: Number(c.cx) || 0, y: Number(c.cy) || 0, w: r * 2, h: r * 2 };
+    var rcx = Number(c.cx) || 0, rcy = Number(c.cy) || 0;
+    return { x: rcx - r, y: rcy - r, w: r * 2, h: r * 2,
+             cx: rcx, cy: rcy, r: r };
   }
   var w, h;
   switch (c.type) {

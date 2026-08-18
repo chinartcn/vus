@@ -19,8 +19,10 @@ var Root = {
     var self = this;
     this.syncRouteFromHash();
     window.addEventListener('hashchange', function () { self.syncRouteFromHash(); });
-    // 应用初始主题
-    document.body.setAttribute('data-theme', this.store.themeName || 'light');
+    // 应用初始主题（与 index.html 首帧 inline 一致，避免闪烁）
+    var t = this.store.themeName || 'light';
+    document.documentElement.setAttribute('data-theme', t);
+    if (document.body) document.body.setAttribute('data-theme', t);
   },
 
   methods: {
@@ -39,25 +41,35 @@ var Root = {
       return this.store.route;
     },
     isActive: function (r) { return this.store.route === r; },
+    apiHost: function () {
+      return C.apiBase().replace(/^https?:\/\//, '');
+    },
+    routeLabel: function () {
+      return { designer: '设计器', editor: '代码', search: '文档', settings: '设置' }[this.store.route] || '设计器';
+    },
   },
 
   template: `
   <div class="ide-app">
-    <!-- 顶部导航栏 -->
-    <nav class="topnav">
-      <div class="brand">VUS IDE</div>
-      <button class="nav-btn" :class="{ active: isActive('designer') }" @click="setRoute('designer')">
+    <!-- 顶部页签导航（VS Code 式编辑器页签） -->
+    <nav class="topnav" role="tablist">
+      <div class="brand">VUS<span class="brand-dim">ide</span></div>
+      <button class="nav-btn" :class="{ active: isActive('designer') }" @click="setRoute('designer')" role="tab">
         <span class="nav-ico">▦</span><span class="nav-label">设计器</span>
       </button>
-      <button class="nav-btn" :class="{ active: isActive('editor') }" @click="setRoute('editor')">
+      <button class="nav-btn" :class="{ active: isActive('editor') }" @click="setRoute('editor')" role="tab">
         <span class="nav-ico">&lt;/&gt;</span><span class="nav-label">代码</span>
       </button>
-      <button class="nav-btn" :class="{ active: isActive('search') }" @click="setRoute('search')">
+      <button class="nav-btn" :class="{ active: isActive('search') }" @click="setRoute('search')" role="tab">
         <span class="nav-ico">⌕</span><span class="nav-label">文档</span>
       </button>
-      <button class="nav-btn" :class="{ active: isActive('settings') }" @click="setRoute('settings')">
+      <button class="nav-btn" :class="{ active: isActive('settings') }" @click="setRoute('settings')" role="tab">
         <span class="nav-ico">⚙</span><span class="nav-label">设置</span>
       </button>
+      <span class="topnav-spacer"></span>
+      <span class="topnav-token" :class="{ on: store.token }">
+        {{ store.token ? '· 已授权' : '· 未设置 Token' }}
+      </span>
     </nav>
 
     <!-- 路由视图 -->
@@ -65,6 +77,16 @@ var Root = {
     <EditorView v-if="store.route === 'editor'"></EditorView>
     <SearchView v-if="store.route === 'search'"></SearchView>
     <SettingsView v-if="store.route === 'settings'"></SettingsView>
+
+    <!-- 底部状态栏（全局） -->
+    <footer class="status-bar">
+      <span class="sb-item"><i class="sb-dot"></i>{{ routeLabel() }}</span>
+      <span class="sb-item sb-sep"></span>
+      <span class="sb-item sb-muted">后端</span>
+      <span class="sb-item sb-mono">{{ apiHost() }}</span>
+      <span class="sb-spacer"></span>
+      <span class="sb-item">主题 {{ store.themeName }}</span>
+    </footer>
 
     <!-- Toast 提示 -->
     <transition name="toast">
