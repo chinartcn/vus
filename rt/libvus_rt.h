@@ -185,6 +185,18 @@ VusString* vus_to_string(int64_t n);
 // 失败时返回 0.0，*err 置非 0。
 double vus_to_float(VusString* s, int* err);
 
+// ============ VUS XYZ 体感音游内建（rt/vus_xyz.c） ============
+// 全部统一返回 VusString*，可作表达式或语句。数值约定 milli-g 整数（1g=1000）。
+VusString* vus_clock_ms(void);                       /* 时钟()：单调毫秒 */
+VusString* vus_sensor_read(const char* axis);        /* 传感器_读("x"/"y"/"z")：毫 g */
+VusString* vus_audio_open(const char* path);         /* 音频_打开(path) */
+VusString* vus_audio_play(void);                     /* 音频_播放() */
+VusString* vus_audio_pause(void);                    /* 音频_暂停() */
+VusString* vus_audio_resume(void);                   /* 音频_续() */
+VusString* vus_audio_seek(int64_t ms);               /* 音频_跳转(ms) */
+VusString* vus_audio_position(void);                 /* 音频_进度()：毫秒 */
+VusString* vus_audio_duration(void);                 /* 音频_时长()：毫秒 */
+
 // ============ 线程支持 ============
 typedef struct VusThread VusThread;
 

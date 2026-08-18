@@ -1,0 +1,17 @@
+{
+  "title": "examples/beat_test.wav",
+  "bpm": 169,
+  "duration_ms": 3000,
+  "note_count": 9,
+  "notes": [
+     {"t": 203, "axis": "X", "d": 1, "target": 1799}
+    ,{"t": 477, "axis": "X", "d": 1, "target": 1799}
+    ,{"t": 833, "axis": "X", "d": 1, "target": 1799}
+    ,{"t": 1137, "axis": "X", "d": 1, "target": 1799}
+    ,{"t": 1483, "axis": "X", "d": 1, "target": 1799}
+    ,{"t": 1838, "axis": "X", "d": 1, "target": 1799}
+    ,{"t": 2163, "axis": "X", "d": 1, "target": 1799}
+    ,{"t": 2478, "axis": "X", "d": 1, "target": 1799}
+    ,{"t": 2824, "axis": "X", "d": 1, "target": 1799}
+  ]
+}

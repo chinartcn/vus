@@ -627,6 +627,52 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
             return strdup(result);
         }
     }
+    /* ============= VUS XYZ 体感音游内建（rt/vus_xyz.c） ============= */
+    if (strcmp(call->func_name, "传感器_读") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char result[512];
+            snprintf(result, sizeof(result), "vus_sensor_read(vus_string_cstr(%s))", a);
+            free(a);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "时钟") == 0) {
+        return strdup("vus_clock_ms()");
+    }
+    if (strcmp(call->func_name, "音频_打开") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char result[512];
+            snprintf(result, sizeof(result), "vus_audio_open(vus_string_cstr(%s))", a);
+            free(a);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "音频_播放") == 0) {
+        return strdup("vus_audio_play()");
+    }
+    if (strcmp(call->func_name, "音频_暂停") == 0) {
+        return strdup("vus_audio_pause()");
+    }
+    if (strcmp(call->func_name, "音频_续") == 0) {
+        return strdup("vus_audio_resume()");
+    }
+    if (strcmp(call->func_name, "音频_跳转") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char result[512];
+            snprintf(result, sizeof(result), "vus_audio_seek((int)vus_to_int(%s, &_err))", a);
+            free(a);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "音频_进度") == 0) {
+        return strdup("vus_audio_position()");
+    }
+    if (strcmp(call->func_name, "音频_时长") == 0) {
+        return strdup("vus_audio_duration()");
+    }
     if (strcmp(call->func_name, "图形_画点") == 0) {
         if (call->args && call->args->count >= 3) {
             char *x = gen_expr(buf, call->args->items[0]);
@@ -1661,6 +1707,17 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
             char result[4096];
             snprintf(result, sizeof(result), "vus_json_query(%s, %s)", json, p);
             free(json); free(p);
+            return strdup(result);
+        }
+    }
+    /* 对象文本(值)：把任意值(含 JSON_查询/JSON_解析 返回的结构化对象)安全转为
+     * 文本 VusString。对象无法直接参与 + 拼接或转数字，先转文本再操作。 */
+    if (strcmp(call->func_name, "对象文本") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *arg = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_object_to_string(%s)", arg);
+            free(arg);
             return strdup(result);
         }
     }
