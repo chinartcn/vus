@@ -52,6 +52,10 @@ VusString* vus_clock_ms(void)
 static pid_t   g_sens_pid = 0;
 static int     g_sens_fd  = -1;
 static double  g_sens[3] = {0.0, 0.0, 0.0};   /* x, y, z (m/s²，未换算) */
+/* 跨 read 的行累积缓冲：termux-sensor 的输出是分块 JSON，避免块被 read 边界
+   切开导致 values 行解析失败，累积到完整换行行后再解析。 */
+static char    g_sens_acc[8192];
+static size_t  g_sens_acc_len = 0;
 /* 诊断标志：避免每帧重复刷屏，仅在传感器不可用时各提示一次 */
 static int     g_sens_got       = 0;   /* 曾解析到真实读数 */
 static int     g_sens_eof_warn  = 0;   /* 子进程退出(命令缺失)已提示 */
@@ -125,7 +129,7 @@ static void sensor_spawn(void)
         dup2(pfd[1], STDOUT_FILENO);
         close(pfd[0]); close(pfd[1]);
         execlp("termux-sensor", "termux-sensor",
-               "-s", sname, "-n", "100000", "-d", "100", (char*)NULL);
+               "-s", sname, "-n", "100000", "-d", "20", (char*)NULL);
         _exit(127);
     }
     close(pfd[1]);
@@ -169,11 +173,20 @@ VusString* vus_sensor_read(const char* axis)
     if (g_sens_fd >= 0) {
         char buf[4096];
         ssize_t r;
-        while ((r = read(g_sens_fd, buf, sizeof(buf) - 1)) > 0) {
-            buf[r] = '\0';
-            char* save = NULL;
-            for (char* tok = strtok_r(buf, "\n", &save); tok; tok = strtok_r(NULL, "\n", &save)) {
-                sensor_parse_line(tok);
+        while ((r = read(g_sens_fd, buf, sizeof(buf))) > 0) {
+            /* 追加到累积缓冲，再按完整换行行解析（不丢跨 read 的半个块） */
+            size_t room = sizeof(g_sens_acc) - g_sens_acc_len;
+            if (room == 0) { g_sens_acc_len = 0; room = sizeof(g_sens_acc); }
+            if ((size_t)r > room) r = (ssize_t)room;
+            memcpy(g_sens_acc + g_sens_acc_len, buf, (size_t)r);
+            g_sens_acc_len += (size_t)r;
+            char* nl;
+            while ((nl = memchr(g_sens_acc, '\n', g_sens_acc_len)) != NULL) {
+                *nl = '\0';
+                sensor_parse_line(g_sens_acc);
+                size_t rem = g_sens_acc_len - (size_t)(nl - g_sens_acc + 1);
+                memmove(g_sens_acc, nl + 1, rem);
+                g_sens_acc_len = rem;
             }
         }
         if (r == 0) {
