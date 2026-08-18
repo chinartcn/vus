@@ -52,6 +52,10 @@ VusString* vus_clock_ms(void)
 static pid_t   g_sens_pid = 0;
 static int     g_sens_fd  = -1;
 static double  g_sens[3] = {0.0, 0.0, 0.0};   /* x, y, z (m/s²，未换算) */
+/* 诊断标志：避免每帧重复刷屏，仅在传感器不可用时各提示一次 */
+static int     g_sens_got       = 0;   /* 曾解析到真实读数 */
+static int     g_sens_eof_warn  = 0;   /* 子进程退出(命令缺失)已提示 */
+static int     g_sens_idle_warn = 0;   /* 有进程但长期无数据(未授权)已提示 */
 
 static void sensor_spawn(void)
 {
@@ -89,7 +93,7 @@ static void sensor_parse_line(const char* line)
         double v = strtod(p, (char**)&p);
         vals[n++] = v;
     }
-    if (n >= 3) { g_sens[0] = vals[0]; g_sens[1] = vals[1]; g_sens[2] = vals[2]; }
+    if (n >= 3) { g_sens[0] = vals[0]; g_sens[1] = vals[1]; g_sens[2] = vals[2]; g_sens_got = 1; }
 }
 
 VusString* vus_sensor_read(const char* axis)
@@ -103,6 +107,23 @@ VusString* vus_sensor_read(const char* axis)
             char* save = NULL;
             for (char* tok = strtok_r(buf, "\n", &save); tok; tok = strtok_r(NULL, "\n", &save)) {
                 sensor_parse_line(tok);
+            }
+        }
+        if (r == 0) {
+            /* EOF：termux-sensor 子进程已退出（命令缺失 / 崩溃 / 权限被拒直接退出） */
+            if (!g_sens_eof_warn) {
+                fprintf(stderr,
+                    "[vus] 传感器进程已退出：请安装并配置 Termux:API(termux-api)，"
+                    "并先用 `termux-sensor -s accelerometer` 批准加速度计权限。\n");
+                g_sens_eof_warn = 1;
+            }
+        } else if (!g_sens_got) {
+            /* 有进程但尚未解析到数据：通常为 Termux:API 尚未授权传感器 */
+            if (!g_sens_idle_warn) {
+                fprintf(stderr,
+                    "[vus] 传感器暂无读到数据：请在 Termux 终端运行一次 "
+                    "`termux-sensor -s accelerometer -n 1` 以允许加速度计访问。\n");
+                g_sens_idle_warn = 1;
             }
         }
     }
@@ -191,6 +212,12 @@ VusString* vus_audio_open(const char* path)
     if (g_mpv_fd >= 0) { close(g_mpv_fd); g_mpv_fd = -1; }
     unlink(MPV_SOCK);
 
+    /* 明确报错：文件不可读时直接提示，避免 mpv 静默失败导致"没放音乐"却无征兆 */
+    if (!path || access(path, R_OK) != 0) {
+        fprintf(stderr, "[vus] 音频文件不可读: %s（请用绝对路径，或确认该文件可被 mpv 播放）\n", path ? path : "(null)");
+        return vus_to_string(0);
+    }
+
     pid_t pid = fork();
     if (pid < 0) return vus_to_string(0);
     if (pid == 0) {
@@ -198,11 +225,18 @@ VusString* vus_audio_open(const char* path)
         if (devnull >= 0) { dup2(devnull, STDOUT_FILENO); dup2(devnull, STDERR_FILENO); }
         char ipc[128];
         snprintf(ipc, sizeof(ipc), "--input-ipc-server=%s", MPV_SOCK);
-        execlp("mpv", "mpv", "--no-video", "--quiet", ipc, path, (char*)NULL);
+        /* --ao=opensles：Termux/Android 标准音频输出，避免默认静音导致"没声音" */
+        execlp("mpv", "mpv", "--no-video", "--quiet", "--ao=opensles", ipc, path, (char*)NULL);
         _exit(127);
     }
     g_mpv_pid = pid;
-    if (mpv_wait_ready() != 0) { kill(pid, SIGKILL); waitpid(pid, NULL, 0); g_mpv_pid = 0; return vus_to_string(0); }
+    if (mpv_wait_ready() != 0) {
+        kill(pid, SIGKILL); waitpid(pid, NULL, 0); g_mpv_pid = 0;
+        fprintf(stderr,
+            "[vus] 未能启动 mpv 音频：请确认已 `pkg install mpv`；"
+            "若已安装仍无声音，请确认 Termux 音频输出可用（ao=opensles）。\n");
+        return vus_to_string(0);
+    }
     g_mpv_fd = mpv_connect();
     if (g_mpv_fd < 0) return vus_to_string(0);
     return vus_to_string(1);
