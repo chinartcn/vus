@@ -13,7 +13,15 @@ enum {
     VUS_BUILTIN_GRAPHIC = 1,   /* 图形_* 家族 */
     VUS_BUILTIN_IO,            /* 输入输出 / 运算工具 */
     VUS_BUILTIN_JSON,          /* JSON_* / 字典_键 / typeof */
-    VUS_BUILTIN_DATE           /* 日期_* 家族 */
+    VUS_BUILTIN_DATE,          /* 日期_* 家族 */
+    VUS_BUILTIN_LOG,           /* 日志_* 分级日志（EasyLogger） */
+    VUS_BUILTIN_AUDIO,         /* 音频_* / 传感器_读 / 时钟 */
+    VUS_BUILTIN_TUI,           /* tui_* 终端 UI */
+    VUS_BUILTIN_NET,           /* 网络_* HTTP 请求 */
+    VUS_BUILTIN_FILE,          /* 文件_* 文件操作 */
+    VUS_BUILTIN_SHELL,         /* 命令_执行 / 文本_分割 */
+    VUS_BUILTIN_PLUGIN,        /* 插件_* 插件调用 */
+    VUS_BUILTIN_TERMUX         /* Termux_* 环境启动 */
 };
 
 /* 单个内置函数元数据 */
