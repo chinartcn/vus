@@ -157,7 +157,7 @@ wxc = 0
         wpy_prev = 412
         wfirst = 1
         k = 0
-        当 k < ampN:
+        当循环 k < ampN:
             wa = 转数字(对象文本(JSON_查询(包络, "amp[" + k + "]")))
             wx = 16 + k * 388 / ampN
             wpy = 412 - wa * 17
