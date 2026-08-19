@@ -353,11 +353,38 @@ VusResult vus_compile_to_exe(const char *vus_file_path, VusConfig *config) {
         }
     }
 
-    /* 调用 GCC 编译 */
+    /* 调用 GCC 编译（带产物缓存：源脚本与运行时静态库均未变化时，复用已编译的
+       可执行，跳过编译+链接阶段，显著加快 Termux 等低性能设备上的反复运行。
+       强制重编可 touch 脚本或删除 构建/ 目录。） */
     char error_msg[512];
-    int compile_result = vus_compile_c(result.c_output_path, exe_output_path,
-                                        config, error_msg, sizeof(error_msg),
-                                        extra_objects[0] ? extra_objects : NULL);
+    int compile_result = 0;
+    int cached = 0;
+    /* 纳秒级时间戳比较（_GNU_SOURCE 下 st_mtim 可用），同秒内修改源文件也能触发重编 */
+    #define _VUS_MTIM_NS(p_) \
+        ((long long)(p_).st_mtim.tv_sec * 1000000000LL + (long long)(p_).st_mtim.tv_nsec)
+    {
+        struct stat ex_st, src_st;
+        if (stat(exe_output_path, &ex_st) == 0 &&
+            stat(vus_file_path, &src_st) == 0 &&
+            _VUS_MTIM_NS(ex_st) >= _VUS_MTIM_NS(src_st)) {
+            cached = 1;
+        }
+        /* 运行时静态库更新时同样触发重链，避免复用旧运行时 */
+        if (cached) {
+            struct stat lib_st;
+            char rt_lib[1024];
+            snprintf(rt_lib, sizeof(rt_lib), "%s/build/libvus_rt.a", config->project_dir);
+            if (stat(rt_lib, &lib_st) == 0 && _VUS_MTIM_NS(lib_st) > _VUS_MTIM_NS(ex_st)) {
+                cached = 0;
+            }
+        }
+        if (!cached) {
+            compile_result = vus_compile_c(result.c_output_path, exe_output_path,
+                                           config, error_msg, sizeof(error_msg),
+                                           extra_objects[0] ? extra_objects : NULL);
+        }
+    }
+    #undef _VUS_MTIM_NS
 
     if (vusx_count > 0) vus_vusx_cleanup_all(vusx_plugins, vusx_count);
 
