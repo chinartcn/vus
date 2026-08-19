@@ -1568,6 +1568,88 @@ VusString* vus_plugin_file_list(VusString* path) {
     return result;
 }
 
+/* ---- 判断路径是否为目录（供"文件管理器"区分文件与目录） ---- */
+#include <sys/stat.h>
+VusString* vus_plugin_file_isdir(VusString* path) {
+    struct stat st;
+    if (path && vus_string_cstr(path) && stat(vus_string_cstr(path), &st) == 0 && S_ISDIR(st.st_mode))
+        return vus_string_new("true");
+    return vus_string_new("false");
+}
+
+/* ---- shell 命令执行（供"终端"使用） ---- */
+VusString* vus_plugin_shell_exec(VusString* cmd) {
+    if (!cmd) return vus_string_new("");
+    const char* c_cmd = vus_string_cstr(cmd);
+    /* 合并 stderr 到 stdout，便于终端看到错误信息 */
+    size_t clen = strlen(c_cmd);
+    char* full = (char*)malloc(clen + 8);
+    if (!full) return vus_string_new("");
+    memcpy(full, c_cmd, clen);
+    memcpy(full + clen, " 2>&1", 6);
+    full[clen + 6] = '\0';
+
+    FILE* fp = popen(full, "r");
+    free(full);
+    if (!fp) return vus_string_new("（命令执行失败：无法启动 shell）");
+
+    const size_t cap = 65536;          /* 输出上限，防失控 */
+    char* acc = (char*)malloc(cap);
+    if (!acc) { pclose(fp); return vus_string_new(""); }
+    size_t len = 0;
+    char buf[4096];
+    size_t r;
+    while ((r = fread(buf, 1, sizeof(buf), fp)) > 0) {
+        if (len + r >= cap) break;
+        memcpy(acc + len, buf, r);
+        len += r;
+    }
+    pclose(fp);
+    acc[len] = '\0';
+    VusString* result = vus_string_new_len(acc, (int)len);
+    free(acc);
+    return result;
+}
+
+/* ---- 文本分割：按分隔符拆成 JSON 数组字符串（供文件管理器逐行渲染目录） ---- */
+VusString* vus_plugin_text_split(VusString* text, VusString* sep) {
+    if (!text) return vus_string_new("[]");
+    const char* s = vus_string_cstr(text);
+    size_t slen = strlen(s);
+    const char* sp = (sep && vus_string_cstr(sep)) ? vus_string_cstr(sep) : "\n";
+    size_t splen = strlen(sp);
+    if (splen == 0) splen = 1;
+
+    yyjson_mut_doc* doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val* arr = yyjson_mut_arr(doc);
+    yyjson_mut_doc_set_root(doc, arr);
+
+    const char* start = s;
+    const char* p = s;
+    const char* end = s + slen;
+    while (p <= end) {
+        size_t remain = (size_t)(end - p);
+        if (splen <= remain && memcmp(p, sp, splen) == 0) {
+            yyjson_mut_arr_append(arr, yyjson_mut_strncpy(doc, start, (size_t)(p - start)));
+            p += splen;
+            start = p;
+            continue;
+        }
+        /* 到达末尾：追加最后一段（含末尾空段处理） */
+        if (p == end) {
+            yyjson_mut_arr_append(arr, yyjson_mut_strncpy(doc, start, (size_t)(p - start)));
+            break;
+        }
+        p++;
+    }
+    size_t outlen = 0;
+    char* out = yyjson_mut_write(doc, 0, &outlen);
+    yyjson_mut_doc_free(doc);
+    VusString* result = out ? vus_string_new_len(out, (int)outlen) : vus_string_new("[]");
+    if (out) free(out);
+    return result;
+}
+
 /* ---- 日期时间 ---- */
 
 #include <time.h>
