@@ -347,13 +347,16 @@ static char *gen_binary_concat(const char *left, const char *right) {
     return r;
 }
 
-/* gen_binary_compare: 比较运算符 (==, !=, <, >, <=, >=) → "true"/"false" */
+/* gen_binary_compare: 比较运算符 (==, !=, <, >, <=, >=) → "true"/"false"
+ * 使用 vus_compare 智能比较：两者均为数字时按数值比较，否则按字典序。
+ * 修复了旧实现用 vus_to_int 把非数字字符串都转 0 导致 "abc"=="xyz" 误判为真的缺陷。
+ */
 static char *gen_binary_compare(const char *left, const char *right, const char *op) {
     size_t sz = strlen(left) + strlen(right) + 128;
     char *r = (char *)malloc(sz);
     snprintf(r, sz,
-        "vus_string_new((vus_to_int(%s, &_err) %s vus_to_int(%s, &_err)) ? \"true\" : \"false\")",
-        left, op, right);
+        "vus_string_new((vus_compare(%s, %s) %s 0) ? \"true\" : \"false\")",
+        left, right, op);
     return r;
 }
 
