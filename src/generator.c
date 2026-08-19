@@ -339,127 +339,98 @@ static char *gen_expr_access(GenBuf *buf, VusAstAccess *access) {
     return result;
 }
 
+/* gen_binary_concat: 字符串拼接 (..) */
+static char *gen_binary_concat(const char *left, const char *right) {
+    size_t sz = strlen(left) + strlen(right) + 64;
+    char *r = (char *)malloc(sz);
+    snprintf(r, sz, "vus_string_concat(%s, %s)", left, right);
+    return r;
+}
+
+/* gen_binary_compare: 比较运算符 (==, !=, <, >, <=, >=) → "true"/"false" */
+static char *gen_binary_compare(const char *left, const char *right, const char *op) {
+    size_t sz = strlen(left) + strlen(right) + 128;
+    char *r = (char *)malloc(sz);
+    snprintf(r, sz,
+        "vus_string_new((vus_to_int(%s, &_err) %s vus_to_int(%s, &_err)) ? \"true\" : \"false\")",
+        left, op, right);
+    return r;
+}
+
+/* gen_binary_arith: 算术/位运算符 (+, -, *, /, %, &, |, ^, <<, >>) → 数字字符串 */
+static char *gen_binary_arith(const char *left, const char *right, const char *op) {
+    size_t sz = strlen(left) + strlen(right) + 128;
+    char *r = (char *)malloc(sz);
+    snprintf(r, sz,
+        "vus_to_string(vus_to_int(%s, &_err) %s vus_to_int(%s, &_err))",
+        left, op, right);
+    return r;
+}
+
+/* gen_binary_add: 特殊加法 (vus_add 支持字符串/数字混合) */
+static char *gen_binary_add(const char *left, const char *right) {
+    size_t sz = strlen(left) + strlen(right) + 64;
+    char *r = (char *)malloc(sz);
+    snprintf(r, sz, "vus_add(%s, %s)", left, right);
+    return r;
+}
+
+/* gen_binary_logical: 逻辑运算符 (and/和, or/或) → "true"/"false" */
+static char *gen_binary_logical(const char *left, const char *right, const char *op) {
+    size_t sz = strlen(left) + strlen(right) + 128;
+    char *r = (char *)malloc(sz);
+    snprintf(r, sz,
+        "vus_string_new((strcmp(vus_string_cstr(%s), \"true\") == 0 %s strcmp(vus_string_cstr(%s), \"true\") == 0) ? \"true\" : \"false\")",
+        left, op, right);
+    return r;
+}
+
 static char *gen_expr_binary(GenBuf *buf, VusAstBinaryOp *bin) {
     char *left = gen_expr(buf, bin->left);
     char *right = gen_expr(buf, bin->right);
     char *result = NULL;
 
     if (strcmp(bin->op, "..") == 0) {
-        /* 字符串拼接 */
-        size_t sz = strlen(left) + strlen(right) + 64;
-        result = (char *)malloc(sz);
-        snprintf(result, sz, "vus_string_concat(%s, %s)", left, right);
+        result = gen_binary_concat(left, right);
     } else if (strcmp(bin->op, "==") == 0) {
-        size_t sz = strlen(left) + strlen(right) + 128;
-        result = (char *)malloc(sz);
-        snprintf(result, sz,
-            "vus_string_new((vus_to_int(%s, &_err) == vus_to_int(%s, &_err)) ? \"true\" : \"false\")",
-            left, right);
+        result = gen_binary_compare(left, right, "==");
     } else if (strcmp(bin->op, "!=") == 0) {
-        size_t sz = strlen(left) + strlen(right) + 128;
-        result = (char *)malloc(sz);
-        snprintf(result, sz,
-            "vus_string_new((vus_to_int(%s, &_err) != vus_to_int(%s, &_err)) ? \"true\" : \"false\")",
-            left, right);
+        result = gen_binary_compare(left, right, "!=");
     } else if (strcmp(bin->op, "<") == 0) {
-        size_t sz = strlen(left) + strlen(right) + 128;
-        result = (char *)malloc(sz);
-        snprintf(result, sz,
-            "vus_string_new((vus_to_int(%s, &_err) < vus_to_int(%s, &_err)) ? \"true\" : \"false\")",
-            left, right);
+        result = gen_binary_compare(left, right, "<");
     } else if (strcmp(bin->op, ">") == 0) {
-        size_t sz = strlen(left) + strlen(right) + 128;
-        result = (char *)malloc(sz);
-        snprintf(result, sz,
-            "vus_string_new((vus_to_int(%s, &_err) > vus_to_int(%s, &_err)) ? \"true\" : \"false\")",
-            left, right);
+        result = gen_binary_compare(left, right, ">");
     } else if (strcmp(bin->op, "<=") == 0) {
-        size_t sz = strlen(left) + strlen(right) + 128;
-        result = (char *)malloc(sz);
-        snprintf(result, sz,
-            "vus_string_new((vus_to_int(%s, &_err) <= vus_to_int(%s, &_err)) ? \"true\" : \"false\")",
-            left, right);
+        result = gen_binary_compare(left, right, "<=");
     } else if (strcmp(bin->op, ">=") == 0) {
-        size_t sz = strlen(left) + strlen(right) + 128;
-        result = (char *)malloc(sz);
-        snprintf(result, sz,
-            "vus_string_new((vus_to_int(%s, &_err) >= vus_to_int(%s, &_err)) ? \"true\" : \"false\")",
-            left, right);
+        result = gen_binary_compare(left, right, ">=");
     } else if (strcmp(bin->op, "+") == 0) {
-        size_t sz = strlen(left) + strlen(right) + 64;
-        result = (char *)malloc(sz);
-        snprintf(result, sz, "vus_add(%s, %s)", left, right);
+        result = gen_binary_add(left, right);
     } else if (strcmp(bin->op, "-") == 0) {
-        size_t sz = strlen(left) + strlen(right) + 128;
-        result = (char *)malloc(sz);
-        snprintf(result, sz,
-            "vus_to_string(vus_to_int(%s, &_err) - vus_to_int(%s, &_err))",
-            left, right);
+        result = gen_binary_arith(left, right, "-");
     } else if (strcmp(bin->op, "*") == 0) {
-        size_t sz = strlen(left) + strlen(right) + 128;
-        result = (char *)malloc(sz);
-        snprintf(result, sz,
-            "vus_to_string(vus_to_int(%s, &_err) * vus_to_int(%s, &_err))",
-            left, right);
+        result = gen_binary_arith(left, right, "*");
     } else if (strcmp(bin->op, "/") == 0) {
-        size_t sz = strlen(left) + strlen(right) + 128;
-        result = (char *)malloc(sz);
-        snprintf(result, sz,
-            "vus_to_string(vus_to_int(%s, &_err) / vus_to_int(%s, &_err))",
-            left, right);
+        result = gen_binary_arith(left, right, "/");
     } else if (strcmp(bin->op, "%") == 0) {
-        size_t sz = strlen(left) + strlen(right) + 128;
-        result = (char *)malloc(sz);
-        snprintf(result, sz,
-            "vus_to_string(vus_to_int(%s, &_err) %% vus_to_int(%s, &_err))",
-            left, right);
+        result = gen_binary_arith(left, right, "%");
     } else if (strcmp(bin->op, "and") == 0 || strcmp(bin->op, "和") == 0) {
-        size_t sz = strlen(left) + strlen(right) + 128;
-        result = (char *)malloc(sz);
-        snprintf(result, sz,
-            "vus_string_new((strcmp(vus_string_cstr(%s), \"true\") == 0 && strcmp(vus_string_cstr(%s), \"true\") == 0) ? \"true\" : \"false\")",
-            left, right);
+        result = gen_binary_logical(left, right, "&&");
     } else if (strcmp(bin->op, "or") == 0 || strcmp(bin->op, "或") == 0) {
-        size_t sz = strlen(left) + strlen(right) + 128;
-        result = (char *)malloc(sz);
-        snprintf(result, sz,
-            "vus_string_new((strcmp(vus_string_cstr(%s), \"true\") == 0 || strcmp(vus_string_cstr(%s), \"true\") == 0) ? \"true\" : \"false\")",
-            left, right);
+        result = gen_binary_logical(left, right, "||");
     } else if (strcmp(bin->op, "&") == 0) {
-        size_t sz = strlen(left) + strlen(right) + 128;
-        result = (char *)malloc(sz);
-        snprintf(result, sz,
-            "vus_to_string(vus_to_int(%s, &_err) & vus_to_int(%s, &_err))",
-            left, right);
+        result = gen_binary_arith(left, right, "&");
     } else if (strcmp(bin->op, "|") == 0) {
-        size_t sz = strlen(left) + strlen(right) + 128;
-        result = (char *)malloc(sz);
-        snprintf(result, sz,
-            "vus_to_string(vus_to_int(%s, &_err) | vus_to_int(%s, &_err))",
-            left, right);
+        result = gen_binary_arith(left, right, "|");
     } else if (strcmp(bin->op, "^") == 0) {
-        size_t sz = strlen(left) + strlen(right) + 128;
-        result = (char *)malloc(sz);
-        snprintf(result, sz,
-            "vus_to_string(vus_to_int(%s, &_err) ^ vus_to_int(%s, &_err))",
-            left, right);
+        result = gen_binary_arith(left, right, "^");
     } else if (strcmp(bin->op, "<<") == 0) {
-        size_t sz = strlen(left) + strlen(right) + 128;
-        result = (char *)malloc(sz);
-        snprintf(result, sz,
-            "vus_to_string(vus_to_int(%s, &_err) << vus_to_int(%s, &_err))",
-            left, right);
+        result = gen_binary_arith(left, right, "<<");
     } else if (strcmp(bin->op, ">>") == 0) {
-        size_t sz = strlen(left) + strlen(right) + 128;
-        result = (char *)malloc(sz);
-        snprintf(result, sz,
-            "vus_to_string(vus_to_int(%s, &_err) >> vus_to_int(%s, &_err))",
-            left, right);
+        result = gen_binary_arith(left, right, ">>");
     } else {
         /* 兜底：未知运算符 */
-        size_t sz = strlen(left) + strlen(right) + 64;
-        result = (char *)malloc(sz);
-        snprintf(result, sz, "vus_string_concat(%s, %s)", left, right);
+        result = gen_binary_concat(left, right);
     }
 
     free(left);
