@@ -1659,6 +1659,39 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
             return strdup(result);
         }
     }
+    if (strcmp(call->func_name, "文件_是目录") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *arg = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_file_isdir(%s)", arg);
+            free(arg);
+            return strdup(result);
+        }
+    }
+
+    /* shell 命令执行：popen 捕获输出，供"终端"应用使用 */
+    if (strcmp(call->func_name, "命令_执行") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *arg = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_shell_exec(%s)", arg);
+            free(arg);
+            return strdup(result);
+        }
+    }
+
+    /* 文本分割：按分隔符拆成 JSON 数组字符串，供"文件管理器"逐行渲染目录 */
+    if (strcmp(call->func_name, "文本_分割") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char *b = gen_expr(buf, call->args->items[1]);
+            char result[8192];
+            snprintf(result, sizeof(result), "vus_plugin_text_split(%s, %s)", a, b);
+            free(a); free(b);
+            return strdup(result);
+        }
+        return strdup("vus_string_new(\"[]\")");
+    }
 
     /* ============= 插件调用内置函数 ============= */
     if (strcmp(call->func_name, "插件_运行") == 0) {

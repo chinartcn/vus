@@ -268,6 +268,14 @@ VusString* vus_plugin_file_append(VusString* path, VusString* content);
 VusString* vus_plugin_file_exists(VusString* path);
 VusString* vus_plugin_file_delete(VusString* path);
 VusString* vus_plugin_file_list(VusString* path);
+/* 判断路径是否为目录：返回 "true"/"false"（供文件管理器区分文件与目录） */
+VusString* vus_plugin_file_isdir(VusString* path);
+
+/* shell 命令执行：popen 捕获命令标准输出，返回输出文本(上限 64KB) */
+VusString* vus_plugin_shell_exec(VusString* cmd);
+
+/* 文本分割：按分隔符拆成 JSON 数组字符串（供文件管理器逐行渲染目录） */
+VusString* vus_plugin_text_split(VusString* text, VusString* sep);
 
 /* 日期时间 */
 VusString* vus_plugin_date_now(VusString* dummy);
