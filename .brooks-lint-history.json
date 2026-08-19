@@ -20,5 +20,16 @@
       "suggestion": 1
     },
     "scope": "acode-vus-lsp-plugin/main.js（重构后：常量收敛 + 函数拆分 + 可观测日志）"
+  },
+  {
+    "date": "2026-08-19",
+    "mode": "Health Dashboard",
+    "score": 94,
+    "findings": {
+      "critical": 0,
+      "warning": 1,
+      "suggestion": 2
+    },
+    "scope": "/workspace/vus（完整项目健康仪表盘审查）"
   }
 ]
