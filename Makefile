@@ -213,8 +213,11 @@ $(XYZ_OBJ): $(XYZ_SRC) $(RT_H) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -I$(RT_DIR) -c -o $@ $<
 
 # 编译 yyjson 单文件 JSON 库（纯 C，并入运行时静态库）
+# 说明：yyjson 单文件体积大，-O2 优化编译很慢；改为 -O0（最快编译）。
+#       该库仅做 JSON 解析/生成，对整体运行性能影响可忽略；如仍嫌慢可再提
+#       到 -O1，需要运行时极致性能时才改回 -O2。
 $(YYJSON_OBJ): $(YYJSON_SRC) | $(BUILD_DIR)
-	$(CC) -Wall -Wextra -O2 -std=c11 $(YYJSON_INC) -c -o $@ $<
+	$(CC) -Wall -Wextra -O0 -std=c11 $(YYJSON_INC) -c -o $@ $<
 
 # 运行时库静态归档（含 vus_coro.o、yyjson、easylogger elog.o 与 GuiLite 图形库）
 $(RT_LIB): $(RT_OBJ) $(RT_CORO_OBJ) $(YYJSON_OBJ) $(EL_OBJ) $(GUI_OBJ) $(XYZ_OBJ) $(GLES_ARCHIVE_OBJ)
