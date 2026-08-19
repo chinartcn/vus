@@ -1057,9 +1057,15 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
             char *pct = gen_expr(buf, call->args->items[4]);
             char *col = (call->args->count >= 6) ? gen_expr(buf, call->args->items[5]) : NULL;
             char result[4096];
-            snprintf(result, sizeof(result),
-                "vus_gui_ring(vus_string_cstr(%s), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), %s)",
-                nm, x, y, r, pct, col ? col : "-1");
+            if (col) {
+                snprintf(result, sizeof(result),
+                    "vus_gui_ring(vus_string_cstr(%s), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err))",
+                    nm, x, y, r, pct, col);
+            } else {
+                snprintf(result, sizeof(result),
+                    "vus_gui_ring(vus_string_cstr(%s), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), -1)",
+                    nm, x, y, r, pct);
+            }
             free(nm); free(x); free(y); free(r); free(pct); if (col) free(col);
             g_uses_gui = 1;
             return strdup(result);
