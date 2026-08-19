@@ -24,6 +24,15 @@
 #include <string.h>
 #include <strings.h>  /* strncasecmp */
 
+/* LSP CompletionItemKind（LSP 协议标准值） */
+#define LSP_KIND_FUNCTION  3
+#define LSP_KIND_VARIABLE  6
+#define LSP_KIND_EVENT     9
+
+/* LSP SymbolKind（LSP 协议标准值） */
+#define LSP_SYM_FUNCTION  12
+#define LSP_SYM_VARIABLE  13
+
 /* 已定义的命令表（`..:` 命令） */
 static const char *const g_commands[] = { "开始", "结束", "设置", "索引", "帮助" };
 
@@ -548,8 +557,7 @@ static void append_builtin_item(yyjson_mut_doc *doc, yyjson_mut_val *arr,
                                 int detailed) {
     yyjson_mut_val *it = yyjson_mut_obj(doc);
     obj_add_str(doc, it, "label", b->name);
-    /* kind: 函数 = 3 */
-    yyjson_mut_obj_add_int(doc, it, "kind", 3);
+    yyjson_mut_obj_add_int(doc, it, "kind", LSP_KIND_FUNCTION);
 
     if (detailed) {
         /* 详细补全：complete = 签名；documentation = 说明 + 示例 */
@@ -577,7 +585,6 @@ static void append_defined_item(yyjson_mut_doc *doc, yyjson_mut_val *arr,
                                 int kind) {
     yyjson_mut_val *it = yyjson_mut_obj(doc);
     obj_add_str(doc, it, "label", name);
-    /* kind: 函数=3，变量=6 */
     yyjson_mut_obj_add_int(doc, it, "kind", kind);
     if (typed && typed[0]) {
         int tlen = (int)strlen(typed);
@@ -595,8 +602,7 @@ static void append_command_item(yyjson_mut_doc *doc, yyjson_mut_val *arr,
                                 const char *command, const char *typed) {
     yyjson_mut_val *it = yyjson_mut_obj(doc);
     obj_add_str(doc, it, "label", command);
-    /* 命令/事件：kind = 9 (Event) */
-    yyjson_mut_obj_add_int(doc, it, "kind", 9);
+    yyjson_mut_obj_add_int(doc, it, "kind", LSP_KIND_EVENT);
     obj_add_str(doc, it, "detail", "VUS 命令: 执行");
 
     /* 由服务端计算 diff：去掉已输入前置 `..:执行 ` / token 部分 */
@@ -631,7 +637,7 @@ static void handle_normal(yyjson_mut_doc *doc, yyjson_mut_val *items,
             strncmp(syms[i].name, token, strlen(token)) != 0) continue;
         /* 与内置同名：跳过（内置优先） */
         if (vus_builtin_find(syms[i].name)) continue;
-        int ckind = (syms[i].kind == VUS_SYM_FUNCTION) ? 3 : 6; /* 函数=3，变量=6 */
+        int ckind = (syms[i].kind == VUS_SYM_FUNCTION) ? LSP_KIND_FUNCTION : LSP_KIND_VARIABLE;
         append_defined_item(doc, items, syms[i].name, token, ckind);
     }
 }
@@ -762,9 +768,8 @@ static void handle_document_symbol(yyjson_val *req) {
     for (int i = 0; i < ns; i++) {
         yyjson_mut_val *it = yyjson_mut_obj(doc);
         obj_add_str(doc, it, "name", syms[i].name);
-        /* LSP SymbolKind：函数=12、变量=13 */
         yyjson_mut_obj_add_int(doc, it, "kind",
-                               syms[i].kind == VUS_SYM_FUNCTION ? 12 : 13);
+                               syms[i].kind == VUS_SYM_FUNCTION ? LSP_SYM_FUNCTION : LSP_SYM_VARIABLE);
 
         yyjson_mut_val *rg = yyjson_mut_obj(doc);
         yyjson_mut_val *st = yyjson_mut_obj(doc);

@@ -18,6 +18,14 @@
 #include <unistd.h>
 #include <sys/wait.h>
 
+/* 主函数签名替换常量（APK 构建中需重命名 main → vus_main 避免与 Android 入口冲突） */
+#define MAIN_SIG_VOID   "int main(void)"
+#define MAIN_VUS_VOID   "int vus_main(void)"
+#define MAIN_SIG_VOID_LEN 14
+
+#define MAIN_SIG_ARGC   "int main(int argc"
+#define MAIN_VUS_ARGC   "int vus_main(int argc"
+
 /* ============ NDK 检测 ============ */
 
 const char *vus_apk_detect_ndk(const char *ndk_path) {
@@ -300,19 +308,19 @@ VusApkResult vus_compile_to_apk(const char *file, VusConfig *config,
         size_t n;
         while ((n = fread(buf, 1, sizeof(buf) - 1, src)) > 0) {
             buf[n] = '\0';
-            /* 将 int main(void) 替换为 int vus_main(void) */
+            /* 将 main 替换为 vus_main 避免与 Android 入口冲突 */
             char *p = buf;
             char *q;
-            while ((q = strstr(p, "int main(void)")) != NULL) {
+            while ((q = strstr(p, MAIN_SIG_VOID)) != NULL) {
                 fwrite(p, 1, q - p, dst);
-                fputs("int vus_main(void)", dst);
-                p = q + 14;
+                fputs(MAIN_VUS_VOID, dst);
+                p = q + MAIN_SIG_VOID_LEN;
             }
             /* 也处理 int main(int argc, char** argv) 的情况 */
-            while ((q = strstr(p, "int main(int argc")) != NULL) {
+            while ((q = strstr(p, MAIN_SIG_ARGC)) != NULL) {
                 fwrite(p, 1, q - p, dst);
-                fputs("int vus_main(int argc", dst);
-                p = q + 14;
+                fputs(MAIN_VUS_ARGC, dst);
+                p = q + MAIN_SIG_VOID_LEN;
             }
             fwrite(p, 1, strlen(p), dst);
         }

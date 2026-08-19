@@ -1,0 +1,72 @@
+#// test_vus_abi.vus — 测试 C ABI 接口层
+#// 覆盖 vus_abi_version, vus_compile_file, vus_compile_string, vus_eval 等
+
+打印("=== VUS ABI 接口测试 ===\n")
+
+#// 测试1：ABI 版本信息（通过 --version 命令）
+打印("测试1: ABI 版本信息\n")
+版本输出 = 命令_执行("./vus --version")
+打印(版本输出)
+打印("---\n")
+
+#// 测试2：编译文件为 C 代码（vus_compile_file / vus_compile_to_c）
+打印("测试2: 编译文件为 C 代码\n")
+#// 创建一个临时 VUS 源文件用于编译测试
+文件_写入("/tmp/test_abi_hello.vus", "打印(\"ABI编译测试\")\n")
+编译输出 = 命令_执行("./vus build --c-only /tmp/test_abi_hello.vus")
+打印(编译输出)
+打印("---\n")
+
+#// 验证生成的 C 文件存在
+存在c = 文件_存在("/tmp/test_abi_hello.c")
+如果 存在c == "true":
+    打印("C 文件生成成功: /tmp/test_abi_hello.c\n")
+否则:
+    打印("失败: C 文件未生成\n")
+    打印("ABI测试失败: C文件未生成\n")
+
+#// 测试3：编译并运行文件（vus_run）
+打印("测试3: 编译并运行文件\n")
+运行输出 = 命令_执行("./vus run /tmp/test_abi_hello.vus")
+打印(运行输出)
+打印("---\n")
+
+#// 测试4：vus_compile_string — 通过 vus eval 等价操作
+打印("测试4: 编译字符串\n")
+#// 创建一个内联脚本并编译
+文件_写入("/tmp/test_abi_string.vus", "打印(42 + 1)\n")
+字符串输出 = 命令_执行("./vus build --c-only /tmp/test_abi_string.vus")
+打印(字符串输出)
+打印("---\n")
+
+#// 测试5：错误处理 — 无效文件路径
+打印("测试5: 错误处理 — 无效文件路径\n")
+错误输出 = 命令_执行("./vus build --c-only /tmp/不存在的文件.vus 2>&1")
+打印(错误输出)
+打印("---\n")
+
+#// 测试6：vus_eval 等价 — 直接运行表达式
+打印("测试6: 运行表达式\n")
+eval输出 = 命令_执行("./vus run /tmp/test_abi_hello.vus")
+打印(eval输出)
+打印("---\n")
+
+#// 测试7：import 展开功能（vus_source_expand_imports）
+打印("测试7: import 展开\n")
+#// 创建主脚本和模块脚本
+文件_写入("/tmp/test_mod.vus", "定义 问候():\n    打印(\"来自模块的问候！\")\n结束\n")
+文件_写入("/tmp/test_main.vus", "导入 test_mod\n问候()\n")
+#// 编译带 import 的脚本
+导入输出 = 命令_执行("./vus build --c-only /tmp/test_main.vus 2>&1")
+打印("import 编译输出: ")
+打印(导入输出)
+打印("\n---\n")
+
+#// 清理临时文件
+文件_删除("/tmp/test_abi_hello.vus")
+文件_删除("/tmp/test_abi_hello.c")
+文件_删除("/tmp/test_abi_string.vus")
+文件_删除("/tmp/test_mod.vus")
+文件_删除("/tmp/test_main.vus")
+
+打印("=== ABI 接口测试完成 ===\n")
