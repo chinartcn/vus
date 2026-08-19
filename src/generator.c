@@ -2222,8 +2222,8 @@ static void gen_stmt_for_each(GenBuf *buf, VusAstForEach *fe) {
     gen_emit_linef(buf, "{");
     buf->indent++;
     gen_emit_linef(buf, "VusString* vus_%s = NULL;", san);
-    gen_emit_linef(buf, "VusList* _list = (VusList*)%s;", iter);
-    gen_emit_linef(buf, "for (int _i = 0; _i < vus_list_len(_list); _i++) {");
+    gen_emit_linef(buf, "VusList* _list = vus_is_object((void*)(%s)) ? ((VusObject*)(void*)(%s))->u.list : (VusList*)(%s);", iter, iter, iter);
+    gen_emit_linef(buf, "for (int _i = 0; _i < vus_list_len(_list); _i++) {", iter);
     buf->indent++;
     gen_emit_linef(buf, "vus_ref(vus_list_get(_list, _i));");
     gen_emit_linef(buf, "vus_unref(vus_%s);", san);
