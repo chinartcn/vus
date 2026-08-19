@@ -79,6 +79,7 @@ ampN = 0
 包络 = ""
 k = 0
 wa = 0
+wx = 0
 wpx = 0
 wpy = 0
 wpy_prev = 0
