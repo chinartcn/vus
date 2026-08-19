@@ -2855,9 +2855,13 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
         return -1;
     }
 
-    /* 确定优化级别 */
+    /* 确定优化级别：优先环境变量 VUS_OPT 显式覆盖（如 VUS_OPT=-O0 / -O1），
+       用于在低性能设备（如 Termux）上加速编译大型生成 C；否则按配置。 */
     const char *opt_level = "-O2";
-    if (config->optimization[0]) {
+    const char *env_opt = getenv("VUS_OPT");
+    if (env_opt && env_opt[0]) {
+        opt_level = env_opt;
+    } else if (config->optimization[0]) {
         if (strcmp(config->optimization, "体积") == 0) {
             opt_level = "-Os";
         } else if (strcmp(config->optimization, "调试") == 0) {
