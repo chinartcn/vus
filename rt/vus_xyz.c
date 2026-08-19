@@ -139,31 +139,46 @@ static void sensor_spawn(void)
     g_sens_t0  = now_ms();   /* 记录 spawn 时刻，供首帧 1.5s 缓告警 */
 }
 
-/* 从一行 termux-sensor JSON 提取 values 前三个元素（加速计 x,y,z）。*/
+/* 提取 termux-sensor 输出的 values 前三个元素（加速计 x,y,z）。
+   关键：termux-sensor 的 values 可能单行 "[ x, y, z ]"，也可能多行——
+   每个值占一行（"values": [ 一行是空的，数字在其后的行）。旧的实现在"values"那
+   一行内提取数字，多行格式时永远取不到 → 读数为 0。这里用跨行状态机兼容两者。 */
 static void sensor_parse_line(const char* line)
 {
-    const char* p = strstr(line, "\"values\"");
-    if (!p) return;
-    p = strchr(p, '[');
-    if (!p) return;
-    p++;
-    double vals[3] = {0, 0, 0};
-    int n = 0;
-    while (*p && *p != ']' && n < 3) {
-        while (*p == ' ' || *p == ',' || *p == '\t') p++;
-        if (*p == ']' || *p == '\0') break;
-        double v = strtod(p, (char**)&p);
-        vals[n++] = v;
+    static double vbuf[3];
+    static int    vn     = 0;   /* 已收集个数 */
+    static int    active = 0;   /* 是否正处在 "values" 数组内 */
+
+    if (strstr(line, "\"values\"")) {
+        /* 遇到 values 键：开始新收集（兼容单行与多行） */
+        vn = 0; active = 1;
     }
-    if (n >= 3) {
-        g_sens[0] = vals[0]; g_sens[1] = vals[1]; g_sens[2] = vals[2];
-        if (!g_sens_got) {
-            g_sens_got = 1;
-            /* 首次接通打印真实读数（m/s²），便于确认加速度计数据量与动态 */
-            fprintf(stderr,
-                "[vus] 传感器已接通：x=%.1f y=%.1f z=%.1f m/s²（甩动时对应轴读数应变大）\n",
-                vals[0], vals[1], vals[2]);
+    if (!active) return;
+
+    /* 从本行提取数字：单行格式一次可取全部；多行格式每行取一 */
+    const char* q = line;
+    while (vn < 3) {
+        while (*q && (*q == ' ' || *q == '\t' || *q == ',' || *q == '[')) q++;
+        if (!*q || *q == ']' || *q == '}') break;
+        char* end;
+        double v = strtod(q, &end);
+        if (end == q) break;              /* 本行已无数字 */
+        vbuf[vn++] = v;
+        q = end;
+    }
+
+    /* 本行含 ']' 表示该数据块结束 */
+    if (strchr(line, ']')) {
+        if (vn >= 3) {
+            g_sens[0] = vbuf[0]; g_sens[1] = vbuf[1]; g_sens[2] = vbuf[2];
+            if (!g_sens_got) {
+                g_sens_got = 1;
+                fprintf(stderr,
+                    "[vus] 传感器已接通：x=%.1f y=%.1f z=%.1f m/s²（甩动时对应轴读数应变大）\n",
+                    vbuf[0], vbuf[1], vbuf[2]);
+            }
         }
+        vn = 0; active = 0;
     }
 }
 
