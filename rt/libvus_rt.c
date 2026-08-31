@@ -554,6 +554,21 @@ VusString* vus_to_string(int64_t n) {
     return vus_string_new(buf);
 }
 
+// vus_compare：比较两个字符串。若两者都能解析为整数则按数值比较，
+// 否则按字典序（strcmp）比较。返回 -1 / 0 / 1，供 == != < > <= >= 使用。
+// 避免旧实现把非数字字符串都转成 0 导致 "abc" == "xyz" 被误判为真。
+int vus_compare(VusString* a, VusString* b) {
+    int err_a = 0, err_b = 0;
+    int64_t na = vus_to_int(a, &err_a);
+    int64_t nb = vus_to_int(b, &err_b);
+    if (err_a == 0 && err_b == 0) {
+        return (na > nb) - (na < nb);
+    }
+    const char* ca = a ? vus_string_cstr(a) : "";
+    const char* cb = b ? vus_string_cstr(b) : "";
+    return strcmp(ca, cb);
+}
+
 double vus_to_float(VusString* s, int* err) {
     if (!s || !s->data) {
         if (err) *err = 1;
