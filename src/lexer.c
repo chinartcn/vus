@@ -416,9 +416,14 @@ static void lexer_read_number(VusLexer *lexer)
             /* 0x... 十六进制 */
             lexer_advance(lexer); /* 0 */
             lexer_advance(lexer); /* x */
+            const char *digits_start = lexer->source + lexer->pos;
             while (lexer->pos < lexer->source_len &&
                    isxdigit((unsigned char)lexer->source[lexer->pos])) {
                 lexer_advance(lexer);
+            }
+            if (lexer->source + lexer->pos == digits_start) {
+                lexer_set_error(lexer, "十六进制字面量 0x 后缺少数字");
+                return;
             }
             size_t len = (lexer->source + lexer->pos) - start;
             lexer_add_token(lexer, VUS_TOKEN_NUMBER, start, len, line, col);
@@ -428,10 +433,15 @@ static void lexer_read_number(VusLexer *lexer)
             /* 0b... 二进制 */
             lexer_advance(lexer); /* 0 */
             lexer_advance(lexer); /* b */
+            const char *digits_start = lexer->source + lexer->pos;
             while (lexer->pos < lexer->source_len &&
                    (lexer->source[lexer->pos] == '0' ||
                     lexer->source[lexer->pos] == '1')) {
                 lexer_advance(lexer);
+            }
+            if (lexer->source + lexer->pos == digits_start) {
+                lexer_set_error(lexer, "二进制字面量 0b 后缺少数字");
+                return;
             }
             size_t len = (lexer->source + lexer->pos) - start;
             lexer_add_token(lexer, VUS_TOKEN_NUMBER, start, len, line, col);

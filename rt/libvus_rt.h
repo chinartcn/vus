@@ -181,6 +181,10 @@ int64_t vus_to_int(VusString* s, int* err);
 
 VusString* vus_to_string(int64_t n);
 
+// vus_compare：比较两个字符串。两者均可解析为整数时按数值比较，否则按字典序。
+// 返回 -1 / 0 / 1，供编译器生成的 == != < > <= >= 使用。
+int vus_compare(VusString* a, VusString* b);
+
 // vus_to_float：字符串转浮点数。成功时返回结果，*err 置 0。
 // 失败时返回 0.0，*err 置非 0。
 double vus_to_float(VusString* s, int* err);
