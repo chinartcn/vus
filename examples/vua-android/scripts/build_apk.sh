@@ -1,31 +1,28 @@
 #!/usr/bin/env bash
 # build_apk.sh — 用 NDK + build-tools 手工编译 VUS APK（无需 Gradle）
-# 用法: scripts/build_apk.sh [--abi arm64-v8a] [--ndk /opt/ndk] [--sdk /opt/android]
+# 用法: scripts/build_apk.sh [--abi arm64-v8a] [--ndk /workspace/android/ndk] [--sdk /workspace/android]
 #
 # 产物: <工作目录>/dist/VUS.apk  （可安装、已签名）
 set -euo pipefail
 
 # ---------- 参数 ----------
 ABI="${ABI:-arm64-v8a}"
-NDK="${NDK:-/opt/ndk}"
-SDK="${SDK:-/opt/android}"
+NDK="${NDK:-/workspace/android/ndk}"
+SDK="${SDK:-/workspace/android}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"          # examples/vua-android
 OUT_DIR="$ROOT/dist"
 
 JAVA_SRC="$ROOT/app/src/main/java/com/vus/android"
-JNI_SRC="$ROOT/app/src/main/jniLibs/$ABI"
 ASSETS="$ROOT/app/src/main/assets"
 MANIFEST="$ROOT/AndroidManifest.xml"
 
 VUS_C="${VUS_C:-$ROOT/build/vus_app.c}"            # 由 vua_test.vus 生成
-VUA_SRC="${VUA_SRC:-$ROOT/../../rt}"               # rt/ 目录(vua.c/libvus_rt.h/vus_rt_shim.c/yyjson)
-VUS_RT_SHIM="$VUA_SRC/vus_rt_shim.c"
+VUA_SRC="${VUA_SRC:-$ROOT/../../rt}"               # rt/ 目录(vua.c/libvus_rt.c/vus_coro.c/yyjson)
 
 # ---------- 工具 ----------
-BT="$SDK/bt"
-AJ="$SDK/platforms/android-34/android-34/android.jar"
+BT="$SDK/bt/android-14"
+AJ="$SDK/platforms/android-34/android.jar"
 TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
-TOOLS="$BT/aapt $BT/d8 $BT/zipalign $BT/apksigner"
 JAVAC="${JAVA_HOME:+$JAVA_HOME/bin/}javac"
 
 WORK="$ROOT/build/tmp"
@@ -38,7 +35,6 @@ mkdir -p "$WORK" "$STM" "$LS"
 
 # ---------- 1. 编译 native .so ----------
 echo "[1/6] 编译 native ($ABI) -> libvus_app.so"
-COMPILER="$TC"
 case "$ABI" in
   arm64-v8a) CC="$TC/aarch64-linux-android21-clang" ;;
   armeabi-v7a) CC="$TC/armv7a-linux-androideabi21-clang" ;;
@@ -46,10 +42,14 @@ case "$ABI" in
   *) echo "未知 ABI: $ABI"; exit 1 ;;
 esac
 "$CC" -O2 -std=c11 -fPIC \
-  -I"$ROOT/jni" -I"$ROOT/jni/yyjson" -I"$VUA_SRC" \
+  -I"$ROOT/jni" -I"$ROOT/jni/yyjson" -I"$ROOT/jni/easylogger/inc" -I"$VUA_SRC" \
   "$ROOT/jni/jni_bridge.c" \
   "$VUA_SRC/vua.c" \
-  "$VUS_RT_SHIM" \
+  "$VUA_SRC/libvus_rt.c" \
+  "$VUA_SRC/vus_coro.c" \
+  "$ROOT/jni/easylogger/src/elog.c" \
+  "$ROOT/jni/easylogger/src/elog_utils.c" \
+  "$ROOT/jni/easylogger/elog_port.c" \
   "$VUS_C" \
   "$VUA_SRC/yyjson/yyjson.c" \
   -shared -o "$LS/libvus_app.so" -llog -lm
