@@ -253,8 +253,20 @@ static yyjson_mut_val *build_event_obj(yyjson_mut_doc *d, const yyjson_val *v) {
  *  - 事件(事件|点击|变化|event|点击...) → {name, collect}
  *  - 其余键：控件属性，原样透传（值深复制）
  */
-static yyjson_mut_val *build_render_node(yyjson_mut_doc *d, const yyjson_val *src) {
+static yyjson_mut_val *build_render_node(yyjson_mut_doc *d, const yyjson_val *src,
+                                         VusDict *state) {
     yyjson_mut_val *out = yyjson_mut_obj(d);
+
+    /* 预扫描 type / variable：供「内容」变量回填（文本控件显示状态值） */
+    const char *node_type = NULL;
+    const char *node_var = NULL;
+    {
+        yyjson_val *tv0 = yyjson_obj_get((yyjson_val *)src, "type");
+        if (tv0 && yyjson_is_str(tv0)) node_type = yyjson_get_str(tv0);
+        yyjson_val *vv0 = yyjson_obj_get((yyjson_val *)src, "variable");
+        if (vv0 && yyjson_is_str(vv0)) node_var = yyjson_get_str(vv0);
+    }
+
     yyjson_obj_iter it; yyjson_obj_iter_init((yyjson_val *)src, &it);
     yyjson_val *k, *v;
     while ((k = yyjson_obj_iter_next(&it))) {
@@ -272,7 +284,7 @@ static yyjson_mut_val *build_render_node(yyjson_mut_doc *d, const yyjson_val *sr
                 yyjson_mut_val *carr = yyjson_mut_arr(d);
                 yyjson_arr_iter ai; yyjson_arr_iter_init((yyjson_val *)v, &ai); yyjson_val *e;
                 while ((e = yyjson_arr_iter_next(&ai))) {
-                    if (yyjson_is_obj(e)) yyjson_mut_arr_append(carr, build_render_node(d, e));
+                    if (yyjson_is_obj(e)) yyjson_mut_arr_append(carr, build_render_node(d, e, state));
                 }
                 yyjson_mut_obj_add_val(d, out, "children", carr);
             }
@@ -280,6 +292,18 @@ static yyjson_mut_val *build_render_node(yyjson_mut_doc *d, const yyjson_val *sr
                    key_is(ks, "点击", "onClick") ||
                    key_is(ks, "变化", "onChange")) {
             yyjson_mut_obj_add_val(d, out, "event", build_event_obj(d, v));
+        } else if (streq(ks, "内容") && node_type && streq(node_type, "文本") &&
+                   node_var && state) {
+            /* 变量回填：文本控件带 variable 且屏内状态有值 → 用状态值替换「内容」，
+             * 使 .vus 里 界面_设置 的运算结果实时显示；仅此一处写「内容」，无重复键。 */
+            VusString *vk = vus_string_new(node_var);
+            void *val = vus_dict_get(state, vk);
+            vus_unref(vk);
+            if (val) {
+                yyjson_mut_obj_add_strcpy(d, out, "内容", vus_string_cstr((VusString *)val));
+                continue;
+            }
+            yyjson_mut_obj_add_val(d, out, ks, mv_copy(d, v));
         } else {
             /* 控件自定义属性：原样透传 */
             yyjson_mut_obj_add_val(d, out, ks, mv_copy(d, v));
@@ -448,7 +472,7 @@ const char *vua_screen_dump_rendertree(VuaScreen *screen) {
 
     yyjson_mut_doc *md = yyjson_mut_doc_new(NULL);
     if (!md) return NULL;
-    yyjson_mut_val *root = build_render_node(md, yyjson_doc_get_root(screen->tree));
+    yyjson_mut_val *root = build_render_node(md, yyjson_doc_get_root(screen->tree), screen->state);
     yyjson_mut_doc_set_root(md, root);
 
     /* 顶层 eventIndex：从 imm 源树收集 id → {name, collect} */
@@ -474,6 +498,12 @@ void vua_state_set(VuaScreen *screen, VusString *var, void *val) {
 }
 void *vua_state_get(VuaScreen *screen, VusString *var) {
     return (screen && var) ? vus_dict_get(screen->state, var) : NULL;
+}
+
+VusString *vua_state_get_or_empty(VuaScreen *screen, VusString *var) {
+    void *v = vua_state_get(screen, var);
+    if (v) return vus_string_new(vus_string_cstr((VusString *)v));
+    return vus_string_new("");
 }
 
 /* ============ 事件绑定 ============ */
