@@ -61,29 +61,23 @@ rm -rf "$WORK/classes"; mkdir -p "$WORK/classes"
 rm -rf "$WORK/dex"; mkdir -p "$WORK/dex"
 "$BT/d8" --release --min-api 21 --output "$WORK/dex" "$WORK/classes"/com/vus/android/*.class
 
-# ---------- 3. aapt2 编译资源并打包 ----------
+# ---------- 3. 编译资源并打包 ----------
 echo "[3/6] aapt 编译资源并打包"
-rm -rf "$STM"; mkdir -p "$STM/classes" "$STM/lib" "$STM/assets"
-cp "$WORK/dex/classes.dex" "$STM/classes/"
+rm -rf "$STM"; mkdir -p "$STM" "$STM/lib" "$STM/assets"
+# classes.dex 必须放在 APK 根目录，否则安装时报 "code is missing"
+cp "$WORK/dex/classes.dex" "$STM/classes.dex"
 mkdir -p "$STM/lib/$ABI"; cp "$LS/libvus_app.so" "$STM/lib/$ABI/"
 cp "$ASSETS"/vua_home.vua "$ASSETS"/vua_settings.vua "$ASSETS"/vua_controls.json "$STM/assets/"
 
-# 先用 aapt 生成资源编译(binary xml 可选: 直接原样打包 manifest)
-BASE_APK="$WORK/base.apk"
-"$BT/aapt" package -f -M "$MANIFEST" \
-  -S "$ROOT/app/src/main/res" \
-  -I "$AJ" \
-  -F "$BASE_APK" 2>/dev/null || {
-
-  # 无 res 目录时，用最小命令打包(manifest 原样)
-  "$BT/aapt" package -f -M "$MANIFEST" -I "$AJ" -F "$BASE_APK"
-}
+# 用 aapt 编译 manifest + resources 生成资源表
+if [ -d "$ROOT/app/src/main/res" ]; then RES_SW=" -S $ROOT/app/src/main/res"; else RES_SW=""; fi
+"$BT/aapt" package -f -M "$MANIFEST" $RES_SW -I "$AJ" -F "$WORK/base.apk"
 
 # ---------- 4. 组装 APK ----------
 echo "[4/6] 组装未签名 APK"
 UNSIGNED="$WORK/vus-unsigned.apk"
-cp "$BASE_APK" "$UNSIGNED"
-( cd "$STM" && zip -q -r "$UNSIGNED" classes lib assets )
+cp "$WORK/base.apk" "$UNSIGNED"
+( cd "$STM" && zip -q -r "$UNSIGNED" classes.dex lib assets )
 
 # ---------- 5. zipalign ----------
 echo "[5/6] zipalign"
