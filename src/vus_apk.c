@@ -112,6 +112,46 @@ static int write_file(const char *path, const char *content) {
     return 0;
 }
 
+/* 读模板文件 src，把其中所有出现的 old 替换为 rep，写为新文件 dst。
+ * 用于把 examples/vua-android 的 VUA 模板（包名占位 com.vus.android）复用为
+ * 当前 APK 的实际包名版本。失败返回 -1。
+ */
+static int copy_file_subst(const char *src, const char *dst,
+                           const char *old, const char *rep) {
+    FILE *in = fopen(src, "rb");
+    if (!in) return -1;
+    fseek(in, 0, SEEK_END); long len = ftell(in); fseek(in, 0, SEEK_SET);
+    if (len < 0) { fclose(in); return -1; }
+    char *data = (char *)malloc((size_t)len + 1);
+    if (!data) { fclose(in); return -1; }
+    size_t n = fread(data, 1, (size_t)len, in);
+    fclose(in);
+    data[n] = '\0';
+
+    FILE *out = fopen(dst, "w");
+    if (!out) { free(data); return -1; }
+    if (old && old[0] && rep) {
+        size_t olen = strlen(old);
+        char *p = data, *q;
+        while ((q = strstr(p, old)) != NULL) {
+            fwrite(p, 1, (size_t)(q - p), out);
+            fputs(rep, out);
+            p = q + olen;
+        }
+        fputs(p, out);
+    } else {
+        fputs(data, out);
+    }
+    fclose(out);
+    free(data);
+    return 0;
+}
+
+/* 简单复制文件 src → dst（不做内容替换）。失败返回 -1。 */
+static int copy_file(const char *src, const char *dst) {
+    return copy_file_subst(src, dst, NULL, NULL);
+}
+
 /* ============ 模板生成 ============ */
 
 /* 生成 AndroidManifest.xml */
@@ -138,79 +178,14 @@ static const char *gen_manifest(const char *app_name, const char *pkg_name) {
     return buf;
 }
 
-/* 生成 Java 壳 Activity */
-static const char *gen_java_wrapper(const char *pkg_name) {
-    static char buf[4096];
-    snprintf(buf, sizeof(buf),
-        "package %s;\n\n"
-        "import android.app.Activity;\n"
-        "import android.os.Bundle;\n"
-        "import android.widget.TextView;\n\n"
-        "public class MainActivity extends Activity {\n"
-        "    static {\n"
-        "        System.loadLibrary(\"vus_app\");\n"
-        "    }\n\n"
-        "    private native String runVus();\n\n"
-        "    @Override\n"
-        "    protected void onCreate(Bundle savedInstanceState) {\n"
-        "        super.onCreate(savedInstanceState);\n"
-        "        TextView tv = new TextView(this);\n"
-        "        tv.setText(runVus());\n"
-        "        setContentView(tv);\n"
-        "    }\n"
-        "}\n",
-        pkg_name);
-    return buf;
-}
-
-/* 生成 C JNI 桥接代码 */
-static const char *gen_jni_bridge(const char *pkg_name) {
-    static char buf[8192];
-    /* 生成 JNI 函数名：将 com.example.app 转为 com_example_app */
-    char jni_cls[512];
-    int j = 0;
-    for (int i = 0; pkg_name[i]; i++) {
-        jni_cls[j++] = (pkg_name[i] == '.') ? '_' : pkg_name[i];
-    }
-    jni_cls[j] = '\0';
-    snprintf(buf, sizeof(buf),
-        "#include <jni.h>\n"
-        "#include <stdio.h>\n"
-        "#include <stdlib.h>\n"
-        "#include <string.h>\n\n"
-        "/* libvus_rt 头文件 */\n"
-        "#include \"libvus_rt.h\"\n\n"
-        "/* VUS 编译后的主函数声明 */\n"
-        "extern int vus_main(void);\n\n"
-        "JNIEXPORT jstring JNICALL\n"
-        "Java_%s_MainActivity_runVus(JNIEnv *env, jobject thiz) {\n"
-        "    (void)thiz;\n"
-        "    /* 使用内存缓冲区捕获 stdout 输出 */\n"
-        "    char vus_cap_buf[65536] = {0};\n"
-        "    FILE* vus_cap = fmemopen(vus_cap_buf, sizeof(vus_cap_buf) - 1, \"w\");\n"
-        "    if (vus_cap) {\n"
-        "        FILE* vus_old = stdout;\n"
-        "        stdout = vus_cap;\n"
-        "        vus_main();\n"
-        "        fflush(vus_cap);\n"
-        "        fclose(vus_cap);\n"
-        "        stdout = vus_old;\n"
-        "    } else {\n"
-        "        vus_main();\n"
-        "    }\n"
-        "    return (*env)->NewStringUTF(env, vus_cap_buf);\n"
-        "}\n",
-        jni_cls);
-    return buf;
-}
-
 /* 生成 Android.mk */
 static const char *gen_android_mk(void) {
     return
         "LOCAL_PATH := $(call my-dir)\n"
         "include $(CLEAR_VARS)\n\n"
         "LOCAL_MODULE := vus_app\n"
-        "LOCAL_SRC_FILES := vus_app.c libvus_rt.c jni_bridge.c\n"
+        "LOCAL_SRC_FILES := vus_app.c libvus_rt.c vua.c yyjson.c jni_bridge.c\n"
+        "LOCAL_C_INCLUDES := $(LOCAL_PATH)\n"
         "LOCAL_LDLIBS := -llog -lm\n"
         "LOCAL_CFLAGS := -O2 -std=c11 -DVUS_HAVE_CURL\n\n"
         "include $(BUILD_SHARED_LIBRARY)\n";
@@ -276,16 +251,22 @@ VusApkResult vus_compile_to_apk(const char *file, VusConfig *config,
     char java_pkg_dir[1024];
     snprintf(java_dir, sizeof(java_dir), "%s/java", apk_dir);
     ensure_dir(java_dir);
-    /* 根据包名创建子目录 */
-    snprintf(java_pkg_dir, sizeof(java_pkg_dir), "%s/java/%s", apk_dir, pkg_name);
-    for (char *p = java_pkg_dir + strlen(java_dir) + 5; *p; p++) {
-        if (*p == '.') {
-            *p = '\0';
-            ensure_dir(java_pkg_dir);
-            *p = '.';
+    /* 根据包名创建子目录（com.vus.demo → java/com/vus/demo） */
+    snprintf(java_pkg_dir, sizeof(java_pkg_dir), "%s/java/", apk_dir);
+    {
+        char *cur = java_pkg_dir + strlen(java_pkg_dir);
+        for (const char *q = pkg_name; *q; q++) {
+            if (*q == '.') {
+                *cur = '\0';
+                ensure_dir(java_pkg_dir);
+                *cur++ = '/';
+            } else {
+                *cur++ = *q;
+            }
         }
+        *cur = '\0';
+        ensure_dir(java_pkg_dir);
     }
-    ensure_dir(java_pkg_dir);
 
     /* 5. 复制 VUS 生成的 C 代码到 jni/ 目录，并将 main 函数重命名为 vus_main */
     char vus_c_path[1024];
@@ -364,10 +345,52 @@ VusApkResult vus_compile_to_apk(const char *file, VusConfig *config,
         }
     }
 
-    /* 6. 生成 JNI 桥接代码 */
-    char jni_bridge_path[1024];
-    snprintf(jni_bridge_path, sizeof(jni_bridge_path), "%s/jni_bridge.c", jni_dir);
-    write_file(jni_bridge_path, gen_jni_bridge(pkg_name));
+    /* 5b. 复制 VUA 界面运行时与 yyjson 到 jni/ 目录 */
+    {
+        const char *rt = config->rt_dir;
+        char src[1024], dst[1024];
+        snprintf(src, sizeof(src), "%s/vua.h", rt);
+        snprintf(dst, sizeof(dst), "%s/vua.h", jni_dir);
+        copy_file(src, dst);
+        snprintf(src, sizeof(src), "%s/vua.c", rt);
+        snprintf(dst, sizeof(dst), "%s/vua.c", jni_dir);
+        copy_file(src, dst);
+
+        snprintf(src, sizeof(src), "%s/yyjson/yyjson.c", rt);
+        snprintf(dst, sizeof(dst), "%s/yyjson.c", jni_dir);
+        copy_file(src, dst);
+        snprintf(src, sizeof(src), "%s/yyjson/yyjson.h", rt);
+        snprintf(dst, sizeof(dst), "%s/yyjson.h", jni_dir);
+        copy_file(src, dst);
+    }
+
+    /* 6. 生成 VUA JNI 桥接代码（examples/vua-android/jni_bridge.c → 当前包名） */
+    {
+        char tpl_dir[1024];
+        snprintf(tpl_dir, sizeof(tpl_dir), "%s/../examples/vua-android", config->rt_dir);
+        char tpl[1024], dst[1024];
+        snprintf(tpl, sizeof(tpl), "%s/jni_bridge.c", tpl_dir);
+        snprintf(dst, sizeof(dst), "%s/jni_bridge.c", jni_dir);
+
+        /* 包名 → JNI 各种写法（点/斜杠/下划线） */
+        char pkg_slash[256], pkg_under[256];
+        size_t k = 0;
+        for (size_t i = 0; pkg_name[i]; i++) pkg_slash[k++] = (pkg_name[i] == '.') ? '/' : pkg_name[i];
+        pkg_slash[k] = '\0';
+        k = 0;
+        for (size_t i = 0; pkg_name[i]; i++) pkg_under[k++] = (pkg_name[i] == '.') ? '_' : pkg_name[i];
+        pkg_under[k] = '\0';
+
+        /* 分步替换：斜杠 JNI 类名、下划线符号名、点包名，最后落到 jni_bridge.c */
+        char tmp[1024];
+        snprintf(tmp, sizeof(tmp), "%s/_jb.c", jni_dir);
+        if (copy_file_subst(tpl, tmp, "com_vus_android", pkg_under) == 0 &&
+            copy_file_subst(tmp, dst, "com/vus/android", pkg_slash) == 0) {
+            remove(tmp);
+        } else {
+            remove(tmp);
+        }
+    }
 
     /* 7. 生成 Android.mk 和 Application.mk */
     char mk_path[1024];
@@ -383,10 +406,23 @@ VusApkResult vus_compile_to_apk(const char *file, VusConfig *config,
     snprintf(manifest_path, sizeof(manifest_path), "%s/AndroidManifest.xml", apk_dir);
     write_file(manifest_path, gen_manifest(name, pkg_name));
 
-    /* 9. 生成 Java 壳 Activity */
-    char java_path[1024];
-    snprintf(java_path, sizeof(java_path), "%s/MainActivity.java", java_pkg_dir);
-    write_file(java_path, gen_java_wrapper(pkg_name));
+    /* 9. 生成 VUA Java 壳（MainActivity / VuaBridge / VuaRenderer，包名占位替换） */
+    {
+        char tpl_dir[1024];
+        snprintf(tpl_dir, sizeof(tpl_dir), "%s/../examples/vua-android", config->rt_dir);
+        char tpl[1024], dst[1024];
+        snprintf(tpl, sizeof(tpl), "%s/MainActivity.java", tpl_dir);
+        snprintf(dst, sizeof(dst), "%s/MainActivity.java", java_pkg_dir);
+        copy_file_subst(tpl, dst, "com.vus.android", pkg_name);
+
+        snprintf(tpl, sizeof(tpl), "%s/VuaBridge.java", tpl_dir);
+        snprintf(dst, sizeof(dst), "%s/VuaBridge.java", java_pkg_dir);
+        copy_file_subst(tpl, dst, "com.vus.android", pkg_name);
+
+        snprintf(tpl, sizeof(tpl), "%s/VuaRenderer.java", tpl_dir);
+        snprintf(dst, sizeof(dst), "%s/VuaRenderer.java", java_pkg_dir);
+        copy_file_subst(tpl, dst, "com.vus.android", pkg_name);
+    }
 
     /* 10. 检测 NDK 并尝试交叉编译 */
     const char *ndk = vus_apk_detect_ndk(ndk_path);
