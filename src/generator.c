@@ -278,6 +278,14 @@ static int g_uses_gui = 0; /* 是否在代码中使用了 GuiLite 图形内建�
 static int g_uses_png = 0; /* 是否使用 图形_背景图（决定追加 -lpng -lz 链接库） */
 static int g_uses_freetype = 0; /* 是否使用 图形_字体_加载（决定追加 -lfreetype 链接库） */
 
+/* ============ VUA（Android 组件流）界面内建：登记/闭包包装 ============
+ * 界面_绑定 需把一个 .vus 用户函数包装成 VusClosure。闭包包装函数（静态、文件作用域）
+ * 收集到 g_vua_premain，在主函数之前统一喷出。用一个计数器保证包装函数名唯一。 */
+static GenBuf *g_vua_premain = NULL;     /* 收集 界面_绑定 的静态包装函数 */
+static GenBuf *g_vua_fwd = NULL;         /* 收集包装函数的前向声明（放 include 后） */
+static int     g_vua_bind_count = 0;     /* 包装函数序号，用于唯一命名 */
+static int     g_uses_vua = 0;           /* 用户代码是否用了 界面_*（决定 include vua.h）*/
+
 static char *gen_expr_access(GenBuf *buf, VusAstAccess *access) {
     /* 生成成员访问表达式
      * 对于 p.name，生成 ((vus_struct_StructName*)vus_p)->vus_name
@@ -483,6 +491,68 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
             return result;
         }
         return strdup("vus_print(vus_string_new(\"\"))");
+    }
+
+    /* ============= VUA 界面内建（Android 组件流，rt/vua.c） =============
+     * 多屏导航 + 事件绑定。驱动全局 VuaSession（vua_global_session）。
+     * 界面_显示(路径)  读 .vua 压栈成为当前屏；
+     * 界面_返回() / 界面_返回至(名)  弹栈导航；
+     * 界面_绑定(事件名, 处理函数)  把 .vus 函数登记为当前屏的事件 handler。 */
+    if (strcmp(call->func_name, "界面_显示") == 0) {
+        g_uses_vua = 1;
+        if (call->args && call->args->count >= 1) {
+            char *p = gen_expr(buf, call->args->items[0]);
+            char *r = (char *)malloc(strlen(p) + 128);
+            snprintf(r, strlen(p) + 128,
+                "(void)vua_session_show(vua_global_session(NULL), vus_string_cstr(%s), NULL)", p);
+            free(p);
+            return r;
+        }
+        return strdup("(void)vua_session_show(vua_global_session(NULL), \"\", NULL)");
+    }
+    if (strcmp(call->func_name, "界面_返回") == 0) {
+        g_uses_vua = 1;
+        return strdup("(void)vua_session_back(vua_global_session(NULL))");
+    }
+    if (strcmp(call->func_name, "界面_返回至") == 0) {
+        g_uses_vua = 1;
+        if (call->args && call->args->count >= 1) {
+            char *n = gen_expr(buf, call->args->items[0]);
+            char *r = (char *)malloc(strlen(n) + 128);
+            snprintf(r, strlen(n) + 128,
+                "(void)vua_session_back_to(vua_global_session(NULL), vus_string_cstr(%s))", n);
+            free(n);
+            return r;
+        }
+        return strdup("(void)vua_session_back_to(vua_global_session(NULL), \"\")");
+    }
+    if (strcmp(call->func_name, "界面_绑定") == 0) {
+        g_uses_vua = 1;
+        /* 参数：args[0]=事件名字符串，args[1]=处理函数标识符 */
+        if (call->args && call->args->count >= 2 &&
+            call->args->items[1]->type == VUS_AST_IDENTIFIER) {
+            char *ev = gen_expr(buf, call->args->items[0]);
+            VusAstIdentifier *handler = (VusAstIdentifier *)call->args->items[1];
+            char hs[256];
+            gen_sanitize_name(handler->name, hs, sizeof(hs));
+            int id = g_vua_bind_count++;
+            /* 静态包装：调用处生成 VusClosure 并登记到当前屏事件表 */
+            if (!g_vua_premain) g_vua_premain = gen_buf_new();
+            if (!g_vua_fwd) g_vua_fwd = gen_buf_new();
+            /* 前向声明：包装函数可能在用户 handler 函数体内被引用，须先声明 */
+            gen_emit_linef(g_vua_fwd, "static void _vua_ck_%d(void*, void*);", id);
+            gen_emit_linef(g_vua_premain,
+                "static void _vua_ck_%d(void* _env, void* _args){ (void)_env; (void)_args; VusString* _va[1]={NULL}; vus_%s(_va); }",
+                id, hs);
+            size_t sz = strlen(ev) + 256;
+            char *r = (char *)malloc(sz);
+            snprintf(r, sz,
+                "({ VusClosure* _vc_%d = vus_closure_new(_vua_ck_%d, NULL); vua_on(vua_session_current(vua_global_session(NULL)), vus_string_cstr(%s), _vc_%d); _vc_%d; })",
+                id, id, ev, id, id);
+            free(ev);
+            return r;
+        }
+        return strdup("(void)0; /* 界面_绑定: 参数不足 */");
     }
     if (strcmp(call->func_name, "输入") == 0) {
         if (call->args && call->args->count > 0) {
@@ -2691,6 +2761,10 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config) {
     if (!program || !config) return NULL;
 
     g_uses_gui = 0; /* 每次生成前重置 GUI 使用标记 */
+    g_uses_vua = 0; /* 每次生成前重置 VUA 使用标记 */
+    g_vua_bind_count = 0;
+    if (g_vua_premain) { free(g_vua_premain->data); free(g_vua_premain); g_vua_premain = NULL; }
+    if (g_vua_fwd) { free(g_vua_fwd->data); free(g_vua_fwd); g_vua_fwd = NULL; }
 
     GenBuf *buf = gen_buf_new();
     if (!buf) return NULL;
@@ -2713,7 +2787,9 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config) {
     /* 运行时头文件 */
     if (config->rt_dir[0]) {
         gen_emit(buf, "#include \"libvus_rt.h\"\n");
-        gen_emit(buf, "#include \"guilite_bridge.h\"\n\n");
+        /* 仅当用到 图形_*（GuiLite X11）时才引入图形桥接头，避免 APK 无该头难编译 */
+        if (g_uses_gui) gen_emit(buf, "#include \"guilite_bridge.h\"\n");
+        gen_emit(buf, "\n");
     }
 
     /* 线程/协程运行时辅助 */
@@ -2809,8 +2885,51 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config) {
     gen_main_function(buf, program, config->debug);
 
     char *result = strdup(buf->data);
+
+    /* 收集起来的 VUA 闭包包装函数（须在 main 前定义）与 vua.h 头、前向声明，统一拼装。
+     * 因为 g_uses_vua / g_vua_premain 是生成 main 时才确定，故在生成完成后拼。 */
+    if (g_uses_vua) {
+        size_t total = strlen(result) + 64 + 64;
+        if (g_vua_premain && g_vua_premain->data) total += strlen(g_vua_premain->data);
+        if (g_vua_fwd && g_vua_fwd->data) total += strlen(g_vua_fwd->data);
+        char *assembled = (char *)malloc(total + 1);
+        if (!assembled) {
+            free(result);
+        } else {
+            /* 在 int main(void) { 前插入包装函数 */
+            const char *mk = "int main(void) {";
+            char *at = strstr(result, mk);
+            size_t head = at ? (size_t)(at - result) : strlen(result);
+            size_t pos = 0;
+            if (at) {
+                /* 前向声明放 include 之后（结果最前面是标准 include 区） */
+                snprintf(assembled + pos, total - pos, "#include \"vua.h\"\n\n");
+                pos += strlen(assembled + pos);
+                if (g_vua_fwd && g_vua_fwd->data) {
+                    snprintf(assembled + pos, total - pos, "%s\n", g_vua_fwd->data);
+                    pos += strlen(assembled + pos);
+                }
+                strncpy(assembled + pos, result, head); pos += head;
+                if (g_vua_premain && g_vua_premain->data) {
+                    snprintf(assembled + pos, total - pos, "\n%s\n", g_vua_premain->data);
+                    pos += strlen(assembled + pos);
+                }
+                strcpy(assembled + pos, result + head);
+            } else {
+                /* 兜底：没找到主函数（异常），仅前置 include */
+                snprintf(assembled + pos, total - pos, "#include \"vua.h\"\n\n%s", result);
+            }
+            free(result);
+            result = assembled;
+        }
+    }
+
     free(buf->data);
     free(buf);
+
+    /* 释放 VUA 绑定包装缓冲（其内容已并入 result，此处仅回收内存） */
+    if (g_vua_premain) { free(g_vua_premain->data); free(g_vua_premain); g_vua_premain = NULL; }
+    if (g_vua_fwd) { free(g_vua_fwd->data); free(g_vua_fwd); g_vua_fwd = NULL; }
 
     /* 清理结构体类型表 */
     gen_struct_free(s_gen_structs);
