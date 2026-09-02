@@ -131,6 +131,9 @@ void vua_state_set(VuaScreen *screen, VusString *var, void *val);
 /* 读取 变量的当前值；变量不存在返回 NULL。 */
 void *vua_state_get(VuaScreen *screen, VusString *var);
 
+/* 读取 变量的当前值（安全版）：变量不存在时返回新空字符串（供 .vus 直接消费，避免 NULL）。 */
+VusString *vua_state_get_or_empty(VuaScreen *screen, VusString *var);
+
 /* ============ 事件绑定（native / .vus 侧登记） ============ */
 
 /*

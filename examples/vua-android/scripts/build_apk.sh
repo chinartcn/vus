@@ -67,7 +67,7 @@ rm -rf "$STM"; mkdir -p "$STM" "$STM/lib" "$STM/assets"
 # classes.dex 必须放在 APK 根目录，否则安装时报 "code is missing"
 cp "$WORK/dex/classes.dex" "$STM/classes.dex"
 mkdir -p "$STM/lib/$ABI"; cp "$LS/libvus_app.so" "$STM/lib/$ABI/"
-cp "$ASSETS"/vua_home.vua "$ASSETS"/vua_settings.vua "$ASSETS"/vua_controls.json "$STM/assets/"
+cp "$ASSETS"/vua_home.vua "$ASSETS"/vua_settings.vua "$ASSETS"/vua_logic.vua "$ASSETS"/vua_controls.json "$STM/assets/"
 
 # 用 aapt 编译 manifest + resources 生成资源表
 if [ -d "$ROOT/app/src/main/res" ]; then RES_SW=" -S $ROOT/app/src/main/res"; else RES_SW=""; fi

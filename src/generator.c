@@ -554,6 +554,39 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
         }
         return strdup("(void)0; /* 界面_绑定: 参数不足 */");
     }
+    if (strcmp(call->func_name, "界面_设置") == 0) {
+        g_uses_vua = 1;
+        /* 界面_设置(变量名, 值)：写当前屏状态，供渲染树变量回填（逻辑页核心）。
+         * VUS 字符串字面量经 gen_expr 已是 VusString*（vus_string_new(...)），
+         * vua_state_set 恰需 VusString*，直接透传，勿再包 vus_string_new。 */
+        if (call->args && call->args->count >= 2) {
+            char *name = gen_expr(buf, call->args->items[0]);
+            char *val = gen_expr(buf, call->args->items[1]);
+            size_t sz = strlen(name) + strlen(val) + 192;
+            char *r = (char *)malloc(sz);
+            snprintf(r, sz,
+                "(void)vua_state_set(vua_session_current(vua_global_session(NULL)), %s, %s)",
+                name, val);
+            free(name); free(val);
+            return r;
+        }
+        return strdup("(void)0; /* 界面_设置: 参数不足 */");
+    }
+    if (strcmp(call->func_name, "界面_取") == 0) {
+        g_uses_vua = 1;
+        /* 界面_取(变量名)：读当前屏状态，返回新 VusString*（缺失给空串，可安全 unref） */
+        if (call->args && call->args->count >= 1) {
+            char *name = gen_expr(buf, call->args->items[0]);
+            size_t sz = strlen(name) + 192;
+            char *r = (char *)malloc(sz);
+            snprintf(r, sz,
+                "vua_state_get_or_empty(vua_session_current(vua_global_session(NULL)), %s)",
+                name);
+            free(name);
+            return r;
+        }
+        return strdup("vua_state_get_or_empty(vua_session_current(vua_global_session(NULL)), vus_string_new(\"\"))");
+    }
     if (strcmp(call->func_name, "输入") == 0) {
         if (call->args && call->args->count > 0) {
             char *arg = gen_expr(buf, call->args->items[0]);
@@ -583,11 +616,13 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
             char *arg = gen_expr(buf, call->args->items[0]);
             size_t sz = strlen(arg) + 64;
             char *result = (char *)malloc(sz);
-            snprintf(result, sz, "vus_to_string(%s)", arg);
+            /* VUS 标量统一为 VusString*；vus_to_string 只收 int64，不能直接传串，
+             * 否则指针会被当整数打印。这里做字符串副本，保证任意 VusString* 入参安全。 */
+            snprintf(result, sz, "vus_string_new(vus_string_cstr(%s))", arg);
             free(arg);
             return result;
         }
-        return strdup("vus_to_string(0)");
+        return strdup("vus_string_new(vus_string_cstr(vus_to_string(0)))");
     }
     if (strcmp(call->func_name, "睡眠") == 0) {
         if (call->args && call->args->count > 0) {
