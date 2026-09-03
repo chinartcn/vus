@@ -149,6 +149,11 @@ public final class VuaRenderer {
         final String evName = eventName(node);
         final JSONArray collect = eventCollect(node);
         b.setOnClickListener(v -> {
+            // 检查更新：直接在 Java 侧处理，不走 native 事件
+            if ("检查更新".equals(evName)) {
+                if (VuaBridge.onCheckUpdate != null) VuaBridge.onCheckUpdate.run();
+                return;
+            }
             String vars = collectVars(collect);
             if (evName != null) {
                 VuaBridge.vuaTrigger(evName, vars);

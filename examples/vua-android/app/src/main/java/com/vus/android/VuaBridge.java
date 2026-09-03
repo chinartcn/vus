@@ -25,11 +25,13 @@ public final class VuaBridge {
         System.loadLibrary("vus_app");
     }
 
-    /**
-     * native → Java 重绘回调：屏栈变化（界面_显示/返回/返回至）后由 native 调用。
+    /** native → Java 重绘回调：屏栈变化（界面_显示/返回/返回至）后由 native 调用。
      * MainActivity 在此注册一个 runnable 来重建当前屏的 View。
      */
     public static Runnable onRerender = null;
+
+    /** Java 检查更新回调：由 VuaRenderer 按钮处理触发 */
+    public static Runnable onCheckUpdate = null;
 
     /** 被 native（jni_bridge.c）调用的入口；可能来自非 UI 线程，需自行切到主线程。 */
     public static void onNativeRerender() {
