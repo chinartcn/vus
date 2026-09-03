@@ -75,7 +75,8 @@ cp "$VUA_SRC/vua.c" "$VUA_SRC/vua.h" "$ROOT/jni/"
 # ---------- 2. 编译 Java -> classes.dex ----------
 echo "[2/6] 编译 Java -> classes.dex"
 rm -rf "$WORK/classes"; mkdir -p "$WORK/classes"
-"$JAVAC" --release 8 -cp "$AJ" -d "$WORK/classes" "$JAVA_SRC"/*.java 2>/dev/null || true
+JAVA8="/root/.local/share/mise/installs/java/temurin-8.0/bin/javac"
+"$JAVA8" -cp "$AJ" -d "$WORK/classes" "$JAVA_SRC"/*.java 2>&1
 rm -rf "$WORK/dex"; mkdir -p "$WORK/dex"
 "$BT/d8" --release --min-api 21 --output "$WORK/dex" "$WORK/classes"/com/vus/android/*.class
 
