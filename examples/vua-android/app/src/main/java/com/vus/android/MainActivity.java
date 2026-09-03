@@ -8,7 +8,9 @@ package com.vus.android;
 
 import android.app.Activity;
 import android.content.res.AssetManager;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.StrictMode;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
 import android.widget.TextView;
@@ -47,6 +49,11 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        // Android 7+ 禁止 file:// URI 跨应用，安装 APK 时放行
+        if (Build.VERSION.SDK_INT >= 24) {
+            StrictMode.setVmPolicy(new StrictMode.VmPolicy.Builder().build());
+        }
 
         content = new FrameLayout(this);
         content.setLayoutParams(new ViewGroup.LayoutParams(
