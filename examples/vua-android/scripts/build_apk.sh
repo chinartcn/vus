@@ -13,6 +13,9 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"          # examples/vua-android
 OUT_DIR="$ROOT/dist"
 
 JAVA_SRC="$ROOT/app/src/main/java/com/vus/android"
+# 资产以仓库 testdata/ 为单一可信来源（.vua/.json），每次构建前自动同步，
+# 避免 app/src/main/assets 里的副本过期导致 APK 打包到旧页面。
+TESTDATA_SRC="${TESTDATA_SRC:-$ROOT/../../testdata}"
 ASSETS="$ROOT/app/src/main/assets"
 MANIFEST="$ROOT/AndroidManifest.xml"
 
@@ -32,6 +35,17 @@ LS="$ROOT/build/libs/$ABI"
 printf '== VUS APK build ==\n'
 printf '  ABI=%s  NDK=%s  SDK=%s\n' "$ABI" "$NDK" "$SDK"
 mkdir -p "$WORK" "$STM" "$LS"
+
+# ---------- 0. 同步资产 + 生成 vus_app.c（保证页面与逻辑一致） ----------
+VUS_BIN="${VUS_BIN:-$ROOT/../../vus}"
+if [ ! -f "$VUS_C" ] || [ "$TESTDATA_SRC/vua_test.vus" -nt "$VUS_C" ]; then
+  echo "[0/6] 由 $TESTDATA_SRC/vua_test.vus 生成 vus_app.c"
+  ( cd "$TESTDATA_SRC" && "$VUS_BIN" build --c-only vua_test.vus >/dev/null 2>&1 )
+  cp "$TESTDATA_SRC"/构建/vua_test.c "$VUS_C"
+  sed -i 's/^int main(void)/int vus_main(void)/' "$VUS_C"
+fi
+cp "$TESTDATA_SRC"/vua_home.vua "$TESTDATA_SRC"/vua_settings.vua \
+   "$TESTDATA_SRC"/vua_logic.vua "$TESTDATA_SRC"/vua_controls.json "$ASSETS/"
 
 # ---------- 1. 编译 native .so ----------
 echo "[1/6] 编译 native ($ABI) -> libvus_app.so"
@@ -53,6 +67,9 @@ esac
   "$VUS_C" \
   "$VUA_SRC/yyjson/yyjson.c" \
   -shared -o "$LS/libvus_app.so" -llog -lm
+
+# ---------- 1b. 同步 rt/vua.* 到 jni（保证声明最新） ----------
+cp "$VUA_SRC/vua.c" "$VUA_SRC/vua.h" "$ROOT/jni/"
 
 # ---------- 2. 编译 Java -> classes.dex ----------
 echo "[2/6] 编译 Java -> classes.dex"
