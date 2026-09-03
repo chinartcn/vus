@@ -58,6 +58,9 @@ public class MainActivity extends Activity {
         // native 换屏（界面_显示/返回）后回调 onNativeRerender；切到主线程重建 View。
         VuaBridge.onRerender = () -> runOnUiThread(this::renderCurrent);
 
+        // 注册检查更新回调
+        VuaBridge.onCheckUpdate = () -> runOnUiThread(() -> new UpdateChecker(this).check());
+
         // 释放 .vua 到文件目录，并把工作目录切到那里，再启动 native（建会话 + 跑 .vus）
         extractAssets();
         VuaBridge.vuaSetRootDir(getFilesDir().getAbsolutePath());
@@ -77,5 +80,12 @@ public class MainActivity extends Activity {
     private void renderCurrent() {
         String tree = VuaBridge.vuaRenderTree();
         renderer.render(tree, "(空界面)");
+    }
+
+    /** 由 native 事件触发检查更新 */
+    public void checkUpdate() {
+        runOnUiThread(() -> {
+            new UpdateChecker(this).check();
+        });
     }
 }
