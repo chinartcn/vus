@@ -17,9 +17,12 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
-import android.widget.CheckBox;
+import android.widget.SeekBar;
+import android.widget.Spinner;
+import android.widget.ArrayAdapter;
 import android.widget.Switch;
 import android.widget.TextView;
 
@@ -77,6 +80,9 @@ public final class VuaRenderer {
             }
             case "复选框": case "checkbox": { parent.addView(checkView(node)); return; }
             case "开关": case "switch":      { parent.addView(switchView(node)); return; }
+            case "滑块": case "slider":      { sliderView(node, parent); return; }
+            case "下拉": case "spinner":     { spinnerView(node, parent); return; }
+            case "图片": case "image":       { imageView(node, parent); return; }
             default: {
                 // 未知/扩展 type：降级为一个文本框占位（严格原则下应报错，这里保证不崩）。
                 TextView t = TextView(ctx);
@@ -104,6 +110,7 @@ public final class VuaRenderer {
         LinearLayout ll = makeLayout(vert);
         parent.addView(ll, matchWrap());
         JSONArray ch = node.optJSONArray("children");
+        if (ch == null) ch = node.optJSONArray("子组件");
         if (ch != null) {
             for (int i = 0; i < ch.length(); i++) {
                 JSONObject c = ch.optJSONObject(i);
@@ -117,7 +124,7 @@ public final class VuaRenderer {
     private TextView textView(JSONObject node) {
         TextView t = TextView(ctx);
         t.setText(node.optString("内容", node.optString("value", "")));
-        t.setTextColor(0xFF1A1F2E);
+        t.setTextColor(darkTheme ? 0xFFE0E0E0 : 0xFF1A1F2E);
         String style = node.optString("样式", node.optString("style", "body"));
         float sp = 14; int styleB = Typeface.NORMAL;
         switch (style) {
@@ -149,6 +156,7 @@ public final class VuaRenderer {
             // 这里再主动刷一次，兜底事件 handler 只是改了变量、没有换屏的场景。
             refresh();
         });
+        rememberInput(node, b);
         return b;
     }
 
@@ -159,49 +167,86 @@ public final class VuaRenderer {
         e.setHint(node.optString("提示", node.optString("placeholder", "")));
         e.setSingleLine(!multiline);
         // 记录 variable——用户在触发按钮时由 collectVars 从这里读值
-        String variable = node.optString("variable");
-        if (!variable.isEmpty()) {
-            e.setTag("variable:" + variable);
-            inputs.put(variable, e);
-        }
-        String id = node.optString("id");
-        if (!id.isEmpty()) inputs.put(id, e);
+        rememberInput(node, e);
         return e;
     }
 
     private CheckBox checkView(JSONObject node) {
         CheckBox c = new CheckBox(ctx);
         c.setText(node.optString("标签", node.optString("label", "")));
-        String variable = node.optString("variable");
-        if (!variable.isEmpty()) {
-            c.setTag("variable:" + variable);
-            inputs.put(variable, c);
-        }
+        c.setTextColor(darkTheme ? 0xFFE0E0E0 : 0xFF1A1F2E);
+        rememberInput(node, c);
         return c;
     }
 
     private Switch switchView(JSONObject node) {
         Switch s = new Switch(ctx);
         s.setText(node.optString("标签", node.optString("label", "")));
-        String variable = node.optString("variable");
-        if (!variable.isEmpty()) {
-            s.setTag("variable:" + variable);
-            inputs.put(variable, s);
-        }
+        s.setTextColor(darkTheme ? 0xFFE0E0E0 : 0xFF1A1F2E);
+        rememberInput(node, s);
         return s;
+    }
+
+    /* ---------- 新控件：滑块 / 下拉框 / 图片 ---------- */
+
+    private void sliderView(JSONObject node, ViewGroup parent) {
+        final SeekBar sb = new SeekBar(ctx);
+        sb.setMax(node.optInt("最大值", 100));
+        sb.setProgress(node.optInt("值", 50));
+        String label = node.optString("标签", "");
+        if (!label.isEmpty()) {
+            sb.setContentDescription(label);
+        }
+        rememberInput(node, sb);
+        parent.addView(sb);
+    }
+
+    private void spinnerView(JSONObject node, ViewGroup parent) {
+        final Spinner sp = new Spinner(ctx);
+        String label = node.optString("标签", "");
+        if (!label.isEmpty()) {
+            sp.setContentDescription(label);
+        }
+        List<String> options = new ArrayList<>();
+        JSONArray opt = node.optJSONArray("选项");
+        if (opt != null) {
+            for (int i = 0; i < opt.length(); i++) {
+                options.add(opt.optString(i));
+            }
+        }
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(ctx,
+                android.R.layout.simple_spinner_dropdown_item, options);
+        sp.setAdapter(adapter);
+        rememberInput(node, sp);
+        parent.addView(sp);
+    }
+
+    private void imageView(JSONObject node, ViewGroup parent) {
+        // 占位：仅显示占位信息，后续添加图片加载器支持远端/本地图片
+        final TextView tv = new TextView(ctx);
+        tv.setTextColor(darkTheme ? 0xFF888888 : 0xFF666666);
+        tv.setText("[图片] " + node.optString("src", "(未指定路径)"));
+        tv.setGravity(Gravity.CENTER);
+        tv.setPadding(dp(8), dp(16), dp(8), dp(16));
+        parent.addView(tv);
+        rememberInput(node, tv);
     }
 
     /* ---------- 事件 / 变量工具 ---------- */
 
     private static String eventName(JSONObject node) {
-        JSONObject e = node.optJSONObject("event");
-        if (e != null) return e.optString("name", null);
+        JSONObject e = node.optJSONObject("事件");
+        if (e != null) return e.optString("事件名", null);
+        JSONObject e2 = node.optJSONObject("event");
+        if (e2 != null) return e2.optString("name", null);
         return node.optString("event", null);
     }
 
     private static JSONArray eventCollect(JSONObject node) {
-        JSONObject e = node.optJSONObject("event");
-        if (e != null) return e.optJSONArray("collect");
+        JSONObject e = node.optJSONObject("事件");
+        if (e != null) return e.optJSONArray("收集变量");
+        JSONObject e2 = node.optJSONObject("event");
+        if (e2 != null) return e2.optJSONArray("collect");
         return null;
     }
 
@@ -218,6 +263,12 @@ public final class VuaRenderer {
             if (v instanceof EditText) val = ((EditText) v).getText().toString();
             else if (v instanceof CheckBox) val = String.valueOf(((CheckBox) v).isChecked());
             else if (v instanceof Switch) val = String.valueOf(((Switch) v).isChecked());
+            else if (v instanceof SeekBar) val = String.valueOf(((SeekBar) v).getProgress());
+            else if (v instanceof Spinner) {
+                Spinner sp = (Spinner) v;
+                if (sp.getSelectedItem() != null) val = sp.getSelectedItem().toString();
+                else val = "";
+            }
             else val = "";
             if (!first) sb.append(',');
             first = false;
@@ -236,25 +287,18 @@ public final class VuaRenderer {
         return s == null ? "" : s.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
-    private static String eventIndexLookup(JSONObject tree, String id, String key) {
-        JSONObject idx = tree.optJSONObject("eventIndex");
-        JSONObject ev = idx != null ? idx.optJSONObject(id) : null;
-        return (ev != null) ? ev.optString(key, null) : null;
-    }
-
     /* ---------- 便捷工厂 ---------- */
 
     private TextView TextView(Context c) { TextView t = new TextView(c); return t; }
     private TextView TextView(Context c, String s) { TextView t = new TextView(c); t.setText(s); return t; }
-    private TextView textView(String s) { TextView t = new TextView(ctx); t.setText(s); return t; }
     private int dp(float v) { return (int) (v * ctx.getResources().getDisplayMetrics().density); }
     private ViewGroup.LayoutParams matchWrap() {
         return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
     }
     private void rememberInput(JSONObject node, View v) {
-        String id = node.optString("id");
+        String id = node.optString("id", "");
         if (!id.isEmpty()) inputs.put(id, v);
-        String variable = node.optString("variable");
+        String variable = node.optString("variable", "");
         if (!variable.isEmpty()) { v.setTag("variable:" + variable); inputs.put(variable, v); }
     }
 }
