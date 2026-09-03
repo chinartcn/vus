@@ -22,13 +22,16 @@ public class MainActivity extends Activity {
     private FrameLayout content;
     private VuaRenderer renderer;
 
-    /** 从 assets 释放 .vua 到文件目录，供 native 以相对路径读取。 */
+    /** 从 assets 释放 .vua/.json 到文件目录，供 native 以相对路径读取。
+     *  动态枚举全部资源文件，避免新增页面漏拷（曾因漏 vua_logic.vua 导致导航无反应）。 */
     private void extractAssets() {
         try {
             AssetManager am = getAssets();
-            File dir = new File(getFilesDir(), ".");
-            String[] names = { "vua_home.vua", "vua_settings.vua", "vua_controls.json" };
+            File dir = getFilesDir();
+            String[] names = am.list("");
+            if (names == null) return;
             for (String n : names) {
+                if (!n.endsWith(".vua") && !n.endsWith(".json")) continue;
                 InputStream in = am.open(n);
                 File out = new File(dir, n);
                 FileOutputStream fos = new FileOutputStream(out);
