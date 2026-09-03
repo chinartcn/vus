@@ -22,8 +22,8 @@ public class MainActivity extends Activity {
     private FrameLayout content;
     private VuaRenderer renderer;
 
-    /** 从 assets 释放 .vua/.json 到文件目录，供 native 以相对路径读取。
-     *  动态枚举全部资源文件，避免新增页面漏拷（曾因漏 vua_logic.vua 导致导航无反应）。 */
+    /** 从 assets 释放 .vua/.json/.jpg/.png 到文件目录，供 native / 图片加载器使用。
+     *  动态枚举全部资源文件，避免新增页面漏拷。 */
     private void extractAssets() {
         try {
             AssetManager am = getAssets();
@@ -31,7 +31,7 @@ public class MainActivity extends Activity {
             String[] names = am.list("");
             if (names == null) return;
             for (String n : names) {
-                if (!n.endsWith(".vua") && !n.endsWith(".json")) continue;
+                if (!n.endsWith(".vua") && !n.endsWith(".json") && !n.endsWith(".jpg") && !n.endsWith(".png")) continue;
                 InputStream in = am.open(n);
                 File out = new File(dir, n);
                 FileOutputStream fos = new FileOutputStream(out);
