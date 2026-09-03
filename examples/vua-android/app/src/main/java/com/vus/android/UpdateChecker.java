@@ -3,7 +3,7 @@
  *
  * 流程：
  *   1. 从 Gitee raw 取 version.json
- *   2. 对比 versionCode（本地 → AndroidManifest）
+ *   2. 对比 versionCode（本地 → PackageManager）
  *   3. 若新版存在，下载 APK 到 Downloads 目录
  *   4. 下载完成后调用系统安装器
  */
@@ -12,11 +12,8 @@ package com.vus.android;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.DownloadManager;
-import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
-import android.content.IntentFilter;
-import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Environment;
@@ -35,7 +32,6 @@ public final class UpdateChecker {
             "https://gitee.com/rtccn_mc/vus/raw/master/version.json";
 
     private final Activity activity;
-    private long downloadId = -1;
 
     public UpdateChecker(Activity activity) {
         this.activity = activity;
@@ -44,37 +40,44 @@ public final class UpdateChecker {
     /** 入口：在后台线程检查更新，结果在主线程弹窗 */
     public void check() {
         Toast.makeText(activity, "正在检查更新…", Toast.LENGTH_SHORT).show();
-        new Thread(() -> {
-            try {
-                // 1. 获取本地版本
-                int localCode = activity.getPackageManager()
-                        .getPackageInfo(activity.getPackageName(), 0).versionCode;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    // 1. 获取本地版本
+                    int localCode = activity.getPackageManager()
+                            .getPackageInfo(activity.getPackageName(), 0).versionCode;
 
-                // 2. 获取远程版本信息
-                JSONObject remote = fetchRemoteVersion();
-                if (remote == null) {
-                    showToast("检查更新失败：无法获取远程版本信息");
-                    return;
+                    // 2. 获取远程版本信息
+                    JSONObject remote = fetchRemoteVersion();
+                    if (remote == null) {
+                        showToast("检查更新失败：无法获取远程版本信息");
+                        return;
+                    }
+                    int remoteCode = remote.optInt("versionCode", 0);
+                    final String remoteName = remote.optString("versionName", "");
+                    final String apkUrl = remote.optString("apkUrl", "");
+                    final String changelog = remote.optString("changelog", "");
+
+                    // 3. 对比版本
+                    if (remoteCode <= localCode) {
+                        showToast("已是最新版本 v" + remoteName);
+                        return;
+                    }
+
+                    // 4. 发现新版本，弹窗提示下载
+                    showDialog("发现新版本",
+                            "发现新版本 v" + remoteName + "\n\n更新内容：\n" + changelog,
+                            new Runnable() {
+                                @Override
+                                public void run() {
+                                    downloadApk(apkUrl);
+                                }
+                            });
+
+                } catch (final Exception e) {
+                    showToast("检查更新失败: " + e.getMessage());
                 }
-                int remoteCode = remote.optInt("versionCode", 0);
-                String remoteName = remote.optString("versionName", "");
-                final String apkUrl = remote.optString("apkUrl", "");
-                final String changelog = remote.optString("changelog", "");
-
-                // 3. 对比版本
-                if (remoteCode <= localCode) {
-                    showToast("已是最新版本 v" + remoteName);
-                    return;
-                }
-
-                // 4. 发现新版本，弹窗提示下载
-                String msg = "发现新版本 v" + remoteName + "\n\n更新内容：\n" + changelog;
-                showDialog("发现新版本", msg, () -> downloadApk(apkUrl));
-
-            } catch (Exception e) {
-                final String err = e.getMessage();
-                activity.runOnUiThread(() ->
-                        Toast.makeText(activity, "检查更新失败: " + err, Toast.LENGTH_LONG).show());
             }
         }).start();
     }
@@ -103,50 +106,52 @@ public final class UpdateChecker {
             DownloadManager.Request req = new DownloadManager.Request(Uri.parse(apkUrl));
             req.setTitle("VUS 更新");
             req.setDescription("正在下载新版 APK…");
-            req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
-            req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "VUS.apk");
+            req.setNotificationVisibility(
+                    DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+            req.setDestinationInExternalPublicDir(
+                    Environment.DIRECTORY_DOWNLOADS, "VUS.apk");
             req.setMimeType("application/vnd.android.package-archive");
 
-            DownloadManager dm = (DownloadManager) activity.getSystemService(Context.DOWNLOAD_SERVICE);
+            DownloadManager dm = (DownloadManager)
+                    activity.getSystemService(Context.DOWNLOAD_SERVICE);
             if (dm == null) {
                 showToast("下载失败：无法获取下载服务");
                 return;
             }
-            downloadId = dm.enqueue(req);
+            final long downloadId = dm.enqueue(req);
 
-            // 注册下载完成广播
-            activity.registerReceiver(downloadReceiver,
-                    new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE));
+            // 轮询等待下载完成（简化实现，避免注册广播接收器）
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    DownloadManager.Query q = new DownloadManager.Query();
+                    q.setFilterById(downloadId);
+                    boolean done = false;
+                    while (!done) {
+                        try { Thread.sleep(1000); } catch (InterruptedException e) { break; }
+                        Cursor c = dm.query(q);
+                        if (c != null && c.moveToFirst()) {
+                            int status = c.getInt(c.getColumnIndexOrThrow(
+                                    DownloadManager.COLUMN_STATUS));
+                            if (status == DownloadManager.STATUS_SUCCESSFUL) {
+                                String uri = c.getString(c.getColumnIndexOrThrow(
+                                        DownloadManager.COLUMN_LOCAL_URI));
+                                installApk(Uri.parse(uri));
+                                done = true;
+                            } else if (status == DownloadManager.STATUS_FAILED) {
+                                showToast("下载失败");
+                                done = true;
+                            }
+                            c.close();
+                        }
+                    }
+                }
+            }).start();
+
         } catch (Exception e) {
             showToast("下载失败: " + e.getMessage());
         }
     }
-
-    /** 下载完成后安装 APK */
-    private final BroadcastReceiver downloadReceiver = new BroadcastReceiver() {
-        @Override
-        public void onReceive(Context context, Intent intent) {
-            long id = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1);
-            if (id != downloadId) return;
-            activity.unregisterReceiver(this);
-
-            DownloadManager dm = (DownloadManager) activity.getSystemService(Context.DOWNLOAD_SERVICE);
-            if (dm == null) return;
-
-            DownloadManager.Query q = new DownloadManager.Query().setFilterById(id);
-            Cursor c = dm.query(q);
-            if (c != null && c.moveToFirst()) {
-                int status = c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS));
-                if (status == DownloadManager.STATUS_SUCCESSFUL) {
-                    String uri = c.getString(c.getColumnIndexOrThrow(DownloadManager.COLUMN_LOCAL_URI));
-                    installApk(Uri.parse(uri));
-                } else {
-                    showToast("下载失败");
-                }
-                c.close();
-            }
-        }
-    };
 
     /** 调用系统安装器 */
     private void installApk(Uri apkUri) {
@@ -160,15 +165,25 @@ public final class UpdateChecker {
     /* ---------- UI 辅助（切回主线程） ---------- */
 
     private void showToast(final String msg) {
-        activity.runOnUiThread(() -> Toast.makeText(activity, msg, Toast.LENGTH_LONG).show());
+        activity.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                Toast.makeText(activity, msg, Toast.LENGTH_LONG).show();
+            }
+        });
     }
 
     private void showDialog(String title, String msg, final Runnable onConfirm) {
-        activity.runOnUiThread(() -> new AlertDialog.Builder(activity)
-                .setTitle(title)
-                .setMessage(msg)
-                .setPositiveButton("下载更新", (d, w) -> onConfirm.run())
-                .setNegativeButton("取消", null)
-                .show());
+        activity.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                new AlertDialog.Builder(activity)
+                        .setTitle(title)
+                        .setMessage(msg)
+                        .setPositiveButton("下载更新", onConfirm)
+                        .setNegativeButton("取消", null)
+                        .show();
+            }
+        });
     }
 }
