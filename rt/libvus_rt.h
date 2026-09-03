@@ -80,6 +80,8 @@ struct VusList {
 };
 
 VusList* vus_list_new(int type);
+VusList* vus_list_unwrap(void* obj);
+VusDict* vus_dict_unwrap(void* obj);
 void vus_list_append(VusList* list, void* item);
 void* vus_list_get(VusList* list, int index);
 void vus_list_remove(VusList* list, int index);

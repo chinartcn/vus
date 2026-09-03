@@ -97,6 +97,16 @@ VusList* vus_list_new(int type) {
     return list;
 }
 
+/* 从 VusObject 中解包列表/字典。字面量创建的列表/字典是 VusObject 包裹的。 */
+VusList* vus_list_unwrap(void* obj) {
+    if (vus_is_object(obj)) return ((VusObject*)obj)->u.list;
+    return (VusList*)obj;
+}
+VusDict* vus_dict_unwrap(void* obj) {
+    if (vus_is_object(obj)) return ((VusObject*)obj)->u.dict;
+    return (VusDict*)obj;
+}
+
 void vus_list_append(VusList* list, void* item) {
     if (!list) return;
     if (list->len >= list->cap) {
