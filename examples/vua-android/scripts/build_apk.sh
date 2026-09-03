@@ -46,6 +46,7 @@ if [ ! -f "$VUS_C" ] || [ "$TESTDATA_SRC/vua_test.vus" -nt "$VUS_C" ]; then
 fi
 cp "$TESTDATA_SRC"/vua_home.vua "$TESTDATA_SRC"/vua_settings.vua \
    "$TESTDATA_SRC"/vua_logic.vua "$TESTDATA_SRC"/vua_controls.json "$ASSETS/"
+cp "$TESTDATA_SRC"/*.jpg "$ASSETS"/ 2>/dev/null || true
 
 # ---------- 1. 编译 native .so ----------
 echo "[1/6] 编译 native ($ABI) -> libvus_app.so"
@@ -85,6 +86,7 @@ rm -rf "$STM"; mkdir -p "$STM" "$STM/lib" "$STM/assets"
 cp "$WORK/dex/classes.dex" "$STM/classes.dex"
 mkdir -p "$STM/lib/$ABI"; cp "$LS/libvus_app.so" "$STM/lib/$ABI/"
 cp "$ASSETS"/vua_home.vua "$ASSETS"/vua_settings.vua "$ASSETS"/vua_logic.vua "$ASSETS"/vua_controls.json "$STM/assets/"
+cp "$ASSETS"/*.jpg "$ASSETS"/*.png "$STM/assets/" 2>/dev/null || true
 
 # 用 aapt 编译 manifest + resources 生成资源表
 if [ -d "$ROOT/app/src/main/res" ]; then RES_SW=" -S $ROOT/app/src/main/res"; else RES_SW=""; fi

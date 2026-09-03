@@ -10,8 +10,10 @@
 package com.vus.android;
 
 import android.content.Context;
+import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.Bitmap;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
@@ -19,6 +21,7 @@ import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.SeekBar;
 import android.widget.Spinner;
@@ -222,10 +225,29 @@ public final class VuaRenderer {
     }
 
     private void imageView(JSONObject node, ViewGroup parent) {
-        // 占位：仅显示占位信息，后续添加图片加载器支持远端/本地图片
+        final ImageView iv = new ImageView(ctx);
+        String src = node.optString("src", "");
+        // 尝试从文件目录加载图片（extractAssets 已释放到 getFilesDir）
+        if (!src.isEmpty()) {
+            try {
+                java.io.File imgFile = new java.io.File(ctx.getFilesDir(), src);
+                if (imgFile.exists()) {
+                    Bitmap bm = BitmapFactory.decodeFile(imgFile.getAbsolutePath());
+                    if (bm != null) {
+                        iv.setImageBitmap(bm);
+                        iv.setAdjustViewBounds(true);
+                        iv.setMaxWidth(dp(200));
+                        iv.setMaxHeight(dp(200));
+                        parent.addView(iv);
+                        return;
+                    }
+                }
+            } catch (Exception ignored) { }
+        }
+        // 加载失败则显示占位文字
         final TextView tv = new TextView(ctx);
         tv.setTextColor(darkTheme ? 0xFF888888 : 0xFF666666);
-        tv.setText("[图片] " + node.optString("src", "(未指定路径)"));
+        tv.setText("[图片] " + src);
         tv.setGravity(Gravity.CENTER);
         tv.setPadding(dp(8), dp(16), dp(8), dp(16));
         parent.addView(tv);
