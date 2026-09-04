@@ -491,10 +491,10 @@ public final class VuaRenderer {
         }
     }
 
-    /** 触发后重建整棵 View（native 可能已换屏）。 */
+    /** 触发后重建整棵 View（native 可能已换屏）。经 VuaBridge 合并请求，
+     *  避免"换屏回调排队 + 本地立即刷新"两次全量重建。 */
     private void refresh() {
-        String tree = VuaBridge.vuaRenderTree();
-        render(tree, null);
+        VuaBridge.requestRender();
     }
 
     private static String escapeJs(String s) {
