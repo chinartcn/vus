@@ -89,6 +89,10 @@ VusList* vus_list_new(int type);
 VusList* vus_list_unwrap(void* obj);
 VusDict* vus_dict_unwrap(void* obj);
 void vus_list_append(VusList* list, void* item);
+/* 字面量装箱 helper：创建 VusObject(TYPE_LIST/TYPE_DICT)，供生成器精简
+ * 列表/字典字面量（ref 初始 0，与生成器旧内联模板等价）。 */
+VusObject* vus_object_list(void);
+VusObject* vus_object_dict(void);
 void* vus_list_get(VusList* list, int index);
 void vus_list_remove(VusList* list, int index);
 void vus_list_set(VusList* list, int index, void* item);
