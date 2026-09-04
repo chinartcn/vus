@@ -42,16 +42,19 @@ public final class VuaRenderer {
     private final Context ctx;
     private final ViewGroup root;              // 把重建的 View 树放进这里
     private final Map<String, View> inputs;    // id -> 输入控件（供手机回填/取值）
+    private final Map<String, String> savedVals; // variable/id -> 上次输入值（重建时恢复控件状态）
     private boolean darkTheme = false;
 
     public VuaRenderer(Context ctx, ViewGroup root) {
         this.ctx = ctx;
         this.root = root;
         this.inputs = new HashMap<>();
+        this.savedVals = new HashMap<>();
     }
 
     /** 重建：清空根容器，把整棵树渲染进去。参数为 native 的渲染树 JSON 字符串。 */
     public void render(String renderTreeJson, String fallbackError) {
+        saveInputs();   // 重建前先保存现有输入控件状态（下拉/滑块/输入框等）
         root.removeAllViews();
         if (renderTreeJson == null) {
             root.addView(TextView(ctx, fallbackError != null ? fallbackError : "(无渲染树)"));
@@ -154,7 +157,7 @@ public final class VuaRenderer {
                 if (VuaBridge.onCheckUpdate != null) VuaBridge.onCheckUpdate.run();
                 return;
             }
-            String vars = collectVars(collect);
+            String vars = collectVars(node);
             if (evName != null) {
                 VuaBridge.vuaTrigger(evName, vars);
             } else {
@@ -176,6 +179,15 @@ public final class VuaRenderer {
         e.setSingleLine(!multiline);
         // 记录 variable——用户在触发按钮时由 collectVars 从这里读值
         rememberInput(node, e);
+        // 重建时恢复输入框已录入内容（避免整树刷新后清空）
+        String variable = node.optString("variable", "");
+        if (!savedVals.isEmpty() && !variable.isEmpty()) {
+            String saved = savedVals.get(variable);
+            if (saved != null) {
+                e.setText(saved);
+                e.setSelection(e.length());   // 光标移到末尾
+            }
+        }
         return e;
     }
 
@@ -184,6 +196,11 @@ public final class VuaRenderer {
         c.setText(node.optString("标签", node.optString("label", "")));
         c.setTextColor(darkTheme ? 0xFFE0E0E0 : 0xFF1A1F2E);
         rememberInput(node, c);
+        String variable = node.optString("variable", "");
+        if (!savedVals.isEmpty() && !variable.isEmpty()) {
+            String saved = savedVals.get(variable);
+            if (saved != null) c.setChecked(Boolean.parseBoolean(saved));
+        }
         return c;
     }
 
@@ -192,6 +209,11 @@ public final class VuaRenderer {
         s.setText(node.optString("标签", node.optString("label", "")));
         s.setTextColor(darkTheme ? 0xFFE0E0E0 : 0xFF1A1F2E);
         rememberInput(node, s);
+        String variable = node.optString("variable", "");
+        if (!savedVals.isEmpty() && !variable.isEmpty()) {
+            String saved = savedVals.get(variable);
+            if (saved != null) s.setChecked(Boolean.parseBoolean(saved));
+        }
         return s;
     }
 
@@ -200,12 +222,22 @@ public final class VuaRenderer {
     private void sliderView(JSONObject node, ViewGroup parent) {
         final SeekBar sb = new SeekBar(ctx);
         sb.setMax(node.optInt("最大值", 100));
-        sb.setProgress(node.optInt("值", 50));
         String label = node.optString("标签", "");
         if (!label.isEmpty()) {
             sb.setContentDescription(label);
         }
         rememberInput(node, sb);
+        // 重建时恢复滑块上次位置（避免点击其他控件后复位）
+        String variable = node.optString("variable", "");
+        if (!savedVals.isEmpty() && !variable.isEmpty()) {
+            String saved = savedVals.get(variable);
+            if (saved != null) {
+                try { sb.setProgress((int) Math.round(Double.parseDouble(saved))); }
+                catch (NumberFormatException ignored) { }
+            }
+        } else {
+            sb.setProgress(node.optInt("值", 50));
+        }
         parent.addView(sb);
     }
 
@@ -226,6 +258,15 @@ public final class VuaRenderer {
                 android.R.layout.simple_spinner_dropdown_item, options);
         sp.setAdapter(adapter);
         rememberInput(node, sp);
+        // 重建时恢复上次选中项（避免下拉被其他控件刷新复位到默认第一项）
+        String variable = node.optString("variable", "");
+        if (!savedVals.isEmpty() && !variable.isEmpty()) {
+            String saved = savedVals.get(variable);
+            if (saved != null) {
+                int idx = options.indexOf(saved);
+                if (idx >= 0) sp.setSelection(idx);
+            }
+        }
         parent.addView(sp);
     }
 
@@ -277,31 +318,61 @@ public final class VuaRenderer {
         return null;
     }
 
-    /** 从 collect 变量表收集当前输入值，输出 JSON 对象字符串（如 {"金额":"1280"}）。 */
-    private String collectVars(JSONArray collect) {
-        if (collect == null) return "{}";
+    /** 收集按钮事件的变量参数，输出 JSON 对象字符串（如 {"星级":"1","金额":"1280"}）。
+     *  收集变量：读输入控件当前值；回调变量：键=值 字面量参数（星级 1..5 等）。 */
+    private String collectVars(JSONObject node) {
         StringBuilder sb = new StringBuilder("{");
         boolean first = true;
-        for (int i = 0; i < collect.length(); i++) {
-            String name = collect.optString(i);
-            View v = inputs.get(name);
-            if (v == null) continue;
-            String val;
-            if (v instanceof EditText) val = ((EditText) v).getText().toString();
-            else if (v instanceof CheckBox) val = String.valueOf(((CheckBox) v).isChecked());
-            else if (v instanceof Switch) val = String.valueOf(((Switch) v).isChecked());
-            else if (v instanceof SeekBar) val = String.valueOf(((SeekBar) v).getProgress());
-            else if (v instanceof Spinner) {
-                Spinner sp = (Spinner) v;
-                if (sp.getSelectedItem() != null) val = sp.getSelectedItem().toString();
-                else val = "";
+        JSONArray collect = eventCollect(node);
+        if (collect != null) {
+            for (int i = 0; i < collect.length(); i++) {
+                String name = collect.optString(i);
+                View v = inputs.get(name);
+                if (v == null) continue;
+                String val = inputVal(v);
+                if (!first) sb.append(',');
+                first = false;
+                sb.append('"').append(escapeJs(name)).append("\":\"").append(escapeJs(val)).append('"');
             }
-            else val = "";
-            if (!first) sb.append(',');
-            first = false;
-            sb.append('"').append(escapeJs(name)).append("\":\"").append(escapeJs(val)).append('"');
+        }
+        JSONObject e = node.optJSONObject("事件");
+        if (e == null) e = node.optJSONObject("event");
+        JSONArray cb = e != null ? e.optJSONArray("回调变量") : null;
+        if (cb == null && e != null) cb = e.optJSONArray("callback");
+        if (cb != null) {
+            for (int i = 0; i < cb.length(); i++) {
+                String s = cb.optString(i);
+                int eq = s.indexOf('=');
+                if (eq <= 0) continue;
+                String k = s.substring(0, eq).trim();
+                String v = s.substring(eq + 1).trim();
+                if (k.isEmpty()) continue;
+                if (!first) sb.append(',');
+                first = false;
+                sb.append('"').append(escapeJs(k)).append("\":\"").append(escapeJs(v)).append('"');
+            }
         }
         return sb.append('}').toString();
+    }
+
+    /** 读取输入控件的当前值（字符串形态，供 collect 与状态保存共用）。 */
+    private String inputVal(View v) {
+        if (v instanceof EditText) return ((EditText) v).getText().toString();
+        if (v instanceof CheckBox) return String.valueOf(((CheckBox) v).isChecked());
+        if (v instanceof Switch) return String.valueOf(((Switch) v).isChecked());
+        if (v instanceof SeekBar) return String.valueOf(((SeekBar) v).getProgress());
+        if (v instanceof Spinner) {
+            Spinner sp = (Spinner) v;
+            return sp.getSelectedItem() != null ? sp.getSelectedItem().toString() : "";
+        }
+        return "";
+    }
+
+    /** 重建前保存所有输入控件当前值，供重建后恢复（避免整树刷新导致控件复位）。 */
+    private void saveInputs() {
+        for (Map.Entry<String, View> e : inputs.entrySet()) {
+            savedVals.put(e.getKey(), inputVal(e.getValue()));
+        }
     }
 
     /** 触发后重建整棵 View（native 可能已换屏）。 */

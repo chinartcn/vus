@@ -16,6 +16,7 @@
 #include "vus_vusx.h"
 #include "vus_apk.h"
 #include "vus_chart.h"
+#include "vus_vaz.h"
 #include "lsp/lsp.h"
 
 #include <stdio.h>
@@ -1099,7 +1100,34 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
-    /* vusx 插件管理 */
+    /* vaz Android 扩展包处理 */
+    if (strcmp(cmd, "vaz") == 0) {
+        if (argc < 5 || strcmp(argv[2], "expand") != 0) {
+            fprintf(stderr, "用法: vus vaz expand <页面目录> -v <包.vaz|目录> [--logic <输出逻辑.vus>]\n");
+            fprintf(stderr, "  在构建期展开 .vaz 控件模板并合并逻辑库，核心分层(页面+.vus)不变。\n");
+            return 1;
+        }
+        const char *pages_dir = argv[3];
+        const char *vaz_path = NULL;
+        const char *out_logic = NULL;
+        for (int i = 4; i < argc; i++) {
+            if (strcmp(argv[i], "-v") == 0 && i + 1 < argc) vaz_path = argv[++i];
+            else if (strcmp(argv[i], "--logic") == 0 && i + 1 < argc) out_logic = argv[++i];
+        }
+        if (!vaz_path) {
+            fprintf(stderr, "错误: 缺少 -v <包路径>\n");
+            return 1;
+        }
+        char err[512] = "";
+        int rc = vus_vaz_expand(vaz_path, pages_dir, out_logic, err, sizeof(err));
+        if (rc != 0) {
+            fprintf(stderr, "vaz: %s\n", err);
+            return 1;
+        }
+        return 0;
+    }
+
+    /* vusx 插件系统 */
     if (strcmp(cmd, "vusx") == 0) {
         if (argc < 3) {
             fprintf(stderr, "用法: vus vusx <list|info|build> [参数]\n");
