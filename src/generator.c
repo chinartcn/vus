@@ -285,6 +285,20 @@ static GenBuf *g_vua_premain = NULL;     /* 收集 界面_绑定 的静态包装
 static GenBuf *g_vua_fwd = NULL;         /* 收集包装函数的前向声明（放 include 后） */
 static int     g_vua_bind_count = 0;     /* 包装函数序号，用于唯一命名 */
 static int     g_uses_vua = 0;           /* 用户代码是否用了 界面_*（决定 include vua.h）*/
+static VusAstProgram *g_vua_prog = NULL; /* 当前生成中的 AST 根（界面_绑定 查事件函数参数用） */
+
+/* 按函数名在 AST 根里查函数定义；未找到返回 NULL。 */
+static VusAstFunctionDef *gen_vua_find_func(const char *name) {
+    if (!g_vua_prog || !name || !g_vua_prog->statements) return NULL;
+    for (size_t i = 0; i < g_vua_prog->statements->count; i++) {
+        VusAstNode *node = g_vua_prog->statements->items[i];
+        if (node->type == VUS_AST_FUNCTION_DEF) {
+            VusAstFunctionDef *fn = (VusAstFunctionDef *)node;
+            if (fn->name && strcmp(fn->name, name) == 0) return fn;
+        }
+    }
+    return NULL;
+}
 
 static char *gen_expr_access(GenBuf *buf, VusAstAccess *access) {
     /* 生成成员访问表达式
@@ -541,9 +555,59 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
             if (!g_vua_fwd) g_vua_fwd = gen_buf_new();
             /* 前向声明：包装函数可能在用户 handler 函数体内被引用，须先声明 */
             gen_emit_linef(g_vua_fwd, "static void _vua_ck_%d(void*, void*);", id);
-            gen_emit_linef(g_vua_premain,
-                "static void _vua_ck_%d(void* _env, void* _args){ (void)_env; (void)_args; VusString* _va[1]={NULL}; vus_%s(_va); }",
-                id, hs);
+            /* 闭包参数数组：槽0为返回值，槽1..N 为事件函数参数。
+             * 旧实现固定 _va[1]（仅返回值槽），事件函数读 _va[1..N] 越界访问栈垃圾，
+             * vus_ref(垃圾指针) 直接段错误（真机日志 vus_dict_set+316 / fault addr 0x8）。
+             * 事件触发时 _args 为 VusDict*（键=值 或 控件收集变量），按参数名匹配填充；
+             * 若 dict 恰好一个键值对且参数个数≥2（如"星级=1"字面量），参数1=键、参数2=值。 */
+            size_t nparams = 0;
+            VusAstFunctionDef *hfunc = gen_vua_find_func(handler->name);
+            if (hfunc && hfunc->params) nparams = hfunc->params->count;
+            gen_emit_linef(g_vua_premain, "static void _vua_ck_%d(void* _env, void* _args){", id);
+            gen_emit_linef(g_vua_premain, "    (void)_env;");
+            gen_emit_linef(g_vua_premain, "    VusString* _va[%zu]={NULL};", nparams + 1);
+            if (nparams > 0) {
+                gen_emit_line(g_vua_premain, "    if (_args) {");
+                gen_emit_line(g_vua_premain, "        VusDict* _vd = (VusDict*)_args;");
+                /* 1) 参数名精确匹配：事件 dict 键等于函数参数名时按值填充 */
+                if (hfunc && hfunc->params) {
+                    for (size_t i = 0; i < nparams && i < hfunc->params->count; i++) {
+                        VusAstNode *pn = hfunc->params->items[i];
+                        const char *pname = NULL;
+                        if (pn->type == VUS_AST_PARAM) pname = ((VusAstParam *)pn)->name;
+                        else if (pn->type == VUS_AST_PARAM_DEFAULT) pname = ((VusAstParamDefault *)pn)->name;
+                        if (!pname || !pname[0]) continue;
+                        char pb[512];
+                        snprintf(pb, sizeof(pb),
+                            "        { VusString* _pk_%d = vus_string_new(\"%s\"); void* _pv_%d = vus_dict_get(_vd, _pk_%d); if (_pv_%d && !_va[%zu]) { _va[%zu] = (VusString*)_pv_%d; vus_ref(_va[%zu]); } vus_unref(_pk_%d); }",
+                            (int)i, pname, (int)i, (int)i, (int)i, i + 1, i + 1, (int)i, i + 1, (int)i);
+                        gen_emit(g_vua_premain, pb);
+                        gen_emit(g_vua_premain, "\n");
+                    }
+                }
+                /* 2) 键=值 字面量回退：dict 恰一个键值对且参数≥2 时，参数1=键、参数2=值
+                 *   （用于星级评分等"控件变量=值"回调：界面_设置(变量, 值) 存为 状态[键]=值）。 */
+                if (nparams >= 2) {
+                    gen_emit_line(g_vua_premain,
+                        "        { VusList* _kl = vus_dict_keys(_vd); if (_kl && _kl->len == 1) {");
+                    gen_emit_line(g_vua_premain,
+                        "            VusString* _kk = _kl->items[0]; if (_kk) {");
+                    gen_emit_line(g_vua_premain,
+                        "                void* _vv = vus_dict_get(_vd, _kk);");
+                    gen_emit_line(g_vua_premain,
+                        "                if (_vv && !_va[1]) _va[1] = vus_string_new(vus_string_cstr(_kk));");
+                    gen_emit_line(g_vua_premain,
+                        "                if (_vv && !_va[2]) _va[2] = (VusString*)_vv, vus_ref(_va[2]);");
+                    gen_emit_line(g_vua_premain, "            }");
+                    gen_emit_line(g_vua_premain, "            vus_unref((void*)_kl); }");
+                    gen_emit_line(g_vua_premain, "        }");
+                    gen_emit_line(g_vua_premain, "    }");
+                } else {
+                    gen_emit_line(g_vua_premain, "    }");
+                }
+            }
+            gen_emit_linef(g_vua_premain, "    vus_%s(_va);", hs);
+            gen_emit_linef(g_vua_premain, "}");
             size_t sz = strlen(ev) + 256;
             char *r = (char *)malloc(sz);
             snprintf(r, sz,
@@ -2895,6 +2959,8 @@ static void gen_main_function(GenBuf *buf, VusAstProgram *program, int debug) {
 
 char *vus_generate_c(VusAstProgram *program, VusConfig *config) {
     if (!program || !config) return NULL;
+
+    g_vua_prog = program; /* 供 界面_绑定 闭包生成时按名查事件函数定义 */
 
     g_uses_gui = 0; /* 每次生成前重置 GUI 使用标记 */
     g_uses_vua = 0; /* 每次生成前重置 VUA 使用标记 */

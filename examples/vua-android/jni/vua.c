@@ -494,7 +494,7 @@ int vua_screen_dump_rendertree_len(const char *rendertree_json) {
 
 VusDict *vua_state(VuaScreen *screen) { return screen ? screen->state : NULL; }
 void vua_state_set(VuaScreen *screen, VusString *var, void *val) {
-    if (screen && var) vus_dict_set(screen->state, var, val);
+    if (screen && var && val) vus_dict_set(screen->state, var, val);
 }
 void *vua_state_get(VuaScreen *screen, VusString *var) {
     return (screen && var) ? vus_dict_get(screen->state, var) : NULL;
@@ -571,7 +571,24 @@ static VusDict *collect_vars(VuaScreen *screen, const yyjson_val *event_or_array
     yyjson_arr_iter it; yyjson_arr_iter_init((yyjson_val *)arr, &it); yyjson_val *e;
     while ((e = yyjson_arr_iter_next(&it))) {
         if (!yyjson_is_str(e)) continue;
-        VusString *key = vus_string_new(yyjson_get_str(e));
+        const char *s = yyjson_get_str(e);
+        const char *eq = strchr(s, '=');
+        if (eq && eq != s && eq[1] != '\0') {
+            /* 字面量参数: "键=值"（不查屏内状态，用于星级 1..5 等固定值） */
+            size_t klen = (size_t)(eq - s);
+            char *kbuf = (char *)malloc(klen + 1);
+            if (!kbuf) continue;
+            memcpy(kbuf, s, klen);
+            kbuf[klen] = '\0';
+            VusString *key = vus_string_new(kbuf);
+            VusString *val = vus_string_new(eq + 1);
+            if (key && val) vus_dict_set(out, key, val);
+            free(kbuf);
+            if (key) vus_unref(key);
+            if (val) vus_unref(val);
+            continue;
+        }
+        VusString *key = vus_string_new(s);
         void *val = vua_state_get(screen, key);
         if (val) vus_dict_set(out, key, val);
         vus_unref(key);

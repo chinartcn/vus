@@ -661,6 +661,25 @@ void vus_thread_sleep(VusString* ms) {
     }
 }
 
+/* ============ 命令行参数支持（自举编译器 CLI 用） ============ */
+static int s_cli_argc = 0;
+static char** s_cli_argv = NULL;
+
+void vus_cli_init(int argc, char** argv) {
+    s_cli_argc = argc;
+    s_cli_argv = argv;
+}
+
+VusString* vus_cli_argc(void) {
+    return vus_to_string(s_cli_argc);
+}
+
+VusString* vus_cli_argv(VusString* index) {
+    int i = (int)vus_to_int(index, NULL);
+    if (i < 0 || i >= s_cli_argc || !s_cli_argv) return vus_to_string(0);
+    return vus_string_new(s_cli_argv[i] ? s_cli_argv[i] : "");
+}
+
 /* ============ 线程/协程句柄接口 ============ */
 /* 使用全局句柄注册表，避免指针类型转换问题 */
 
