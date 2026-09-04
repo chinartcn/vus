@@ -1,6 +1,6 @@
 {
-  "versionCode": 12,
-  "versionName": "2.1",
+  "versionCode": 13,
+  "versionName": "2.2",
   "apkUrl": "https://gitee.com/rtccn_mc/vus/raw/master/testdata/VUS.apk",
-  "changelog": "渲染树缓存：state 未变时 native 复用序列化结果、Java 内容相同跳过 View 重建（无变化渲染零开销）"
+  "changelog": "页面 View 缓存（LRU）：再次进入同一页面且内容未变时直接复用已构建 View，跳过 JSON 解析与整树重建"
 }
