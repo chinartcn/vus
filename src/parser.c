@@ -171,6 +171,14 @@ static VusAstList *parse_statements(VusParser *parser) {
         if (token->type == VUS_TOKEN_DEDENT) break;
         if (token->type == VUS_TOKEN_EOF) break;
 
+        /* 中文块结束符「结束」：块边界由缩进(DEDENT)表达，该 token 仅作
+         * 伪代码可读性标记，不构成语句（解析器跳过，不生成无效的标识符表达式）。 */
+        if (token->type == VUS_TOKEN_IDENTIFIER &&
+            token->length == 6 && memcmp(token->start, "结束", 6) == 0) {
+            parser_advance(parser);
+            continue;
+        }
+
         VusAstNode *stmt = parse_statement(parser);
         if (parser->error) {
             vus_ast_list_free(list);

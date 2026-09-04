@@ -80,6 +80,8 @@ struct VusList {
 };
 
 VusList* vus_list_new(int type);
+VusList* vus_list_unwrap(void* obj);
+VusDict* vus_dict_unwrap(void* obj);
 void vus_list_append(VusList* list, void* item);
 void* vus_list_get(VusList* list, int index);
 void vus_list_remove(VusList* list, int index);
@@ -210,6 +212,12 @@ void vus_thread_detach(VusThread* thread);
 
 /* 睡眠：休眠 ms 毫秒（生成器把 睡眠(ms) 映射为 vus_thread_sleep(vus_to_string(ms))）。 */
 void vus_thread_sleep(VusString* ms);
+
+// ============ 命令行参数支持（自举编译器 CLI 用） ============
+// 生成器把 命令行_参数数() 映射为 vus_cli_argc()，命令行_参数(i) 映射为 vus_cli_argv(...)。
+void vus_cli_init(int argc, char** argv);           /* main 开头调用，注入 argc/argv */
+VusString* vus_cli_argc(void);                       /* 返回参数个数（含程序名） */
+VusString* vus_cli_argv(VusString* index);           /* 返回第 index 个参数 */
 
 /* 线程/协程句柄接口（返回 VusString* 句柄，避免指针类型转换问题） */
 #define VUS_MAX_HANDLES 64

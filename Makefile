@@ -30,7 +30,7 @@ SRCS     = $(SRC_DIR)/main.c $(SRC_DIR)/token.c $(SRC_DIR)/lexer.c \
            $(SRC_DIR)/parser.c $(SRC_DIR)/generator.c $(SRC_DIR)/config.c \
            $(SRC_DIR)/ast.c $(SRC_DIR)/vus_abi.c $(SRC_DIR)/vus_plugin.c \
            $(SRC_DIR)/vus_lang.c $(SRC_DIR)/vus_vusx.c $(SRC_DIR)/vus_apk.c \
-           $(SRC_DIR)/vus_chart.c \
+           $(SRC_DIR)/vus_chart.c $(SRC_DIR)/vus_vaz.c \
            $(SRC_DIR)/lsp/lsp.c $(SRC_DIR)/lsp/vus_builtin.c
 OBJS     = $(SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
 RT_SRC   = $(RT_DIR)/libvus_rt.c
@@ -153,6 +153,12 @@ CHART_H = $(SRC_DIR)/vus_chart.h
 
 $(BUILD_DIR)/vus_chart.o: $(SRC_DIR)/vus_chart.c $(CHART_H) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c -o $@ $<
+
+# vaz Android 扩展包（控件模板展开 + 逻辑库依赖导入）
+VAZ_INT = $(SRC_DIR)/vus_vaz.h
+
+$(BUILD_DIR)/vus_vaz.o: $(SRC_DIR)/vus_vaz.c $(VAZ_INT) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(SRC_DIR) -I$(RT_DIR)/yyjson -c -o $@ $<
 
 # APK 打包
 APK_H = $(SRC_DIR)/vus_apk.h
