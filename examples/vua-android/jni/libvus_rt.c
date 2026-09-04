@@ -36,16 +36,13 @@ VusString* vus_string_new(const char* s) {
 }
 
 VusString* vus_string_new_len(const char* s, int len) {
-    VusString* str = (VusString*)malloc(sizeof(VusString));
+    /* 单块分配：头 + 负载一次 malloc（data 指向块尾），省一次 malloc/释放 */
+    VusString* str = (VusString*)malloc(sizeof(VusString) + (size_t)len + 1);
     if (!str) return NULL;
     str->ref = 1;
     str->len = len;
-    str->data = (char*)malloc(len + 1);
-    if (!str->data) {
-        free(str);
-        return NULL;
-    }
-    memcpy(str->data, s, len);
+    str->data = (char*)(str + 1);
+    if (s && len > 0) memcpy(str->data, s, (size_t)len);
     str->data[len] = '\0';
     return str;
 }
@@ -87,18 +84,17 @@ VusString* vus_string_intern(const char* s) {
 
 VusString* vus_string_concat(VusString* a, VusString* b) {
     if (!a && !b) return vus_string_new("");
-    if (!a) return vus_string_new_len(b->data, b->len);
-    if (!b) return vus_string_new_len(a->data, a->len);
+    if (!a || !a->data) return vus_string_new_len(b ? b->data : "", b ? b->len : 0);
+    if (!b || !b->data) return vus_string_new_len(a->data, a->len);
 
-    int new_len = a->len + b->len;
-    char* buf = (char*)malloc(new_len + 1);
-    if (!buf) return NULL;
-    memcpy(buf, a->data, a->len);
-    memcpy(buf + a->len, b->data, b->len);
-    buf[new_len] = '\0';
-
-    VusString* result = vus_string_new_len(buf, new_len);
-    free(buf);
+    VusString* result = (VusString*)malloc(sizeof(VusString) + (size_t)(a->len + b->len) + 1);
+    if (!result) return NULL;
+    result->ref = 1;
+    result->len = a->len + b->len;
+    result->data = (char*)(result + 1);
+    memcpy(result->data, a->data, a->len);
+    memcpy(result->data + a->len, b->data, b->len);
+    result->data[result->len] = '\0';
     return result;
 }
 

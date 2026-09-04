@@ -512,20 +512,31 @@ static char *gen_binary_cfold(GenBuf *buf, VusAstBinaryOp *bin) {
             gen_string_escape(rstr, ere, sizeof(ere));
             size_t sz = strlen(ele) + strlen(ere) + 64;
             char *res = (char *)malloc(sz);
-            snprintf(res, sz, "vus_string_new(\"%s%s\")", ele, ere);
+            /* 双常量连接结果是唯一值 → 驻留池（与 vus_literal 字符串语义一致） */
+            snprintf(res, sz, "vus_literal(\"%s%s\")", ele, ere);
             return res;
         }
         if (strcmp(op, "+") == 0) {
             char *res = (char *)malloc(64);
-            snprintf(res, 64, "vus_to_string(%lld)", (long long)(lv + rv));
+            snprintf(res, 64, "vus_literal(\"%lld\")", (long long)(lv + rv));
             return res;
         }
         if (strcmp(op, "-") == 0 || strcmp(op, "*") == 0 || strcmp(op, "/") == 0 ||
             strcmp(op, "%") == 0 || strcmp(op, "&") == 0 || strcmp(op, "|") == 0 ||
             strcmp(op, "^") == 0 || strcmp(op, "<<") == 0 || strcmp(op, ">>") == 0) {
-            char *res = (char *)malloc(128);
-            snprintf(res, 128, "vus_to_string((int64_t)(%lld %s %lld))",
-                     (long long)lv, op, (long long)rv);
+            int64_t r;
+            if (strcmp(op, "-") == 0) r = lv - rv;
+            else if (strcmp(op, "*") == 0) r = lv * rv;
+            else if (strcmp(op, "/") == 0) r = lv / rv;
+            else if (strcmp(op, "%") == 0) r = lv % rv;
+            else if (strcmp(op, "&") == 0) r = lv & rv;
+            else if (strcmp(op, "|") == 0) r = lv | rv;
+            else if (strcmp(op, "^") == 0) r = lv ^ rv;
+            else if (strcmp(op, "<<") == 0) r = lv << rv;
+            else r = lv >> rv;
+            char *res = (char *)malloc(64);
+            /* 双常量纯算术 → 宿总值进字面量池 */
+            snprintf(res, 64, "vus_literal(\"%lld\")", (long long)r);
             return res;
         }
     }
@@ -599,11 +610,12 @@ static int eval_const_int(VusAstNode *node, int64_t *out) {
 }
 
 static char *gen_expr_binary(GenBuf *buf, VusAstBinaryOp *bin) {
-    /* 整棵子树为纯整数常量表达式 → 编译期算出最终值 */
+    /* 整棵子树为纯整数常量表达式 → 编译期算出最终值，直接进字面量池
+     * （vus_literal("N") 与 vus_to_string(N) 输出一致，免运行时分配） */
     int64_t cval;
     if (eval_const_int((VusAstNode *)bin, &cval)) {
         char *res = (char *)malloc(64);
-        if (res) snprintf(res, 64, "vus_to_string(%lld)", (long long)cval);
+        if (res) snprintf(res, 64, "vus_literal(\"%lld\")", (long long)cval);
         return res;
     }
 
@@ -2422,6 +2434,24 @@ static char *gen_expr_number(GenBuf *buf, VusAstNumber *num) {
         snprintf(result, sz, "vus_literal(\"%s\")", num->value);
         return result;
     }
+    /* 整数常量归一化为十进制后进字面量池：vus_to_string(0x0F) 输出
+     * "15"，故不能用原文（"0x0F"）；先按前缀解析再 snprintf，语义与
+     * vus_to_string(N) 完全一致，且免去每次运行时的字符串分配。 */
+    if (num->value && num->value[0]) {
+        char *end = NULL;
+        long long v;
+        if (strncmp(num->value, "0x", 2) == 0 || strncmp(num->value, "0X", 2) == 0)
+            v = strtoll(num->value + 2, &end, 16);
+        else if (strncmp(num->value, "0b", 2) == 0 || strncmp(num->value, "0B", 2) == 0)
+            v = strtoll(num->value + 2, &end, 2);
+        else
+            v = strtoll(num->value, &end, 10);
+        if (end && *end == '\0') {
+            char *result = (char *)malloc(64);
+            snprintf(result, 64, "vus_literal(\"%lld\")", (long long)v);
+            return result;
+        }
+    }
     size_t sz = strlen(num->value) + 64;
     char *result = (char *)malloc(sz);
     snprintf(result, sz, "vus_to_string(%s)", num->value);
@@ -2601,19 +2631,8 @@ static void gen_stmt_assign(GenBuf *buf, VusAstAssign *assign) {
 
     char *val = gen_expr(buf, assign->value);
 
-    if (assign->is_local) {
-        /* 局部变量：直接赋值，变量已在函数顶部声明 */
-        gen_emit_linef(buf, "{ VusString* _tmp = %s;", val);
-        gen_emit_linef(buf, "vus_ref(_tmp);");
-        gen_emit_linef(buf, "vus_unref(vus_%s);", san);
-        gen_emit_linef(buf, "vus_%s = _tmp; }", san);
-    } else {
-        /* 全局变量 */
-        gen_emit_linef(buf, "{ VusString* _tmp = %s;", val);
-        gen_emit_linef(buf, "vus_ref(_tmp);");
-        gen_emit_linef(buf, "vus_unref(vus_%s);", san);
-        gen_emit_linef(buf, "vus_%s = _tmp; }", san);
-    }
+    /* 局部/全局变量统一走 vus_var_set 引用计数热路径（语义：ref 新值 + unref 旧值） */
+    gen_emit_linef(buf, "vus_var_set(&vus_%s, %s);", san, val);
 
     free(val);
 }
@@ -2687,9 +2706,8 @@ static void gen_stmt_for_range(GenBuf *buf, VusAstForRange *fr) {
     gen_emit_linef(buf, "int64_t _end = vus_to_int(%s, &_err);", end);
     gen_emit_linef(buf, "for (int64_t _i = _start; _i <= _end; _i++) {");
     buf->indent++;
-    gen_emit_linef(buf, "vus_ref(vus_to_string(_i));");
-    gen_emit_linef(buf, "vus_unref(vus_%s);", san);
-    gen_emit_linef(buf, "vus_%s = vus_to_string(_i);", san);
+    /* 只构造一次循环值：vus_var_set 完成新旧引用交接，_tmp 归还 */
+    gen_emit_linef(buf, "{ VusString* _tmp = vus_to_string(_i); vus_var_set(&vus_%s, _tmp); vus_unref(_tmp); }", san);
 
     if (fr->body) {
         for (size_t i = 0; i < fr->body->count; i++) {
@@ -2718,9 +2736,8 @@ static void gen_stmt_for_each(GenBuf *buf, VusAstForEach *fe) {
     gen_emit_linef(buf, "VusList* _list = vus_is_object((void*)(%s)) ? ((VusObject*)(void*)(%s))->u.list : (VusList*)(%s);", iter, iter, iter);
     gen_emit_linef(buf, "for (int _i = 0; _i < vus_list_len(_list); _i++) {", iter);
     buf->indent++;
-    gen_emit_linef(buf, "vus_ref(vus_list_get(_list, _i));");
-    gen_emit_linef(buf, "vus_unref(vus_%s);", san);
-    gen_emit_linef(buf, "vus_%s = (VusString*)vus_list_get(_list, _i);", san);
+    /* 取一次列表元素：vus_var_set 交接新旧引用 */
+    gen_emit_linef(buf, "{ VusString* _tmp = (VusString*)vus_list_get(_list, _i); vus_var_set(&vus_%s, _tmp); }", san);
 
     if (fe->body) {
         for (size_t i = 0; i < fe->body->count; i++) {
@@ -2757,11 +2774,8 @@ static void gen_stmt_return(GenBuf *buf, VusAstReturn *ret) {
     const char *ret_stmt = s_gen_in_main ? "return 0;" : "return;";
     if (ret->value) {
         char *val = gen_expr(buf, ret->value);
-        gen_emit_linef(buf, "{ VusString* _tmp = %s;", val);
-        gen_emit_line(buf, "VusString** _vus_params = (VusString**)_args;");
-        gen_emit_line(buf, "vus_ref(_tmp);");
-        gen_emit_line(buf, "vus_unref(_vus_params[0]);");
-        gen_emit_line(buf, "_vus_params[0] = _tmp; }");
+        /* 返回槽位赋值（args[0]）与普通变量一样走 vus_var_set 引用计数热路径 */
+        gen_emit_linef(buf, "vus_var_set(&((VusString**)_args)[0], %s);", val);
         gen_emit_line(buf, "vus_stack_pop();");
         gen_emit_line(buf, ret_stmt);
         free(val);
@@ -2869,7 +2883,10 @@ static void gen_stmt_try(GenBuf *buf, VusAstTry *try_stmt) {
 static void gen_stmt_throw(GenBuf *buf, VusAstThrow *thr) {
     char *val = gen_expr(buf, thr->value);
     gen_emit_linef(buf, "_vus_err = vus_error_new(1, vus_string_cstr(%s), __LINE__, __func__);", val);
-    gen_emit_linef(buf, "vus_unref(%s);", val);
+    /* 字面量来自驻留池（借用，不增计数），unref 会误释放池实例；仅释放新分配值 */
+    if (!(strncmp(val, "vus_literal(", 12) == 0 && val[strlen(val) - 1] == ')')) {
+        gen_emit_linef(buf, "vus_unref(%s);", val);
+    }
     gen_emit_line(buf, "break;");
     free(val);
 }
@@ -3012,6 +3029,65 @@ static void gen_collect_locals(VusAstFunctionDef *func, VusAstNode *node, VusAst
     }
 }
 
+/* ============ 函数体特征扫描 ============
+ * 预处理函数体：是否含「带值返回」（决定 _vus_result + 尾部搬移模板）、
+ * 是否含 尝试/排除（决定 _vus_err 声明）。无对应特征即省略模板，减小生成体积。 */
+static void gen_scan_block(VusAstList *body, int *has_ret, int *has_try);
+
+static void gen_scan_node(VusAstNode *node, int *has_ret, int *has_try) {
+    if (!node) return;
+    switch (node->type) {
+        case VUS_AST_RETURN:
+            if (((VusAstReturn *)node)->value) *has_ret = 1;
+            break;
+        case VUS_AST_TRY: {
+            VusAstTry *t = (VusAstTry *)node;
+            *has_try = 1;
+            gen_scan_block(t->try_body, has_ret, has_try);
+            if (t->except_bodies)
+                for (size_t i = 0; i < t->except_bodies->count; i++) {
+                    VusAstList *b = (VusAstList *)t->except_bodies->items[i];
+                    if (b) gen_scan_block(b, has_ret, has_try);
+                }
+            break;
+        }
+        case VUS_AST_IF: {
+            VusAstIf *f = (VusAstIf *)node;
+            gen_scan_block(f->then_body, has_ret, has_try);
+            if (f->elif_bodies)
+                for (size_t i = 0; i < f->elif_bodies->count; i++) {
+                    VusAstList *b = (VusAstList *)f->elif_bodies->items[i];
+                    if (b) gen_scan_block(b, has_ret, has_try);
+                }
+            gen_scan_block(f->else_body, has_ret, has_try);
+            break;
+        }
+        case VUS_AST_WHILE: {
+            VusAstWhile *w = (VusAstWhile *)node;
+            gen_scan_block(w->body, has_ret, has_try);
+            break;
+        }
+        case VUS_AST_FOR_RANGE: {
+            VusAstForRange *fr = (VusAstForRange *)node;
+            gen_scan_block(fr->body, has_ret, has_try);
+            break;
+        }
+        case VUS_AST_FOR_EACH: {
+            VusAstForEach *fe = (VusAstForEach *)node;
+            gen_scan_block(fe->body, has_ret, has_try);
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+static void gen_scan_block(VusAstList *body, int *has_ret, int *has_try) {
+    if (!body) return;
+    for (size_t i = 0; i < body->count; i++)
+        gen_scan_node(body->items[i], has_ret, has_try);
+}
+
 static void gen_function(GenBuf *buf, VusAstFunctionDef *func) {
     char san[256];
     gen_sanitize_name(func->name, san, sizeof(san));
@@ -3062,10 +3138,12 @@ static void gen_function(GenBuf *buf, VusAstFunctionDef *func) {
         }
     }
 
-    /* 返回值变量 */
-    gen_emit_line(buf, "VusString* _vus_result = NULL;");
+    /* 返回值变量：仅在函数含「带值返回」时生成（含 if/循环/尝试子块） */
+    int has_ret = 0, has_try = 0;
+    gen_scan_block(func->body, &has_ret, &has_try);
+    if (has_ret) gen_emit_line(buf, "VusString* _vus_result = NULL;");
     gen_emit_line(buf, "int _err = 0;");
-    gen_emit_line(buf, "VusError* _vus_err = NULL;");
+    if (has_try) gen_emit_line(buf, "VusError* _vus_err = NULL;");
 
     /* 扫描函数体中的局部变量，在函数顶部声明 */
     if (func->body) {
@@ -3095,15 +3173,11 @@ static void gen_function(GenBuf *buf, VusAstFunctionDef *func) {
     /* 栈追踪：函数退出 */
     gen_emit_line(buf, "vus_stack_pop();");
 
-    /* 设置返回值（在 args[0] 中） */
-    gen_emit_line(buf, "if (_vus_result) {");
-    buf->indent++;
-    gen_emit_line(buf, "VusString** _vus_params = (VusString**)_args;");
-    gen_emit_line(buf, "vus_ref(_vus_result);");
-    gen_emit_line(buf, "vus_unref(_vus_params[0]);");
-    gen_emit_line(buf, "_vus_params[0] = _vus_result;");
-    buf->indent--;
-    gen_emit_line(buf, "}");
+    /* 设置返回值（在 args[0] 中）——仅当函数可能产生返回值；
+     * vus_var_set 容忍 _vus_result 为 NULL（不操作），免除 if 包装 */
+    if (has_ret) {
+        gen_emit_line(buf, "vus_var_set(&((VusString**)_args)[0], _vus_result);");
+    }
 
     buf->indent--;
     gen_emit_line(buf, "}\n");

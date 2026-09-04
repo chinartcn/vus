@@ -53,6 +53,9 @@ VusString* vus_object_to_string(void* obj);
 // ============ 引用计数通用操作 ============
 void vus_ref(void* obj);
 void vus_unref(void* obj);
+/* 变量赋值（生成器热模板）：*slot = v，正确处理引用计数（vus_ref 新值、
+ * unref 旧值；两者均容忍 NULL）。把生成器 4 行内联收敛为一行调用。 */
+void vus_var_set(VusString** slot, VusString* v);
 
 // ============ 字符串 ============
 // data 始终以 '\0' 结尾（便于 C 互操作），但字符串内容可能包含中间 '\0'。
