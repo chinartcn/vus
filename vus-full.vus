@@ -1,0 +1,1708 @@
+# =============================================================================
+# vus-full.vus — VUS 完整自举编译器
+#
+# 将 VUS 源码编译为 C 代码，然后调用 GCC 编译为可执行文件。
+# 相比 vus-mini 扩展：浮点/十六进制/二进制数字、\u 转义、// 注释、
+# 位运算(& | ^ ~ << >>)、下标赋值、日期/时钟/日志/TUI/网络内建。
+#
+# 用法: vus-full <输入.vus> [输出根名] [rt目录] [libvus_rt.a路径]
+#   默认 rt目录=rt  libvus_rt.a=build/libvus_rt.a
+#
+# 语法子集（本编译器自身也必须能用 vus-mini 编译，故只用其支持构造）：
+#   - 块用 冒号 + 缩进，无 则/结束 标记
+#   - for 循环: 循环 变量 从 起始 到 终止:   （含终止值）
+#   - 条件: 如果 cond: / 否则如果 cond: / 否则:
+#   - 函数定义: 定义 名(参数):
+#   - 无 非 运算符、无多行表达式
+#
+# 设计要点：
+#   - VUS 函数内赋值一律是局部变量（无法重绑全局），故所有可变状态存放
+#     在全局列表里（用 列表_追加 / 列表_取 修改读取），标量索引用"单元格
+#     列表"（追加即更新，取末元素即当前值）。
+#   - 词法分析是迭代的，直接放顶层代码（顶层赋值即全局，可自由重绑）。
+#   - 语法分析是递归的，用 idx_cell 贯穿 token 位置。
+# =============================================================================
+
+# ==================== Token 类型常量 ====================
+TOK_EOF = 0
+TOK_ID = 1
+TOK_NUM = 2
+TOK_STR = 3
+TOK_NEWLINE = 4
+TOK_INDENT = 5
+TOK_DEDENT = 6
+TOK_LPAREN = 10
+TOK_RPAREN = 11
+TOK_LBRACKET = 12
+TOK_RBRACKET = 13
+TOK_LBRACE = 14
+TOK_RBRACE = 15
+TOK_COMMA = 16
+TOK_COLON = 17
+TOK_DOT = 18
+TOK_PLUS = 20
+TOK_MINUS = 21
+TOK_STAR = 22
+TOK_SLASH = 23
+TOK_PERCENT = 24
+TOK_AMPERSAND = 25
+TOK_PIPE = 26
+TOK_CARET = 27
+TOK_TILDE = 28
+TOK_SHL = 29
+TOK_SHR = 30
+TOK_ASSIGN = 40
+TOK_EQ = 41
+TOK_NEQ = 42
+TOK_LT = 43
+TOK_GT = 44
+TOK_LE = 45
+TOK_GE = 46
+TOK_CONCAT = 47
+
+# 关键字（与 C-VUS 对齐）
+KW_DEF = 50
+KW_IF = 51
+KW_ELIF = 52
+KW_ELSE = 53
+KW_FOR = 54
+KW_WHILE = 55
+KW_RETURN = 56
+KW_TRUE = 57
+KW_FALSE = 58
+KW_NULL = 59
+KW_AND = 60
+KW_OR = 61
+KW_NOT = 62
+KW_GLOBAL = 64
+KW_BREAK = 65
+KW_CONTINUE = 66
+KW_IN = 67
+KW_TO = 68
+KW_FROM = 71
+
+# ==================== 关键字表 ====================
+kw_names = []
+kw_vals = []
+
+定义 初始化关键字():
+    列表_追加(kw_names, "定义")
+    列表_追加(kw_vals, 50)
+    列表_追加(kw_names, "如果")
+    列表_追加(kw_vals, 51)
+    列表_追加(kw_names, "否则如果")
+    列表_追加(kw_vals, 52)
+    列表_追加(kw_names, "否则")
+    列表_追加(kw_vals, 53)
+    列表_追加(kw_names, "循环")
+    列表_追加(kw_vals, 54)
+    列表_追加(kw_names, "当循环")
+    列表_追加(kw_vals, 55)
+    列表_追加(kw_names, "返回")
+    列表_追加(kw_vals, 56)
+    列表_追加(kw_names, "真")
+    列表_追加(kw_vals, 57)
+    列表_追加(kw_names, "假")
+    列表_追加(kw_vals, 58)
+    列表_追加(kw_names, "空")
+    列表_追加(kw_vals, 59)
+    列表_追加(kw_names, "和")
+    列表_追加(kw_vals, 60)
+    列表_追加(kw_names, "或")
+    列表_追加(kw_vals, 61)
+    列表_追加(kw_names, "非")
+    列表_追加(kw_vals, 62)
+    列表_追加(kw_names, "全局")
+    列表_追加(kw_vals, 64)
+    列表_追加(kw_names, "跳出")
+    列表_追加(kw_vals, 65)
+    列表_追加(kw_names, "继续")
+    列表_追加(kw_vals, 66)
+    列表_追加(kw_names, "到")
+    列表_追加(kw_vals, 68)
+    列表_追加(kw_names, "从")
+    列表_追加(kw_vals, 71)
+    列表_追加(kw_names, "在")
+    列表_追加(kw_vals, 67)
+    列表_追加(kw_names, "in")
+    列表_追加(kw_vals, 67)
+    列表_追加(kw_names, "def")
+    列表_追加(kw_vals, 50)
+    列表_追加(kw_names, "if")
+    列表_追加(kw_vals, 51)
+    列表_追加(kw_names, "elif")
+    列表_追加(kw_vals, 52)
+    列表_追加(kw_names, "else")
+    列表_追加(kw_vals, 53)
+    列表_追加(kw_names, "for")
+    列表_追加(kw_vals, 54)
+    列表_追加(kw_names, "while")
+    列表_追加(kw_vals, 55)
+    列表_追加(kw_names, "return")
+    列表_追加(kw_vals, 56)
+    列表_追加(kw_names, "true")
+    列表_追加(kw_vals, 57)
+    列表_追加(kw_names, "false")
+    列表_追加(kw_vals, 58)
+    列表_追加(kw_names, "null")
+    列表_追加(kw_vals, 59)
+    列表_追加(kw_names, "and")
+    列表_追加(kw_vals, 60)
+    列表_追加(kw_names, "or")
+    列表_追加(kw_vals, 61)
+    列表_追加(kw_names, "not")
+    列表_追加(kw_vals, 62)
+    列表_追加(kw_names, "global")
+    列表_追加(kw_vals, 64)
+    列表_追加(kw_names, "break")
+    列表_追加(kw_vals, 65)
+    列表_追加(kw_names, "continue")
+    列表_追加(kw_vals, 66)
+    列表_追加(kw_names, "to")
+    列表_追加(kw_vals, 68)
+    列表_追加(kw_names, "from")
+    列表_追加(kw_vals, 71)
+
+# 关键字查找（返回 0 表示普通标识符）
+定义 查找关键字(s):
+    循环 i 从 0 到 列表_长度(kw_vals) - 1:
+        如果 列表_取(kw_names, i) == s:
+            返回 列表_取(kw_vals, i)
+    返回 0
+
+# ==================== 纯助手函数 ====================
+
+定义 是数字(c):
+    返回 (c >= "0") 和 (c <= "9")
+
+定义 是字母(c):
+    返回 ((c >= "a") 和 (c <= "z")) 或 ((c >= "A") 和 (c <= "Z")) 或 (c == "_")
+
+定义 是中文字符(c):
+    返回 (c >= "\xE0") 和 (c <= "\xEF")
+
+# 数字 0-15 → 十六进制字符
+定义 十六进制位(d):
+    如果 d == 0:
+        返回 "0"
+    如果 d == 1:
+        返回 "1"
+    如果 d == 2:
+        返回 "2"
+    如果 d == 3:
+        返回 "3"
+    如果 d == 4:
+        返回 "4"
+    如果 d == 5:
+        返回 "5"
+    如果 d == 6:
+        返回 "6"
+    如果 d == 7:
+        返回 "7"
+    如果 d == 8:
+        返回 "8"
+    如果 d == 9:
+        返回 "9"
+    如果 d == 10:
+        返回 "A"
+    如果 d == 11:
+        返回 "B"
+    如果 d == 12:
+        返回 "C"
+    如果 d == 13:
+        返回 "D"
+    如果 d == 14:
+        返回 "E"
+    返回 "F"
+
+# 十六进制字符 → 数值（0-15，非法返回 0）
+定义 十六进制值(ch):
+    如果 ch == "0":
+        返回 0
+    如果 ch == "1":
+        返回 1
+    如果 ch == "2":
+        返回 2
+    如果 ch == "3":
+        返回 3
+    如果 ch == "4":
+        返回 4
+    如果 ch == "5":
+        返回 5
+    如果 ch == "6":
+        返回 6
+    如果 ch == "7":
+        返回 7
+    如果 ch == "8":
+        返回 8
+    如果 ch == "9":
+        返回 9
+    如果 ch == "a" 或 ch == "A":
+        返回 10
+    如果 ch == "b" 或 ch == "B":
+        返回 11
+    如果 ch == "c" 或 ch == "C":
+        返回 12
+    如果 ch == "d" 或 ch == "D":
+        返回 13
+    如果 ch == "e" 或 ch == "E":
+        返回 14
+    如果 ch == "f" 或 ch == "F":
+        返回 15
+    返回 0
+
+# 十六进制数字判断（0-9 a-f A-F）
+定义 是十六进制(c):
+    返回 ((c >= "0") 和 (c <= "9")) 或 ((c >= "a") 和 (c <= "f")) 或 ((c >= "A") 和 (c <= "F"))
+
+# 二进制数字判断（0 或 1）
+定义 是二进制(c):
+    返回 (c == "0") 或 (c == "1")
+
+# 字节母串：\x80-\xFF 每个字节各一个，用于 字节值 → 单字节字符
+字节母串 = "\x80\x81\x82\x83\x84\x85\x86\x87\x88\x89\x8A\x8B\x8C\x8D\x8E\x8F\x90\x91\x92\x93\x94\x95\x96\x97\x98\x99\x9A\x9B\x9C\x9D\x9E\x9F\xA0\xA1\xA2\xA3\xA4\xA5\xA6\xA7\xA8\xA9\xAA\xAB\xAC\xAD\xAE\xAF\xB0\xB1\xB2\xB3\xB4\xB5\xB6\xB7\xB8\xB9\xBA\xBB\xBC\xBD\xBE\xBF\xC0\xC1\xC2\xC3\xC4\xC5\xC6\xC7\xC8\xC9\xCA\xCB\xCC\xCD\xCE\xCF\xD0\xD1\xD2\xD3\xD4\xD5\xD6\xD7\xD8\xD9\xDA\xDB\xDC\xDD\xDE\xDF\xE0\xE1\xE2\xE3\xE4\xE5\xE6\xE7\xE8\xE9\xEA\xEB\xEC\xED\xEE\xEF\xF0\xF1\xF2\xF3\xF4\xF5\xF6\xF7\xF8\xF9\xFA\xFB\xFC\xFD\xFE\xFF"
+
+# 名称净化：非 ASCII 字节按 _XX（十六进制）输出，ASCII 保留
+定义 净化(名字):
+    r = ""
+    i = 0
+    n = 文本_长度(名字)
+    当循环 i < n:
+        ch = 文本_取字符(名字, i)
+        如果 ch == "_":
+            r = r .. ch
+            i = i + 1
+        否则如果 (ch >= "a") 和 (ch <= "z"):
+            r = r .. ch
+            i = i + 1
+        否则如果 (ch >= "A") 和 (ch <= "Z"):
+            r = r .. ch
+            i = i + 1
+        否则如果 (ch >= "0") 和 (ch <= "9"):
+            如果 i == 0:
+                r = r .. "_"
+            r = r .. ch
+            i = i + 1
+        否则:
+            r = r .. "_"
+            i = i + 1
+            b = 128
+            bv = 0
+            当循环 b < 256:
+                如果 文本_取字符(字节母串, b - 128) == ch:
+                    bv = b
+                    跳出
+                b = b + 1
+            hi = bv / 16
+            lo = bv % 16
+            r = r .. 十六进制位(hi)
+            r = r .. 十六进制位(lo)
+    返回 r
+
+# 字符串转义（生成 C 字符串字面量用）
+定义 字符串转义(s):
+    r = ""
+    i = 0
+    n = 文本_长度(s)
+    当循环 i < n:
+        c = 文本_取字符(s, i)
+        如果 c == "\\":
+            r = r .. "\\\\"
+        否则如果 c == "\"":
+            r = r .. "\\\""
+        否则如果 c == "\n":
+            r = r .. "\\n"
+        否则如果 c == "\r":
+            r = r .. "\\r"
+        否则如果 c == "\t":
+            r = r .. "\\t"
+        否则:
+            r = r .. c
+        i = i + 1
+    返回 r
+
+# 列表拼接成字符串
+定义 列表_拼接(ls):
+    r = ""
+    循环 i 从 0 到 列表_长度(ls) - 1:
+        r = r .. 列表_取(ls, i)
+    返回 r
+
+# ==================== 词法分析器状态（顶层变量，可重绑） ====================
+源码 = ""
+源码长度 = 0
+spos = 0
+sline = 1
+scol = 1
+tok_types = []
+tok_vals = []
+tok_lines = []
+缩进栈串 = "0"
+缩进层 = 0
+缩进顶值 = 0
+lex_err = ""
+
+# ---- 词法/主流程 临时变量（顶层预声明，供顶层块内重绑） ----
+行首 = 1
+行缩进 = 0
+c0 = ""
+skip = 0
+ca = ""
+chw = ""
+ch = ""
+sval = ""
+闭合 = 0
+c2 = ""
+esc = ""
+h1 = ""
+h2 = ""
+bv2 = 0
+u1 = ""
+u2 = ""
+u3 = ""
+u4 = ""
+cp = 0
+b1v = 0
+b2v = 0
+b3v = 0
+cd = ""
+ci = ""
+kv = 0
+nxt2 = ""
+fd = ""
+fnext = ""
+fdig = ""
+op2 = ""
+单 = ""
+逗号 = 0
+逗号2 = 0
+缩进不一致 = 0
+c代码 = ""
+输出c = ""
+gcc命令 = ""
+编译结果 = ""
+
+# ==================== 语法分析器状态 ====================
+idx_cell = [0]
+全局段 = []
+函数段 = []
+主函数段 = []
+out_indent_cell = [0]
+parse_err_cell = [""]
+struct_names = []
+struct_fields = []
+
+# ==================== emit 助手 ====================
+
+定义 缩进加():
+    列表_追加(out_indent_cell, 转数字(列表_取(out_indent_cell, 列表_长度(out_indent_cell) - 1)) + 1)
+
+定义 缩进减():
+    列表_追加(out_indent_cell, 转数字(列表_取(out_indent_cell, 列表_长度(out_indent_cell) - 1)) - 1)
+
+定义 当前缩进值():
+    返回 列表_取(out_indent_cell, 列表_长度(out_indent_cell) - 1)
+
+定义 追加行(seg, line):
+    pad = ""
+    循环 vi 从 0 到 转数字(当前缩进值()) - 1:
+        pad = pad .. "    "
+    列表_追加(seg, pad .. line .. "\n")
+
+# ==================== token 访问（idx_cell 贯穿） ====================
+
+定义 当前索引():
+    返回 列表_取(idx_cell, 列表_长度(idx_cell) - 1)
+
+定义 前进():
+    列表_追加(idx_cell, 转数字(当前索引()) + 1)
+
+定义 当前类型():
+    返回 列表_取(tok_types, 转数字(当前索引()))
+
+定义 当前值():
+    返回 列表_取(tok_vals, 转数字(当前索引()))
+
+定义 当前行():
+    返回 列表_取(tok_lines, 转数字(当前索引()))
+
+定义 跳过换行():
+    当循环 当前类型() == TOK_NEWLINE:
+        前进()
+
+# 尝试跳过泛型类型参数 <T, ...>（仅当全是 类型名/逗号/LT/GT 才成功；预扫描实现，兼容 vus-mini）
+定义 泛型跳过():
+    起始 = 转数字(当前索引())
+    如果 当前类型() != TOK_LT:
+        返回 0
+    j = 起始 + 1
+    深度gp = 1
+    通过 = 0
+    当循环 j < 列表_长度(tok_types):
+        ttj = 列表_取(tok_types, j)
+        如果 ttj == TOK_LT:
+            深度gp = 深度gp + 1
+        否则如果 ttj == TOK_GT:
+            深度gp = 深度gp - 1
+            # 先记录结果再判断是否退出
+            如果 深度gp == 0:
+                通过 = 1
+                j = j + 1
+                跳出
+            如果 深度gp < 0:
+                通过 = 0
+                跳出
+        否则如果 ttj != TOK_ID 和 ttj != TOK_COMMA:
+            通过 = 0
+            跳出
+        j = j + 1
+    # 预扫描期间不动真实索引；确认是泛型后才前进跳过 [起始, j)
+    如果 通过 == 1:
+        循环 kp 从 0 到 j - 起始 - 1:
+            前进()
+        返回 1
+    返回 0
+
+# 按字段名查找结构体（返回第一个含该字段的结构体名，未找到返回 ""）
+定义 找结构体通过字段(字段名):
+    循环 si 从 0 到 列表_长度(struct_names) - 1:
+        字段组 = 列表_取(struct_fields, si)
+        循环 fi 从 0 到 列表_长度(字段组) - 1:
+            如果 列表_取(字段组, fi) == 字段名:
+                返回 列表_取(struct_names, si)
+    返回 ""
+
+# 解析结构体定义: struct 名: / 字段名[: 类型] ...；注册类型并生成 C typedef+构造函数
+定义 解析结构体定义():
+    前进()
+    名s = 当前值()
+    前进()
+    如果 当前类型() == TOK_COLON:
+        前进()
+    跳过换行()
+    如果 当前类型() == TOK_INDENT:
+        前进()
+    字段s = []
+    当循环 当前类型() != TOK_DEDENT 和 当前类型() != TOK_EOF:
+        跳过换行()
+        如果 当前类型() == TOK_DEDENT 或 当前类型() == TOK_EOF:
+            跳出
+        如果 当前类型() == TOK_ID:
+            列表_追加(字段s, 当前值())
+            前进()
+            如果 当前类型() == TOK_COLON:
+                前进()
+                如果 当前类型() == TOK_ID:
+                    前进()
+        跳过换行()
+    如果 当前类型() == TOK_DEDENT:
+        前进()
+    列表_追加(struct_names, 名s)
+    列表_追加(struct_fields, 字段s)
+    # 生成 C 结构体类型与构造函数（放入 全局段，位于 main 之前）
+    fn2 = 净化(名s)
+    列表_追加(全局段, "/* VUS struct: " + 名s + " */\n")
+    列表_追加(全局段, "typedef struct vus_struct_" + fn2 + " {\n")
+    列表_追加(全局段, "    int ref;  /* 引用计数 */\n")
+    循环 si2 从 0 到 列表_长度(字段s) - 1:
+        列表_追加(全局段, "    VusString* vus_" + 净化(列表_取(字段s, si2)) + ";\n")
+    列表_追加(全局段, "} vus_struct_" + fn2 + ";\n")
+    列表_追加(全局段, "\n")
+    列表_追加(全局段, "/* VUS struct constructor: " + 名s + " */\n")
+    列表_追加(全局段, "void vus_" + fn2 + "(void* _args) {\n")
+    列表_追加(全局段, "    VusString** _vus_params = (VusString**)_args;\n")
+    列表_追加(全局段, "    vus_struct_" + fn2 + "* _obj = (vus_struct_" + fn2 + "*)calloc(1, sizeof(vus_struct_" + fn2 + "));\n")
+    循环 si2 从 0 到 列表_长度(字段s) - 1:
+        列表_追加(全局段, "    if (_vus_params[" + 转数字(si2 + 1) + "]) {\n")
+        列表_追加(全局段, "        _obj->vus_" + 净化(列表_取(字段s, si2)) + " = _vus_params[" + 转数字(si2 + 1) + "];\n")
+        列表_追加(全局段, "        vus_ref(_obj->vus_" + 净化(列表_取(字段s, si2)) + ");\n")
+        列表_追加(全局段, "    }\n")
+    列表_追加(全局段, "    _vus_params[0] = (VusString*)_obj;\n")
+    列表_追加(全局段, "}\n")
+    列表_追加(全局段, "\n")
+
+# ==================== 表达式解析（优先级从低到高） ====================
+
+定义 解析表达式():
+    返回 解析或()
+
+定义 解析或():
+    左侧 = 解析与()
+    当循环 当前类型() == KW_OR:
+        前进()
+        右侧 = 解析与()
+        左侧 = "vus_string_new((strcmp(vus_string_cstr(" + 左侧 + "), \"true\") == 0 || strcmp(vus_string_cstr(" + 右侧 + "), \"true\") == 0) ? \"true\" : \"false\")"
+    返回 左侧
+
+定义 解析与():
+    左侧 = 解析位或()
+    当循环 当前类型() == KW_AND:
+        前进()
+        右侧 = 解析位或()
+        左侧 = "vus_string_new((strcmp(vus_string_cstr(" + 左侧 + "), \"true\") == 0 && strcmp(vus_string_cstr(" + 右侧 + "), \"true\") == 0) ? \"true\" : \"false\")"
+    返回 左侧
+
+定义 解析位或():
+    左侧 = 解析位异或()
+    当循环 当前类型() == TOK_PIPE:
+        前进()
+        右侧 = 解析位异或()
+        左侧 = "vus_to_string(vus_to_int(" + 左侧 + ", &_err) | vus_to_int(" + 右侧 + ", &_err))"
+    返回 左侧
+
+定义 解析位异或():
+    左侧 = 解析位与()
+    当循环 当前类型() == TOK_CARET:
+        前进()
+        右侧 = 解析位与()
+        左侧 = "vus_to_string(vus_to_int(" + 左侧 + ", &_err) ^ vus_to_int(" + 右侧 + ", &_err))"
+    返回 左侧
+
+定义 解析位与():
+    左侧 = 解析移位()
+    当循环 当前类型() == TOK_AMPERSAND:
+        前进()
+        右侧 = 解析移位()
+        左侧 = "vus_to_string(vus_to_int(" + 左侧 + ", &_err) & vus_to_int(" + 右侧 + ", &_err))"
+    返回 左侧
+
+定义 解析移位():
+    左侧 = 解析比较()
+    当循环 当前类型() == TOK_SHL 或 当前类型() == TOK_SHR:
+        op = 当前值()
+        前进()
+        右侧 = 解析比较()
+        左侧 = "vus_to_string(vus_to_int(" + 左侧 + ", &_err) " + op + " vus_to_int(" + 右侧 + ", &_err))"
+    返回 左侧
+
+定义 解析比较():
+    左侧 = 解析加减()
+    当循环 当前类型() == TOK_EQ 或 当前类型() == TOK_NEQ 或 当前类型() == TOK_LT 或 当前类型() == TOK_GT 或 当前类型() == TOK_LE 或 当前类型() == TOK_GE:
+        op = 当前值()
+        前进()
+        右侧 = 解析加减()
+        左侧 = "vus_string_new((vus_compare(" + 左侧 + ", " + 右侧 + ") " + op + " 0) ? \"true\" : \"false\")"
+    返回 左侧
+
+定义 解析加减():
+    左侧 = 解析乘除()
+    当循环 当前类型() == TOK_PLUS 或 当前类型() == TOK_MINUS 或 当前类型() == TOK_CONCAT:
+        op = 当前值()
+        前进()
+        右侧 = 解析乘除()
+        如果 op == "+":
+            左侧 = "vus_add(" + 左侧 + ", " + 右侧 + ")"
+        否则如果 op == "..":
+            左侧 = "vus_string_concat(" + 左侧 + ", " + 右侧 + ")"
+        否则:
+            左侧 = "vus_to_string(vus_to_int(" + 左侧 + ", &_err) - vus_to_int(" + 右侧 + ", &_err))"
+    返回 左侧
+
+定义 解析乘除():
+    左侧 = 解析一元()
+    当循环 当前类型() == TOK_STAR 或 当前类型() == TOK_SLASH 或 当前类型() == TOK_PERCENT:
+        op = 当前值()
+        前进()
+        右侧 = 解析一元()
+        左侧 = "vus_to_string(vus_to_int(" + 左侧 + ", &_err) " + op + " vus_to_int(" + 右侧 + ", &_err))"
+    返回 左侧
+
+定义 解析一元():
+    如果 当前类型() == TOK_MINUS:
+        前进()
+        操作数 = 解析一元()
+        返回 "vus_to_string(0 - vus_to_int(" + 操作数 + ", &_err))"
+    如果 当前类型() == TOK_TILDE:
+        前进()
+        操作数 = 解析一元()
+        返回 "vus_to_string(~vus_to_int(" + 操作数 + ", &_err))"
+    如果 当前类型() == KW_NOT:
+        前进()
+        操作数 = 解析一元()
+        返回 "vus_string_new((strcmp(vus_string_cstr(" + 操作数 + "), \"true\") == 0) ? \"false\" : \"true\")"
+    返回 解析基础()
+
+# 收集函数实参到 arg_list（列表），返回参数个数
+定义 解析实参(arg_list):
+    计 = 0
+    如果 当前类型() == TOK_RPAREN:
+        返回 计
+    当循环 真:
+        列表_追加(arg_list, 解析表达式())
+        计 = 计 + 1
+        如果 当前类型() == TOK_COMMA:
+            前进()
+        否则:
+            跳出
+    返回 计
+
+# ==================== 内置函数派发 ====================
+# args 为表达式字符串列表，n 为个数
+定义 生成内置(id, args, n):
+    如果 id == "打印" 或 id == "print":
+        如果 n >= 1:
+            返回 "vus_print(" + 列表_取(args, 0) + ")"
+        返回 "vus_print(vus_string_new(\"\"))"
+    如果 id == "输入":
+        返回 "vus_input(" + 列表_取(args, 0) + ")"
+    如果 id == "转数字":
+        返回 "vus_to_string(vus_to_int(" + 列表_取(args, 0) + ", &_err))"
+    如果 id == "转文本":
+        返回 "vus_string_new(vus_string_cstr(" + 列表_取(args, 0) + "))"
+    如果 id == "睡眠":
+        返回 "vus_thread_sleep(" + 列表_取(args, 0) + ")"
+    如果 id == "命令行_参数数" 或 id == "cli_argc":
+        返回 "vus_cli_argc()"
+    如果 id == "命令行_参数" 或 id == "cli_argv":
+        返回 "vus_cli_argv(" + 列表_取(args, 0) + ")"
+    如果 id == "文本_长度":
+        返回 "vus_to_string(vus_string_len(" + 列表_取(args, 0) + "))"
+    如果 id == "文本_取字符":
+        返回 "vus_string_slice(" + 列表_取(args, 0) + ", (int)vus_to_int(" + 列表_取(args, 1) + ", &_err), 1)"
+    如果 id == "文本_子串":
+        返回 "vus_string_slice(" + 列表_取(args, 0) + ", (int)vus_to_int(" + 列表_取(args, 1) + ", &_err), (int)vus_to_int(" + 列表_取(args, 2) + ", &_err))"
+    如果 id == "列表_追加":
+        返回 "({ vus_list_append(vus_list_unwrap((void*)(" + 列表_取(args, 0) + ")), (void*)(" + 列表_取(args, 1) + ")); " + 列表_取(args, 0) + "; })"
+    如果 id == "列表_取":
+        返回 "vus_list_get(vus_list_unwrap((void*)(" + 列表_取(args, 0) + ")), (int)vus_to_int(" + 列表_取(args, 1) + ", &_err))"
+    如果 id == "列表_长度":
+        返回 "vus_to_string(vus_list_len(vus_list_unwrap((void*)(" + 列表_取(args, 0) + "))))"
+    如果 id == "字典_设值":
+        返回 "({ vus_dict_set(vus_dict_unwrap((void*)(" + 列表_取(args, 0) + ")), (VusString*)(" + 列表_取(args, 1) + "), (void*)(" + 列表_取(args, 2) + ")); " + 列表_取(args, 0) + "; })"
+    如果 id == "字典_取值":
+        返回 "vus_dict_get(vus_dict_unwrap((void*)(" + 列表_取(args, 0) + ")), (VusString*)(" + 列表_取(args, 1) + "))"
+    如果 id == "字典_键":
+        返回 "vus_dict_keys_of(" + 列表_取(args, 0) + ")"
+    如果 id == "文件_读取":
+        返回 "vus_plugin_file_read(" + 列表_取(args, 0) + ")"
+    如果 id == "文件_写入":
+        返回 "vus_plugin_file_write(" + 列表_取(args, 0) + ", " + 列表_取(args, 1) + ")"
+    如果 id == "文件_追加":
+        返回 "vus_plugin_file_append(" + 列表_取(args, 0) + ", " + 列表_取(args, 1) + ")"
+    如果 id == "文件_存在":
+        返回 "vus_plugin_file_exists(" + 列表_取(args, 0) + ")"
+    如果 id == "文件_删除":
+        返回 "vus_plugin_file_delete(" + 列表_取(args, 0) + ")"
+    如果 id == "文件_列表":
+        返回 "vus_plugin_file_list(" + 列表_取(args, 0) + ")"
+    如果 id == "文件_是目录":
+        返回 "vus_plugin_file_isdir(" + 列表_取(args, 0) + ")"
+    如果 id == "命令_执行":
+        返回 "vus_plugin_shell_exec(" + 列表_取(args, 0) + ")"
+    如果 id == "文本_分割":
+        返回 "vus_plugin_text_split(" + 列表_取(args, 0) + ", " + 列表_取(args, 1) + ")"
+    如果 id == "JSON_解析":
+        返回 "vus_json_parse(" + 列表_取(args, 0) + ")"
+    如果 id == "JSON_生成":
+        返回 "vus_json_generate(" + 列表_取(args, 0) + ")"
+    如果 id == "JSON_查询":
+        返回 "vus_json_query(" + 列表_取(args, 0) + ", " + 列表_取(args, 1) + ")"
+    如果 id == "类型" 或 id == "typeof":
+        返回 "vus_typeof(" + 列表_取(args, 0) + ")"
+    如果 id == "对象文本":
+        返回 "vus_object_to_string(" + 列表_取(args, 0) + ")"
+    # ---- 日志 ----
+    如果 id == "日志_调试":
+        返回 "vus_log_debug(" + 列表_取(args, 0) + ")"
+    如果 id == "日志_信息":
+        返回 "vus_log_info(" + 列表_取(args, 0) + ")"
+    如果 id == "日志_警告":
+        返回 "vus_log_warn(" + 列表_取(args, 0) + ")"
+    如果 id == "日志_错误":
+        返回 "vus_log_error(" + 列表_取(args, 0) + ")"
+    如果 id == "日志_级别":
+        返回 "vus_log_set_level(" + 列表_取(args, 0) + ")"
+    # ---- 时钟 / 日期 ----
+    如果 id == "时钟":
+        返回 "vus_clock_ms()"
+    如果 id == "日期_现在":
+        返回 "vus_plugin_date_now(NULL)"
+    如果 id == "日期_时间戳":
+        返回 "vus_plugin_date_timestamp(NULL)"
+    如果 id == "日期_年":
+        返回 "vus_plugin_date_year(NULL)"
+    如果 id == "日期_月":
+        返回 "vus_plugin_date_month(NULL)"
+    如果 id == "日期_日":
+        返回 "vus_plugin_date_day(NULL)"
+    如果 id == "日期_时":
+        返回 "vus_plugin_date_hour(NULL)"
+    如果 id == "日期_分":
+        返回 "vus_plugin_date_minute(NULL)"
+    如果 id == "日期_秒":
+        返回 "vus_plugin_date_second(NULL)"
+    如果 id == "日期_格式化":
+        返回 "vus_plugin_date_format(" + 列表_取(args, 0) + ")"
+    如果 id == "日期_解析":
+        返回 "vus_plugin_date_parse(" + 列表_取(args, 0) + ", " + 列表_取(args, 1) + ")"
+    如果 id == "日期_从时间戳":
+        返回 "vus_plugin_date_from_timestamp(" + 列表_取(args, 0) + ")"
+    # ---- TUI ----
+    如果 id == "tui_清屏":
+        返回 "vus_plugin_tui_clear(NULL)"
+    如果 id == "tui_重置":
+        返回 "vus_plugin_tui_reset(NULL)"
+    如果 id == "tui_设置颜色":
+        返回 "vus_plugin_tui_set_color(" + 列表_取(args, 0) + ", " + 列表_取(args, 1) + ")"
+    如果 id == "tui_定位":
+        返回 "vus_plugin_tui_locate(" + 列表_取(args, 0) + ", " + 列表_取(args, 1) + ")"
+    如果 id == "tui_进度条":
+        返回 "vus_plugin_tui_progress(" + 列表_取(args, 0) + ", " + 列表_取(args, 1) + ", " + 列表_取(args, 2) + ")"
+    # ---- 未知：按普通函数处理（vus_函数名(args...)） ----
+    bs = "({VusString* _vus_args[" + 转数字(n + 1) + "];_vus_args[0]=NULL;"
+    循环 ai 从 0 到 n - 1:
+        bs = bs + "_vus_args[" + 转数字(ai + 1) + "]=" + 列表_取(args, ai) + ";"
+    bs = bs + "vus_" + 净化(id) + "(_vus_args);_vus_args[0];})"
+    返回 bs
+
+# ==================== 基础表达式 ====================
+
+定义 解析基础():
+    t = 当前类型()
+    v = 当前值()
+    如果 t == TOK_NUM:
+        前进()
+        返回 "vus_to_string(" + v + ")"
+    如果 t == TOK_STR:
+        前进()
+        返回 "vus_string_new(\"" + 字符串转义(v) + "\")"
+    如果 t == KW_TRUE:
+        前进()
+        返回 "vus_string_new(\"true\")"
+    如果 t == KW_FALSE:
+        前进()
+        返回 "vus_string_new(\"false\")"
+    如果 t == KW_NULL:
+        前进()
+        返回 "vus_string_new(\"\")"
+    如果 t == TOK_ID:
+        id = v
+        前进()
+        如果 当前类型() == TOK_LT:
+            # 泛型调用: id<类型, ...>(实参)，类型参数仅作注释跳过
+            泛型跳过()
+        如果 当前类型() == TOK_LPAREN:
+            前进()
+            实参 = []
+            个数 = 解析实参(实参)
+            如果 当前类型() == TOK_RPAREN:
+                前进()
+            返回 生成内置(id, 实参, 个数)
+        如果 当前类型() == TOK_LBRACKET:
+            前进()
+            下标 = 解析表达式()
+            如果 当前类型() == TOK_RBRACKET:
+                前进()
+            返回 "vus_list_get(vus_list_unwrap((void*)(vus_" + 净化(id) + ")), vus_to_int(" + 下标 + ", &_err))"
+        如果 当前类型() == TOK_DOT:
+            # 成员访问: id.m1[.m2...]，生成 ((vus_struct_X*)obj)->vus_m
+            链s = []
+            结构链 = []
+            当循环 当前类型() == TOK_DOT:
+                前进()
+                如果 当前类型() == TOK_ID:
+                    列表_追加(链s, 当前值())
+                    列表_追加(结构链, 找结构体通过字段(当前值()))
+                    前进()
+                否则:
+                    跳出
+            mc = "vus_" + 净化(id)
+            循环 ci 从 0 到 列表_长度(链s) - 1:
+                结构名m = 列表_取(结构链, ci)
+                mc = "({VusString* _v" + 转数字(ci) + "=" + mc + ";if(!_v" + 转数字(ci) + "){VusString* _ns=vus_string_new(\"\");_ns;}((vus_struct_" + 净化(结构名m) + "*)_v" + 转数字(ci) + ")->vus_" + 净化(列表_取(链s, ci)) + ";})"
+            返回 mc
+        返回 "vus_" + 净化(id)
+    如果 t == TOK_LPAREN:
+        前进()
+        内 = 解析表达式()
+        如果 当前类型() == TOK_RPAREN:
+            前进()
+        返回 内
+    如果 t == TOK_LBRACKET:
+        前进()
+        lcode = "({VusObject* _o=(VusObject*)calloc(1,sizeof(VusObject));_o->magic=VUS_OBJECT_MAGIC;_o->type=TYPE_LIST;_o->u.list=(VusList*)vus_list_new(TYPE_MIXED);"
+        lc = 0
+        当循环 当前类型() != TOK_RBRACKET 和 当前类型() != TOK_EOF:
+            如果 lc > 0:
+                如果 当前类型() == TOK_COMMA:
+                    前进()
+            el = 解析表达式()
+            lcode = lcode + "vus_list_append(_o->u.list, (void*)(" + el + "));"
+            lc = lc + 1
+            如果 当前类型() == TOK_COMMA:
+                前进()
+        如果 当前类型() == TOK_RBRACKET:
+            前进()
+        lcode = lcode + "_o;})"
+        返回 lcode
+    如果 t == TOK_LBRACE:
+        前进()
+        dcode = "({VusObject* _o=(VusObject*)calloc(1,sizeof(VusObject));_o->magic=VUS_OBJECT_MAGIC;_o->type=TYPE_DICT;_o->u.dict=(VusDict*)vus_dict_new();"
+        dc = 0
+        当循环 当前类型() != TOK_RBRACE 和 当前类型() != TOK_EOF:
+            如果 dc > 0:
+                如果 当前类型() == TOK_COMMA:
+                    前进()
+            dk = 解析表达式()
+            如果 当前类型() == TOK_COLON:
+                前进()
+            dv = 解析表达式()
+            dcode = dcode + "vus_dict_set(_o->u.dict, (VusString*)(" + dk + "), (void*)(" + dv + "));"
+            dc = dc + 1
+            如果 当前类型() == TOK_COMMA:
+                前进()
+        如果 当前类型() == TOK_RBRACE:
+            前进()
+        dcode = dcode + "_o;})"
+        返回 dcode
+    列表_追加(parse_err_cell, "意外的 token: " + t + " 第 " + 当前行() + " 行")
+    返回 "NULL"
+
+# ==================== 语句生成（追加到 全局段/函数段/主函数段） ====================
+
+定义 解析语句(seg):
+    t = 当前类型()
+    如果 t == KW_DEF:
+        解析函数定义()
+        返回
+    如果 t == KW_IF:
+        解析如果(seg)
+        返回
+    如果 t == KW_FOR:
+        解析循环(seg)
+        返回
+    如果 t == KW_WHILE:
+        解析当循环(seg)
+        返回
+    如果 t == KW_RETURN:
+        解析返回(seg)
+        返回
+    如果 t == KW_GLOBAL:
+        前进()
+        如果 当前类型() == TOK_ID:
+            前进()
+        返回
+    如果 t == KW_BREAK:
+        前进()
+        追加行(seg, "break;")
+        返回
+    如果 t == KW_CONTINUE:
+        前进()
+        追加行(seg, "continue;")
+        返回
+    如果 t == TOK_ID:
+        名 = 当前值()
+        如果 名 == "struct":
+            解析结构体定义()
+            返回
+        如果 转数字(当前索引()) + 1 < 列表_长度(tok_types):
+            下一类型 = 列表_取(tok_types, 转数字(当前索引()) + 1)
+            如果 下一类型 == TOK_ASSIGN:
+                前进()
+                前进()
+                值 = 解析表达式()
+                追加行(seg, "{ VusString* _tmp = " + 值 + ";")
+                缩进加()
+                追加行(seg, "vus_ref(_tmp);")
+                追加行(seg, "vus_unref(vus_" + 净化(名) + ");")
+                追加行(seg, "vus_" + 净化(名) + " = _tmp; }")
+                缩进减()
+                返回
+            如果 下一类型 == TOK_COLON:
+                # 类型注解: 名: 类型 = 值（跳过 `: 类型`，再走赋值逻辑）
+                前进()
+                前进()
+                如果 当前类型() == TOK_ID:
+                    前进()
+                如果 当前类型() == TOK_ASSIGN:
+                    前进()
+                    值a = 解析表达式()
+                    追加行(seg, "{ VusString* _tmp = " + 值a + ";")
+                    缩进加()
+                    追加行(seg, "vus_ref(_tmp);")
+                    追加行(seg, "vus_unref(vus_" + 净化(名) + ");")
+                    追加行(seg, "vus_" + 净化(名) + " = _tmp; }")
+                    缩进减()
+                    返回
+            如果 下一类型 == TOK_LBRACKET:
+                # 下标赋值: 名[下标] = 值
+                前进()
+                前进()
+                下标 = 解析表达式()
+                如果 当前类型() == TOK_RBRACKET:
+                    前进()
+                如果 当前类型() == TOK_ASSIGN:
+                    前进()
+                    值x = 解析表达式()
+                    追加行(seg, "({ vus_list_set(vus_list_unwrap((void*)(vus_" + 净化(名) + ")), (int)vus_to_int(" + 下标 + ", &_err), (void*)(" + 值x + ")); (" + 值x + "); });")
+                    返回
+                列表_追加(parse_err_cell, "下标后需要 =，第 " + 当前行() + " 行")
+                返回
+    表达式 = 解析表达式()
+    追加行(seg, 表达式 + ";")
+
+定义 解析块(seg):
+    跳过换行()
+    如果 当前类型() != TOK_INDENT:
+        列表_追加(parse_err_cell, "期望缩进，第 " + 当前行() + " 行")
+        返回
+    前进()
+    当循环 当前类型() != TOK_DEDENT 和 当前类型() != TOK_EOF:
+        跳过换行()
+        如果 当前类型() == TOK_DEDENT 或 当前类型() == TOK_EOF:
+            跳出
+        before = 转数字(当前索引())
+        解析语句(seg)
+        如果 转数字(当前索引()) <= before:
+            # 语句未消耗任何 token：无法解析（如不支持的关键字），报错防死循环
+            列表_追加(parse_err_cell, "无法解析的语句，第 " + 当前行() + " 行")
+            跳出
+        跳过换行()
+    如果 当前类型() == TOK_DEDENT:
+        前进()
+
+定义 解析函数定义():
+    前进()
+    名 = 当前值()
+    前进()
+    如果 当前类型() == TOK_LT:
+        # 泛型定义: 名<T, ...>(...)
+        泛型跳过()
+    参数 = []
+    如果 当前类型() == TOK_LPAREN:
+        前进()
+        当循环 当前类型() != TOK_RPAREN 和 当前类型() != TOK_EOF:
+            如果 当前类型() == TOK_ID:
+                列表_追加(参数, 当前值())
+                前进()
+                如果 当前类型() == TOK_COLON:
+                    # 类型注解: 参数: 类型
+                    前进()
+                    如果 当前类型() == TOK_ID:
+                        前进()
+            如果 当前类型() == TOK_COMMA:
+                前进()
+            否则:
+                跳出
+        如果 当前类型() == TOK_RPAREN:
+            前进()
+    如果 当前类型() == TOK_COLON:
+        前进()
+
+    # 预扫描函数体，收集局部赋值目标（排除参数；跳过嵌套 定义）
+    局部 = []
+    深度 = 0
+    跳过深度 = -1
+    pos = 转数字(当前索引())
+    当循环 pos < 列表_长度(tok_types):
+        tt = 列表_取(tok_types, pos)
+        如果 tt == TOK_INDENT:
+            深度 = 深度 + 1
+        如果 tt == TOK_DEDENT:
+            深度 = 深度 - 1
+            如果 深度 <= 0:
+                跳出
+            如果 跳过深度 >= 0 和 深度 <= 跳过深度:
+                跳过深度 = -1
+        如果 跳过深度 < 0:
+            如果 tt == KW_DEF:
+                跳过深度 = 深度
+            如果 tt == TOK_ID 和 列表_取(tok_vals, pos) == "struct":
+                跳过深度 = 深度
+            如果 tt == TOK_ID 和 pos + 1 < 列表_长度(tok_types) 和 (列表_取(tok_types, pos + 1) == TOK_ASSIGN 或 列表_取(tok_types, pos + 1) == TOK_COLON):
+                名2 = 列表_取(tok_vals, pos)
+                是参数 = 0
+                循环 pi 从 0 到 列表_长度(参数) - 1:
+                    如果 列表_取(参数, pi) == 名2:
+                        是参数 = 1
+                已收集 = 0
+                循环 li 从 0 到 列表_长度(局部) - 1:
+                    如果 列表_取(局部, li) == 名2:
+                        已收集 = 1
+                如果 (是参数 == 0) 和 (已收集 == 0):
+                    列表_追加(局部, 名2)
+        pos = pos + 1
+
+    # 产生函数头（追加到 函数段；函数体缩进归零，与调用点缩进无关）
+    旧缩进 = 转数字(当前缩进值())
+    列表_追加(out_indent_cell, 0)
+    fn = 净化(名)
+    追加行(函数段, "void vus_" + fn + "(void* _args) {")
+    缩进加()
+    追加行(函数段, "VusString** _vus_params = (VusString**)_args;")
+    循环 pi 从 0 到 列表_长度(参数) - 1:
+        pn = 净化(列表_取(参数, pi))
+        追加行(函数段, "VusString* vus_" + pn + " = _vus_params[" + 转数字(pi + 1) + "];")
+        追加行(函数段, "vus_ref(vus_" + pn + ");")
+    追加行(函数段, "VusString* _vus_result = NULL;")
+    追加行(函数段, "int _err = 0;")
+    追加行(函数段, "VusError* _vus_err = NULL;")
+    循环 li 从 0 到 列表_长度(局部) - 1:
+        ln = 净化(列表_取(局部, li))
+        追加行(函数段, "VusString* vus_" + ln + " = NULL;")
+    追加行(函数段, "vus_stack_push(\"" + 字符串转义(名) + "\");")
+
+    解析块(函数段)
+
+    缩进减()
+    追加行(函数段, "vus_stack_pop();")
+    追加行(函数段, "if (_vus_result) {")
+    缩进加()
+    追加行(函数段, "VusString** _vus_params2 = (VusString**)_args;")
+    追加行(函数段, "vus_ref(_vus_result);")
+    追加行(函数段, "vus_unref(_vus_params2[0]);")
+    追加行(函数段, "_vus_params2[0] = _vus_result;")
+    缩进减()
+    追加行(函数段, "}")
+    追加行(函数段, "}")
+    列表_追加(out_indent_cell, 旧缩进)
+
+定义 解析如果(seg):
+    前进()
+    条件 = 解析表达式()
+    如果 当前类型() == TOK_COLON:
+        前进()
+    追加行(seg, "if (strcmp(vus_string_cstr(" + 条件 + "), \"true\") == 0) {")
+    缩进加()
+    解析块(seg)
+    缩进减()
+    追加行(seg, "}")
+    跳过换行()
+    当循环 当前类型() == KW_ELIF:
+        前进()
+        条件2 = 解析表达式()
+        如果 当前类型() == TOK_COLON:
+            前进()
+        追加行(seg, "else if (strcmp(vus_string_cstr(" + 条件2 + "), \"true\") == 0) {")
+        缩进加()
+        解析块(seg)
+        缩进减()
+        追加行(seg, "}")
+        跳过换行()
+    如果 当前类型() == KW_ELSE:
+        前进()
+        如果 当前类型() == TOK_COLON:
+            前进()
+        追加行(seg, "else {")
+        缩进加()
+        解析块(seg)
+        缩进减()
+        追加行(seg, "}")
+
+定义 解析循环(seg):
+    前进()
+    变量 = 当前值()
+    前进()
+    如果 当前类型() == KW_IN:
+        # foreach: 循环 变量 在 列表表达式:
+        前进()
+        迭代 = 解析表达式()
+        如果 当前类型() == TOK_COLON:
+            前进()
+        fn3 = 净化(变量)
+        追加行(seg, "{")
+        缩进加()
+        追加行(seg, "VusString* vus_" + fn3 + " = NULL;")
+        追加行(seg, "VusList* _flist = vus_is_object((void*)(" + 迭代 + ")) ? ((VusObject*)(void*)(" + 迭代 + "))->u.list : (VusList*)(" + 迭代 + ");")
+        追加行(seg, "for (int _i = 0; _i < vus_list_len(_flist); _i++) {")
+        缩进加()
+        追加行(seg, "vus_ref(vus_list_get(_flist, _i));")
+        追加行(seg, "vus_unref(vus_" + fn3 + ");")
+        追加行(seg, "vus_" + fn3 + " = (VusString*)vus_list_get(_flist, _i);")
+        解析块(seg)
+        缩进减()
+        追加行(seg, "}")
+        缩进减()
+        追加行(seg, "}")
+        返回
+    如果 当前类型() == KW_FROM:
+        前进()
+    起始 = 解析表达式()
+    如果 当前类型() == KW_TO:
+        前进()
+    终止 = 解析表达式()
+    如果 当前类型() == TOK_COLON:
+        前进()
+    vn2 = 净化(变量)
+    追加行(seg, "{")
+    缩进加()
+    追加行(seg, "VusString* vus_" + vn2 + " = NULL;")
+    追加行(seg, "int64_t _start = vus_to_int(" + 起始 + ", &_err);")
+    追加行(seg, "int64_t _end = vus_to_int(" + 终止 + ", &_err);")
+    追加行(seg, "for (int64_t _i = _start; _i <= _end; _i++) {")
+    缩进加()
+    追加行(seg, "vus_ref(vus_to_string(_i));")
+    追加行(seg, "vus_unref(vus_" + vn2 + ");")
+    追加行(seg, "vus_" + vn2 + " = vus_to_string(_i);")
+    解析块(seg)
+    缩进减()
+    追加行(seg, "}")
+    缩进减()
+    追加行(seg, "}")
+
+定义 解析当循环(seg):
+    前进()
+    条件 = 解析表达式()
+    如果 当前类型() == TOK_COLON:
+        前进()
+    追加行(seg, "while (strcmp(vus_string_cstr(" + 条件 + "), \"true\") == 0) {")
+    缩进加()
+    解析块(seg)
+    缩进减()
+    追加行(seg, "}")
+
+定义 解析返回(seg):
+    前进()
+    如果 当前类型() == TOK_NEWLINE 或 当前类型() == TOK_DEDENT 或 当前类型() == TOK_EOF:
+        追加行(seg, "vus_stack_pop();")
+        追加行(seg, "return;")
+        返回
+    值 = 解析表达式()
+    追加行(seg, "{ VusString* _tmp = " + 值 + ";")
+    缩进加()
+    追加行(seg, "VusString** _vus_params = (VusString**)_args;")
+    追加行(seg, "vus_ref(_tmp);")
+    追加行(seg, "vus_unref(_vus_params[0]);")
+    追加行(seg, "_vus_params[0] = _tmp; }")
+    缩进减()
+    追加行(seg, "vus_stack_pop();")
+    追加行(seg, "return;")
+
+# 检查最近一次解析错误（非空即出错）
+定义 有解析错误():
+    返回 列表_取(parse_err_cell, 列表_长度(parse_err_cell) - 1)
+
+# ==================== 程序装配 ====================
+
+定义 解析程序():
+    # ---------- pass 1：收集顶层全局赋值目标（跳过函数体） ----------
+    全局名2 = []
+    pos = 0
+    深度 = 0
+    跳过深度 = -1
+    当循环 pos < 列表_长度(tok_types):
+        tt = 列表_取(tok_types, pos)
+        如果 tt == TOK_INDENT:
+            深度 = 深度 + 1
+        如果 tt == TOK_DEDENT:
+            深度 = 深度 - 1
+            如果 深度 < 0:
+                跳出
+            如果 跳过深度 >= 0 和 深度 <= 跳过深度:
+                跳过深度 = -1
+        如果 跳过深度 < 0:
+            如果 tt == KW_DEF:
+                跳过深度 = 深度
+            如果 tt == TOK_ID 和 列表_取(tok_vals, pos) == "struct":
+                跳过深度 = 深度
+            如果 tt == TOK_ID 和 pos + 1 < 列表_长度(tok_types) 和 (列表_取(tok_types, pos + 1) == TOK_ASSIGN 或 列表_取(tok_types, pos + 1) == TOK_COLON):
+                名x = 列表_取(tok_vals, pos)
+                已收 = 0
+                循环 gi 从 0 到 列表_长度(全局名2) - 1:
+                    如果 列表_取(全局名2, gi) == 名x:
+                        已收 = 1
+                如果 已收 == 0:
+                    列表_追加(全局名2, 名x)
+        pos = pos + 1
+
+    # ---------- 输出文件头 + 全局变量声明 ----------
+    列表_追加(全局段, "/* Generated by vus-full (self-hosted) */\n")
+    列表_追加(全局段, "#include <stdio.h>\n")
+    列表_追加(全局段, "#include <stdlib.h>\n")
+    列表_追加(全局段, "#include <string.h>\n")
+    列表_追加(全局段, "#include <stdint.h>\n")
+    列表_追加(全局段, "#include <stdbool.h>\n")
+    列表_追加(全局段, "#include \"libvus_rt.h\"\n")
+    列表_追加(全局段, "\n")
+    列表_追加(全局段, "typedef struct { void (*func)(void*); void* arg; } _VusThreadTask;\n")
+    列表_追加(全局段, "static void* _vus_thread_run(void* _arg) {\n")
+    列表_追加(全局段, "    _VusThreadTask* _task = (_VusThreadTask*)_arg;\n")
+    列表_追加(全局段, "    VusString* _vus_args[2] = {NULL, (VusString*)_task->arg};\n")
+    列表_追加(全局段, "    _task->func(_vus_args);\n")
+    列表_追加(全局段, "    return _vus_args[0];\n")
+    列表_追加(全局段, "}\n")
+    列表_追加(全局段, "\n")
+    循环 gi 从 0 到 列表_长度(全局名2) - 1:
+        列表_追加(全局段, "VusString* vus_" + 净化(列表_取(全局名2, gi)) + " = NULL;\n")
+    列表_追加(全局段, "\n")
+
+    # ---------- 生成 main（包裹顶层语句） ----------
+    列表_追加(主函数段, "int main(int argc, char** argv) {\n")
+    列表_追加(主函数段, "    vus_cli_init(argc, argv);\n")
+    列表_追加(主函数段, "    int _err = 0;\n")
+    列表_追加(主函数段, "    VusError* _vus_err = NULL;\n")
+    缩进加()
+    # ---------- pass 2：解析顶层语句（在 main 体内） ----------
+    当循环 当前类型() != TOK_EOF:
+        跳过换行()
+        如果 当前类型() == TOK_EOF:
+            跳出
+        如果 有解析错误() != "":
+            跳出
+        before = 转数字(当前索引())
+        解析语句(主函数段)
+        如果 转数字(当前索引()) <= before:
+            # 语句未消耗任何 token：报错防死循环
+            列表_追加(parse_err_cell, "无法解析的语句，第 " + 当前行() + " 行")
+            跳出
+        跳过换行()
+    缩进减()
+    列表_追加(主函数段, "    return 0;\n")
+    列表_追加(主函数段, "}\n")
+
+# ==================== 主流程（词法分析 + 编译驱动，顶层可重绑标量） ====================
+
+初始化关键字()
+参数个数 = 命令行_参数数()
+输入文件 = 命令行_参数(1)
+输出名 = "out"
+rt目录 = "rt"
+lib路径 = "build/libvus_rt.a"
+如果 参数个数 >= 3:
+    输出名 = 命令行_参数(2)
+如果 参数个数 >= 4:
+    rt目录 = 命令行_参数(3)
+如果 参数个数 >= 5:
+    lib路径 = 命令行_参数(4)
+
+如果 文件_存在(输入文件) == "1":
+    源码 = 文件_读取(输入文件)
+    源码长度 = 文本_长度(源码)
+
+    # ============ 词法分析（迭代式，紧跟 C 版 lexer 行为） ============
+    行首 = 1
+    当循环 spos < 源码长度:
+        # ---- 行首：测量缩进、处理 INDENT/DEDENT ----
+        如果 行首 == 1:
+            行缩进 = 0
+            当循环 spos < 源码长度:
+                c0 = 文本_取字符(源码, spos)
+                如果 c0 == " ":
+                    行缩进 = 行缩进 + 1
+                    spos = spos + 1
+                    scol = scol + 1
+                否则如果 c0 == "\t":
+                    行缩进 = 行缩进 + 4
+                    spos = spos + 1
+                    scol = scol + 1
+                否则:
+                    跳出
+            # 空行 / 纯注释行：整行跳过，不产生 token
+            skip = 0
+            如果 spos >= 源码长度:
+                skip = 1
+            否则:
+                ca = 文本_取字符(源码, spos)
+                如果 ca == "\n" 或 ca == "\r" 或 ca == "#":
+                    skip = 1
+            如果 skip == 1:
+                如果 spos < 源码长度 和 文本_取字符(源码, spos) == "#":
+                    当循环 spos < 源码长度 和 文本_取字符(源码, spos) != "\n" 和 文本_取字符(源码, spos) != "\r":
+                        spos = spos + 1
+                        scol = scol + 1
+                如果 spos < 源码长度 和 文本_取字符(源码, spos) == "\r":
+                    spos = spos + 1
+                如果 spos < 源码长度 和 文本_取字符(源码, spos) == "\n":
+                    spos = spos + 1
+                    sline = sline + 1
+                    scol = 1
+                继续
+            # 缩进变化 → INDENT / DEDENT
+            如果 行缩进 > 缩进顶值:
+                列表_追加(tok_types, TOK_INDENT)
+                列表_追加(tok_vals, "i")
+                列表_追加(tok_lines, sline)
+                缩进栈串 = 缩进栈串 .. "," .. 行缩进
+                缩进层 = 缩进层 + 1
+                缩进顶值 = 行缩进
+            否则如果 行缩进 < 缩进顶值:
+                当循环 缩进层 > 0 和 缩进顶值 > 行缩进:
+                    列表_追加(tok_types, TOK_DEDENT)
+                    列表_追加(tok_vals, "d")
+                    列表_追加(tok_lines, sline)
+                    缩进层 = 缩进层 - 1
+                    逗号 = 文本_长度(缩进栈串) - 1
+                    当循环 逗号 >= 1:
+                        如果 文本_取字符(缩进栈串, 逗号) == ",":
+                            跳出
+                        逗号 = 逗号 - 1
+                    如果 逗号 >= 1:
+                        缩进栈串 = 文本_子串(缩进栈串, 0, 逗号)
+                    否则:
+                        缩进栈串 = "0"
+                    逗号2 = 文本_长度(缩进栈串) - 1
+                    当循环 逗号2 >= 1:
+                        如果 文本_取字符(缩进栈串, 逗号2) == ",":
+                            跳出
+                        逗号2 = 逗号2 - 1
+                    如果 逗号2 >= 1:
+                        缩进顶值 = 转数字(文本_子串(缩进栈串, 逗号2 + 1, 文本_长度(缩进栈串) - 逗号2 - 1))
+                    否则:
+                        缩进顶值 = 转数字(缩进栈串)
+                如果 缩进顶值 != 行缩进:
+                    缩进不一致 = 1
+            行首 = 0
+        # ---- 跳过行内空白 ----
+        当循环 spos < 源码长度:
+            chw = 文本_取字符(源码, spos)
+            如果 chw == " " 或 chw == "\t":
+                spos = spos + 1
+                scol = scol + 1
+            否则:
+                跳出
+        如果 spos >= 源码长度:
+            跳出
+        ch = 文本_取字符(源码, spos)
+        # ---- 换行 ----
+        如果 ch == "\n":
+            spos = spos + 1
+            列表_追加(tok_types, TOK_NEWLINE)
+            列表_追加(tok_vals, "\n")
+            列表_追加(tok_lines, sline)
+            sline = sline + 1
+            scol = 1
+            行首 = 1
+        否则如果 ch == "\r":
+            spos = spos + 1
+            如果 spos < 源码长度 和 文本_取字符(源码, spos) == "\n":
+                spos = spos + 1
+            列表_追加(tok_types, TOK_NEWLINE)
+            列表_追加(tok_vals, "\n")
+            列表_追加(tok_lines, sline)
+            sline = sline + 1
+            scol = 1
+            行首 = 1
+        # ---- 注释 ----
+        否则如果 ch == "#":
+            当循环 spos < 源码长度 和 文本_取字符(源码, spos) != "\n" 和 文本_取字符(源码, spos) != "\r":
+                spos = spos + 1
+                scol = scol + 1
+        # ---- // 注释 ----
+        否则如果 ch == "/" 和 spos + 1 < 源码长度 和 文本_取字符(源码, spos + 1) == "/":
+            当循环 spos < 源码长度 和 文本_取字符(源码, spos) != "\n" 和 文本_取字符(源码, spos) != "\r":
+                spos = spos + 1
+                scol = scol + 1
+        # ---- 字符串 ----
+        否则如果 ch == "\"":
+            spos = spos + 1
+            scol = scol + 1
+            sval = ""
+            闭合 = 0
+            当循环 spos < 源码长度:
+                c2 = 文本_取字符(源码, spos)
+                如果 c2 == "\"":
+                    spos = spos + 1
+                    scol = scol + 1
+                    闭合 = 1
+                    跳出
+                否则如果 c2 == "\n" 或 c2 == "\r":
+                    跳出
+                否则如果 c2 == "\\":
+                    spos = spos + 1
+                    scol = scol + 1
+                    esc = 文本_取字符(源码, spos)
+                    如果 esc == "n":
+                        sval = sval .. "\n"
+                        spos = spos + 1
+                        scol = scol + 1
+                    否则如果 esc == "t":
+                        sval = sval .. "\t"
+                        spos = spos + 1
+                        scol = scol + 1
+                    否则如果 esc == "r":
+                        sval = sval .. "\r"
+                        spos = spos + 1
+                        scol = scol + 1
+                    否则如果 esc == "\\":
+                        sval = sval .. "\\"
+                        spos = spos + 1
+                        scol = scol + 1
+                    否则如果 esc == "\"":
+                        sval = sval .. "\""
+                        spos = spos + 1
+                        scol = scol + 1
+                    否则如果 esc == "x":
+                        spos = spos + 1
+                        scol = scol + 1
+                        h1 = 文本_取字符(源码, spos)
+                        spos = spos + 1
+                        scol = scol + 1
+                        h2 = 文本_取字符(源码, spos)
+                        spos = spos + 1
+                        scol = scol + 1
+                        bv2 = 十六进制值(h1) * 16 + 十六进制值(h2)
+                        如果 bv2 >= 128:
+                            sval = sval .. 文本_取字符(字节母串, bv2 - 128)
+                    否则如果 esc == "u":
+                        # \uHHHH — 四位十六进制码点 → UTF-8
+                        spos = spos + 1
+                        scol = scol + 1
+                        u1 = 文本_取字符(源码, spos)
+                        spos = spos + 1
+                        scol = scol + 1
+                        u2 = 文本_取字符(源码, spos)
+                        spos = spos + 1
+                        scol = scol + 1
+                        u3 = 文本_取字符(源码, spos)
+                        spos = spos + 1
+                        scol = scol + 1
+                        u4 = 文本_取字符(源码, spos)
+                        spos = spos + 1
+                        scol = scol + 1
+                        cp = 十六进制值(u1) * 4096 + 十六进制值(u2) * 256 + 十六进制值(u3) * 16 + 十六进制值(u4)
+                        如果 cp < 128:
+                            sval = sval .. "\x00"
+                        否则如果 cp < 2048:
+                            b1v = 192 + cp / 64
+                            b2v = 128 + cp % 64
+                            sval = sval .. 文本_取字符(字节母串, b1v - 128) .. 文本_取字符(字节母串, b2v - 128)
+                        否则:
+                            b1v = 224 + cp / 4096
+                            b2v = 128 + (cp / 64) % 64
+                            b3v = 128 + cp % 64
+                            sval = sval .. 文本_取字符(字节母串, b1v - 128) .. 文本_取字符(字节母串, b2v - 128) .. 文本_取字符(字节母串, b3v - 128)
+                    否则:
+                        如果 esc == "\n":
+                            sval = sval .. "\n"
+                            spos = spos + 1
+                            sline = sline + 1
+                            scol = 1
+                        否则:
+                            sval = sval .. esc
+                            spos = spos + 1
+                            scol = scol + 1
+                否则:
+                    sval = sval .. c2
+                    spos = spos + 1
+                    scol = scol + 1
+            如果 闭合 == 1:
+                列表_追加(tok_types, TOK_STR)
+                列表_追加(tok_vals, sval)
+                列表_追加(tok_lines, sline)
+            否则:
+                列表_追加(parse_err_cell, "字符串未闭合 第 " + sline + " 行")
+                列表_追加(tok_types, TOK_STR)
+                列表_追加(tok_vals, sval)
+                列表_追加(tok_lines, sline)
+        # ---- 数字（十进制 / 0x十六进制 / 0b二进制 / 浮点） ----
+        否则如果 (ch >= "0") 和 (ch <= "9"):
+            sval = ""
+            如果 ch == "0" 和 spos + 1 < 源码长度:
+                nxt2 = 文本_取字符(源码, spos + 1)
+                如果 nxt2 == "x" 或 nxt2 == "X":
+                    sval = "0x"
+                    spos = spos + 2
+                    scol = scol + 2
+                    当循环 spos < 源码长度 和 是十六进制(文本_取字符(源码, spos)):
+                        sval = sval .. 文本_取字符(源码, spos)
+                        spos = spos + 1
+                        scol = scol + 1
+                否则如果 nxt2 == "b" 或 nxt2 == "B":
+                    sval = "0b"
+                    spos = spos + 2
+                    scol = scol + 2
+                    当循环 spos < 源码长度 和 是二进制(文本_取字符(源码, spos)):
+                        sval = sval .. 文本_取字符(源码, spos)
+                        spos = spos + 1
+                        scol = scol + 1
+                否则:
+                    当循环 spos < 源码长度:
+                        cd = 文本_取字符(源码, spos)
+                        如果 (cd >= "0") 和 (cd <= "9"):
+                            sval = sval .. cd
+                            spos = spos + 1
+                            scol = scol + 1
+                        否则:
+                            跳出
+            否则:
+                当循环 spos < 源码长度:
+                    cd = 文本_取字符(源码, spos)
+                    如果 (cd >= "0") 和 (cd <= "9"):
+                        sval = sval .. cd
+                        spos = spos + 1
+                        scol = scol + 1
+                    否则:
+                        跳出
+            # 浮点：小数点后跟数字
+            如果 spos < 源码长度 和 spos + 1 < 源码长度:
+                fd = 文本_取字符(源码, spos)
+                fnext = 文本_取字符(源码, spos + 1)
+                如果 fd == "." 和 (fnext >= "0") 和 (fnext <= "9"):
+                    sval = sval .. "."
+                    spos = spos + 1
+                    scol = scol + 1
+                    当循环 spos < 源码长度:
+                        fdig = 文本_取字符(源码, spos)
+                        如果 (fdig >= "0") 和 (fdig <= "9"):
+                            sval = sval .. fdig
+                            spos = spos + 1
+                            scol = scol + 1
+                        否则:
+                            跳出
+            列表_追加(tok_types, TOK_NUM)
+            列表_追加(tok_vals, sval)
+            列表_追加(tok_lines, sline)
+        # ---- 标识符 / 关键字 ----
+        否则如果 (ch >= "\x80") 或 是字母(ch):
+            sval = ""
+            当循环 spos < 源码长度:
+                ci = 文本_取字符(源码, spos)
+                如果 (ci >= "\x80") 或 是字母(ci) 或 ((ci >= "0") 和 (ci <= "9")):
+                    sval = sval .. ci
+                    spos = spos + 1
+                    scol = scol + 1
+                否则:
+                    跳出
+            kv = 查找关键字(sval)
+            如果 转数字(kv) != 0:
+                列表_追加(tok_types, kv)
+            否则:
+                列表_追加(tok_types, TOK_ID)
+            列表_追加(tok_vals, sval)
+            列表_追加(tok_lines, sline)
+        # ---- 双字符运算符（预取两位） ----
+        否则:
+            op2 = ""
+            如果 spos + 1 < 源码长度:
+                op2 = 文本_子串(源码, spos, 2)
+            如果 op2 == "==":
+                列表_追加(tok_types, TOK_EQ)
+                列表_追加(tok_vals, "==")
+                列表_追加(tok_lines, sline)
+                spos = spos + 2
+                scol = scol + 2
+            否则如果 op2 == "!=":
+                列表_追加(tok_types, TOK_NEQ)
+                列表_追加(tok_vals, "!=")
+                列表_追加(tok_lines, sline)
+                spos = spos + 2
+                scol = scol + 2
+            否则如果 op2 == "<=":
+                列表_追加(tok_types, TOK_LE)
+                列表_追加(tok_vals, "<=")
+                列表_追加(tok_lines, sline)
+                spos = spos + 2
+                scol = scol + 2
+            否则如果 op2 == ">=":
+                列表_追加(tok_types, TOK_GE)
+                列表_追加(tok_vals, ">=")
+                列表_追加(tok_lines, sline)
+                spos = spos + 2
+                scol = scol + 2
+            否则如果 op2 == "..":
+                列表_追加(tok_types, TOK_CONCAT)
+                列表_追加(tok_vals, "..")
+                列表_追加(tok_lines, sline)
+                spos = spos + 2
+                scol = scol + 2
+            否则如果 op2 == "<<":
+                列表_追加(tok_types, TOK_SHL)
+                列表_追加(tok_vals, "<<")
+                列表_追加(tok_lines, sline)
+                spos = spos + 2
+                scol = scol + 2
+            否则如果 op2 == ">>":
+                列表_追加(tok_types, TOK_SHR)
+                列表_追加(tok_vals, ">>")
+                列表_追加(tok_lines, sline)
+                spos = spos + 2
+                scol = scol + 2
+            否则:
+                单 = 文本_取字符(源码, spos)
+                如果 单 == "=":
+                    列表_追加(tok_types, TOK_ASSIGN)
+                    列表_追加(tok_vals, "=")
+                否则如果 单 == "+":
+                    列表_追加(tok_types, TOK_PLUS)
+                    列表_追加(tok_vals, "+")
+                否则如果 单 == "-":
+                    列表_追加(tok_types, TOK_MINUS)
+                    列表_追加(tok_vals, "-")
+                否则如果 单 == "*":
+                    列表_追加(tok_types, TOK_STAR)
+                    列表_追加(tok_vals, "*")
+                否则如果 单 == "/":
+                    列表_追加(tok_types, TOK_SLASH)
+                    列表_追加(tok_vals, "/")
+                否则如果 单 == "%":
+                    列表_追加(tok_types, TOK_PERCENT)
+                    列表_追加(tok_vals, "%")
+                否则如果 单 == "&":
+                    列表_追加(tok_types, TOK_AMPERSAND)
+                    列表_追加(tok_vals, "&")
+                否则如果 单 == "|":
+                    列表_追加(tok_types, TOK_PIPE)
+                    列表_追加(tok_vals, "|")
+                否则如果 单 == "^":
+                    列表_追加(tok_types, TOK_CARET)
+                    列表_追加(tok_vals, "^")
+                否则如果 单 == "~":
+                    列表_追加(tok_types, TOK_TILDE)
+                    列表_追加(tok_vals, "~")
+                否则如果 单 == "!":
+                    列表_追加(tok_types, KW_NOT)
+                    列表_追加(tok_vals, "!")
+                否则如果 单 == "<":
+                    列表_追加(tok_types, TOK_LT)
+                    列表_追加(tok_vals, "<")
+                否则如果 单 == ">":
+                    列表_追加(tok_types, TOK_GT)
+                    列表_追加(tok_vals, ">")
+                否则如果 单 == "(":
+                    列表_追加(tok_types, TOK_LPAREN)
+                    列表_追加(tok_vals, "(")
+                否则如果 单 == ")":
+                    列表_追加(tok_types, TOK_RPAREN)
+                    列表_追加(tok_vals, ")")
+                否则如果 单 == "[":
+                    列表_追加(tok_types, TOK_LBRACKET)
+                    列表_追加(tok_vals, "[")
+                否则如果 单 == "]":
+                    列表_追加(tok_types, TOK_RBRACKET)
+                    列表_追加(tok_vals, "]")
+                否则如果 单 == "{":
+                    列表_追加(tok_types, TOK_LBRACE)
+                    列表_追加(tok_vals, "{")
+                否则如果 单 == "}":
+                    列表_追加(tok_types, TOK_RBRACE)
+                    列表_追加(tok_vals, "}")
+                否则如果 单 == ",":
+                    列表_追加(tok_types, TOK_COMMA)
+                    列表_追加(tok_vals, ",")
+                否则如果 单 == ":":
+                    列表_追加(tok_types, TOK_COLON)
+                    列表_追加(tok_vals, ":")
+                否则如果 单 == ".":
+                    列表_追加(tok_types, TOK_DOT)
+                    列表_追加(tok_vals, ".")
+                否则:
+                    列表_追加(parse_err_cell, "无法识别的字符" + 单 + " 第 " + sline + " 行")
+                列表_追加(tok_lines, sline)
+                spos = spos + 1
+                scol = scol + 1
+    # 词法结束：弹出剩余 DEDENT + EOF
+    当循环 缩进层 > 0:
+        列表_追加(tok_types, TOK_DEDENT)
+        列表_追加(tok_vals, "d")
+        列表_追加(tok_lines, sline)
+        缩进层 = 缩进层 - 1
+    列表_追加(tok_types, TOK_EOF)
+    列表_追加(tok_vals, "")
+    列表_追加(tok_lines, sline)
+
+    # ============ 语法分析 + 代码生成 ============
+    解析程序()
+
+    # ============ 写出 C 文件并调用 GCC ============
+    如果 有解析错误() != "":
+        打印("vus-full: 解析错误: " .. 有解析错误() .. "\n")
+    否则:
+        c代码 = 列表_拼接(全局段) .. 列表_拼接(函数段) .. 列表_拼接(主函数段)
+        输出c = 输出名 .. ".c"
+        文件_写入(输出c, c代码)
+        gcc命令 = "gcc -O1 -I\"" .. rt目录 .. "\" \"" .. 输出c .. "\" \"" .. lib路径 .. "\" -o \"" .. 输出名 .. "\" -lm -lpthread -lcurl 2>&1"
+        编译结果 = 命令_执行(gcc命令)
+        打印("vus-full: " .. 编译结果 .. "\n")
+        打印("vus-full: 完成 -> " .. 输出名 .. "\n")
+否则:
+    打印("vus-full: 输入文件不存在: " .. 输入文件 .. "\n")

@@ -14,6 +14,15 @@
 extern "C" {
 #endif
 
+/* ============ 内部缓冲区类型（跨模块可见） ============ */
+
+typedef struct {
+    char   *data;
+    size_t  len;
+    size_t  cap;
+    int     indent;
+} GenBuf;
+
 /* ============ 代码生成器 ============ */
 
 /* 将 AST 生成 C 代码，返回分配的字符串 */
@@ -27,6 +36,17 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
 
 /* 释放生成的 C 代码字符串 */
 void vus_generate_free(char *code);
+
+/* ============ 表达式生成（跨模块，供 gen_builtin_*.c 调用） ============ */
+
+/* 返回 malloc 分配的字符串，调用方需 free */
+char *gen_expr(GenBuf *buf, VusAstNode *node);
+
+/* 将中文/特殊字符名转为合法的 C 标识符 */
+void gen_sanitize_name(const char *name, char *out, size_t out_size);
+
+/* 字符串转义 */
+void gen_string_escape(const char *input, char *output, size_t out_size);
 
 #ifdef __cplusplus
 }

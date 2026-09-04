@@ -31,6 +31,9 @@ SRCS     = $(SRC_DIR)/main.c $(SRC_DIR)/token.c $(SRC_DIR)/lexer.c \
            $(SRC_DIR)/ast.c $(SRC_DIR)/vus_abi.c $(SRC_DIR)/vus_plugin.c \
            $(SRC_DIR)/vus_lang.c $(SRC_DIR)/vus_vusx.c $(SRC_DIR)/vus_apk.c \
            $(SRC_DIR)/vus_chart.c \
+           $(SRC_DIR)/gen_builtin_io.c $(SRC_DIR)/gen_builtin_gui.c \
+           $(SRC_DIR)/gen_builtin_net.c $(SRC_DIR)/gen_builtin_plugin.c \
+           $(SRC_DIR)/gen_builtin_date.c $(SRC_DIR)/gen_builtin_data.c \
            $(SRC_DIR)/lsp/lsp.c $(SRC_DIR)/lsp/vus_builtin.c
 OBJS     = $(SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
 RT_SRC   = $(RT_DIR)/libvus_rt.c
@@ -115,7 +118,28 @@ $(BUILD_DIR)/lexer.o: $(SRC_DIR)/lexer.c $(LEXER_H) $(TOKEN_H) | $(BUILD_DIR)
 $(BUILD_DIR)/parser.o: $(SRC_DIR)/parser.c $(PARSER_H) $(TOKEN_H) $(SRC_DIR)/ast.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c -o $@ $<
 
-$(BUILD_DIR)/generator.o: $(SRC_DIR)/generator.c $(GEN_H) $(TOKEN_H) $(SRC_DIR)/ast.h | $(BUILD_DIR)
+$(BUILD_DIR)/generator.o: $(SRC_DIR)/generator.c $(GEN_H) $(TOKEN_H) $(SRC_DIR)/ast.h $(SRC_DIR)/gen_builtin.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(SRC_DIR) -c -o $@ $<
+
+# 内置函数映射模块
+BUILTIN_H = $(SRC_DIR)/gen_builtin.h
+
+$(BUILD_DIR)/gen_builtin_io.o: $(SRC_DIR)/gen_builtin_io.c $(GEN_H) $(BUILTIN_H) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(SRC_DIR) -c -o $@ $<
+
+$(BUILD_DIR)/gen_builtin_gui.o: $(SRC_DIR)/gen_builtin_gui.c $(GEN_H) $(BUILTIN_H) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(SRC_DIR) -c -o $@ $<
+
+$(BUILD_DIR)/gen_builtin_net.o: $(SRC_DIR)/gen_builtin_net.c $(GEN_H) $(BUILTIN_H) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(SRC_DIR) -c -o $@ $<
+
+$(BUILD_DIR)/gen_builtin_plugin.o: $(SRC_DIR)/gen_builtin_plugin.c $(GEN_H) $(BUILTIN_H) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(SRC_DIR) -c -o $@ $<
+
+$(BUILD_DIR)/gen_builtin_date.o: $(SRC_DIR)/gen_builtin_date.c $(GEN_H) $(BUILTIN_H) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(SRC_DIR) -c -o $@ $<
+
+$(BUILD_DIR)/gen_builtin_data.o: $(SRC_DIR)/gen_builtin_data.c $(GEN_H) $(BUILTIN_H) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c -o $@ $<
 
 $(BUILD_DIR)/config.o: $(SRC_DIR)/config.c $(CONFIG_H) | $(BUILD_DIR)
