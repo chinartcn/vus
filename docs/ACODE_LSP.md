@@ -1,3 +1,7 @@
+> 文档版本：v1.0_apk（APK 功能时代）
+> 最后更新时间：2026-09-04
+
+
 # VUS 语言服务器在 ACode 中的使用
 
 本文说明如何把 VUS 的 **语言服务器（LSP）** 接入 [ACode](https://acode.app/)（Android 代码编辑器），使其在真机上获得智能补全与文档符号能力。目标环境为 **Android 真机**，同时支持 **ARM64（arm64-v8a）** 与 **ARM32（armeabi-v7a）**。

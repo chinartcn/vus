@@ -1,25 +1,31 @@
+> 文档版本：v1.0_apk（APK 功能时代）
+> 最后更新时间：2026-09-04
+
+
 # VUS 项目生态说明
 
-> 版本：v1.0-beta  
-> 最后更新：2026-08-17
+> 版本：v3.0.20260904150204（正式版）  
+> 最后更新：2026-09-04
 
 ---
 
 ## 一、概述
 
-VUS 是一个面向 Linux、Android Termux、嵌入式 ARM 设备的中文友好多范式编译型强类型编程语言。其生态围绕"编译到 C"这一核心设计展开，形成了从编译器内核到插件体系、从运行时库到构建工具链的完整技术栈。
+VUS 是一个面向 Linux、Android Termux、嵌入式 ARM 设备的中文友好**动态类型**多范式编译型编程语言（类型注解解析记录、不强制检查）。其生态围绕"编译到 C"这一核心设计展开，形成了从编译器内核到插件体系、从运行时库到构建工具链、从 GUI 双机制到体感音游的完整技术栈。
 
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                    用户层（VUS 源码）                      │
-│  main.vus  │  项目配置 vus.json  │  测试用例  │  插件      │
+│  main.vus  │ 项目配置 vus.json  │ 测试用例  │ 插件         │
+│  .vua 界面定义（Android 组件流）│ .vaz 扩展包            │
 └──────────────────────┬──────────────────────────────────┘
                        │
                        ▼
 ┌─────────────────────────────────────────────────────────┐
 │                   编译器内核（src/）                       │
-│  词法分析 → 语法分析 → AST → C 代码生成                  │
+│  词法分析 → 语法分析 → AST → C 代码生成（含生成代码优化） │
 │  API 层：C ABI / 插件系统 / 语言插件 / VUSX 插件 / APK     │
+│  LSP（src/lsp/）│ 谱面生成 vus_chart │ vaz 展开 vus_vaz   │
 └──────────────────────┬──────────────────────────────────┘
                        │
                        ▼
@@ -27,7 +33,7 @@ VUS 是一个面向 Linux、Android Termux、嵌入式 ARM 设备的中文友好
 │                   编译后端                               │
 │  VUS → C 代码  →  GCC/Clang  →  原生可执行文件           │
 │                       ↘
-│                    Android NDK  →  APK 项目              │
+│                    Android NDK  →  APK 项目（VUA 壳）     │
 └──────────────────────┬──────────────────────────────────┘
                        │
                        ▼
@@ -35,7 +41,9 @@ VUS 是一个面向 Linux、Android Termux、嵌入式 ARM 设备的中文友好
 │                   运行时支撑层                             │
 │  libvus_rt（引用计数/字符串/列表/字典/闭包/错误处理）      │
 │  线程（pthread）│ 协程（setjmp/longjmp 轻量实现）          │
-│  EasyLogger（分级日志）│ ANSI TUI（无外部依赖）             │
+│  EasyLogger（分级日志）│ yyjson（JSON）│ ANSI TUI          │
+│  GuiLite（图形_* 画布流）│ vua.c（界面_* 组件流）          │
+│  vus_xyz（体感音游：mpv + termux-sensor）                 │
 │  libcurl（可选）│ libpython（可选，VUS_USE_PY）            │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -50,27 +58,38 @@ VUS 是一个面向 Linux、Android Termux、嵌入式 ARM 设备的中文友好
 
 | 组件 | 文件 | 职责 |
 |------|------|------|
-| 入口调度 | `main.c` | CLI 参数解析、子命令分发（run/build/test/init/update/lang/vux/vusx） |
+| 入口调度 | `main.c` | CLI 参数解析、子命令分发（run/build/test/init/update/lang/vux/vusx/vaz/chart/lsp） |
 | 词法分析器 | `lexer.c` / `lexer.h` | UTF-8 中文标识符支持，90 余种 Token 类型，缩进敏感 INDENT/DEDENT，双语法体系 |
 | Token 定义 | `token.c` / `token.h` | Token 类型枚举、字符串化、关键字查找（中英文别名合并到统一 Token） |
 | 语法分析器 | `parser.c` / `parser.h` | 递归下降解析，覆盖函数/结构体/条件/循环/异常/导入/返回/全局声明等语句，8 级表达式优先级 |
 | 抽象语法树 | `ast.c` / `ast.h` | 30 余种 AST 节点类型，创建/遍历/销毁 |
-| 代码生成器 | `generator.c` / `generator.h` | 中文标识符 sanitize（`_XXXX` 编码）、引用计数插入、类型调度（`vus_add`）、GNU 语句表达式、泛型函数调用、结构体/线程/协程 |
-| 配置加载 | `config.c` / `config.h` | 项目配置 vus.json 加载与解析（内建简易 JSON 解析器），`VusConfig` 权威定义 |
+| 代码生成器 | `generator.c` / `generator.h` | 中文标识符 sanitize（`_XXXX` 编码）、引用计数插入、类型调度（`vus_add`）、GNU 语句表达式、泛型函数调用、结构体/线程/协程；**生成代码优化**（特征扫描按需产变量、`vus_var_set` 赋值热路径、整数字面量池化、列表/字典 helper 收敛、循环模板收敛、`omit_main` 库式编译） |
+| 配置加载 | `config.c` / `config.h` | 项目配置 vus.json 加载与解析（内建简易 JSON 解析器），`VusConfig` 权威定义（含 `omit_main`） |
 | C ABI | `vus_abi.c` | `compile_source` 编译流水线核心、编译/求值接口实现 |
 | 插件系统 | `vus_plugin.c` | .vux 功能插件（dlopen 加载、注册/生命周期/查询） |
 | 语言插件 | `vus_lang.c` / `vus_lang.h` | .vulage 语言插件（编译前预处理） |
-| VUSX 插件 | `vus_vusx.c` / `vus_vusx.h` | .vusx 编译期插件（元数据解析、编译为 .o 并追加链接） |
-| APK 打包 | `vus_apk.c` / `vus_apk.h` | VUS → Android APK 项目（JNI 桥接、NDK 检测） |
+| VUSX 插件 | `vus_vusx.c` / `vus_vusx.h` | .vusx 编译期插件（元数据解析、编译为 .o 并追加链接；`omit_main` 库式编译） |
+| APK 打包 | `vus_apk.c` / `vus_apk.h` | VUS → Android APK 项目（JNI 桥接、NDK 检测、嵌入 VUA 壳） |
+| VAZ 扩展包 | `vus_vaz.c` / `vus_vaz.h` | 展开 `.vaz` 控件模板 + 逻辑库（`vus vaz expand`） |
+| 谱面生成 | `vus_chart.c` / `vus_chart.h` | 从音频生成体感音游谱面 JSON（`vus chart`，BPM/节拍估计） |
+| 语言服务器 | `lsp/`（`lsp.c`、`vus_builtin.c` 等） | JSON-RPC 补全服务（可集成 ACode / GUI Designer） |
 
 ### 2.2 运行时库（`rt/`）
 
 | 文件 | 职责 |
 |------|------|
 | `libvus_rt.h` | 运行时类型定义（VusString、VusList、VusDict、VusClosure、VusError、VusObject 等）与全部运行时函数原型 |
-| `libvus_rt.c` | 运行时实现（引用计数、智能加法、列表/字典、闭包、错误链、线程/协程句柄注册表、分级日志、TUI/网络/文件/日期插件运行时函数） |
+| `libvus_rt.c` | 运行时实现（引用计数、智能加法、列表/字典、闭包、错误链、线程/协程句柄注册表、分级日志、TUI/网络/文件/日期插件运行时函数；**性能优化**：字符串常量池 `vus_literal`、拼接免二重复制 `vus_string_concat`、`VusString` 头+负载单块 malloc、`vus_to_string` 整数值驻留缓存、`vus_var_set` 统一赋值） |
 | `vus_coro.c` / `vus_coro.h` | 轻量级协程（基于 setjmp/longjmp + 平台特定汇编手工切换栈，独立 128KB 栈，可在 Android/Bionic/Termux 编译） |
 | `elog_port.c` + `easylogger/` | EasyLogger 嵌入式日志库静态集成（分级日志） |
+| `yyjson/` | 纯 C JSON 解析/生成库（默认内置，支撑 `JSON_*`） |
+| `guilite_bridge.c/h` + `guilite_wrapper.cpp` | GuiLite 画布流桥接（`图形_*` 内建函数 → C++ 包装） |
+| `guilite_platform.c` + `guilite_gles.c` | GuiLite 平台层（X11 / headless / 可选 GLES 加速） |
+| `guiLite/` | GuiLite UI 框架头文件（MIT） |
+| `gifdec/`、`nanosvg/` | GIF / SVG 解码（`图形_图片`、`图形_动画_*`）；PNG 走 libpng |
+| `vua.c` / `vua.h` | VUA 组件流运行时（`.vua` 解析/校验/渲染树/事件派发/屏栈） |
+| `vus_xyz.c` | 体感音游运行时（mpv 音频后端 + termux-sensor 传感器后端 + 单调时钟） |
+| `vus_rt_shim.c` | 运行时 shim（编译期聚合辅助） |
 
 运行时库提供的能力：
 
@@ -83,7 +102,11 @@ VUS 是一个面向 Linux、Android Termux、嵌入式 ARM 设备的中文友好
 - **标准库辅助** — `vus_print`、`vus_input`、`vus_to_int`、`vus_to_string`、`vus_typeof` 等
 - **线程/协程句柄注册表** — 各 64 个槽位（`VUS_MAX_HANDLES`）
 - **分级日志** — EasyLogger 集成（`日志_调试/信息/警告/错误/级别`）
-- **插件运行时函数** — TUI（ANSI 转义码）、网络（libcurl，`VUS_HAVE_CURL`）、文件 I/O、日期时间
+- **JSON** — yyjson 内嵌（`JSON_解析`/`JSON_生成`/`JSON_查询`、`对象文本`、`字典_键`）
+- **插件运行时函数** — TUI（ANSI 转义码）、网络（libcurl，`VUS_HAVE_CURL`）、文件 I/O、日期时间、命令执行、文本/列表/字典、音频/传感器/时钟
+- **GUI 画布流** — GuiLite 桥接（`图形_*`：绘制/控件/图片/动画/滚动/页面/主题/事件）
+- **GUI 组件流** — VUA（`界面_*`：`.vua` 解析/校验/渲染树/事件派发/多屏导航）
+- **体感音游** — `vus_xyz`（mpv 音频 + termux-sensor 传感器 + 单调时钟）
 
 ### 2.3 公共 API 头文件（`include/vus/`）
 
@@ -239,16 +262,19 @@ typedef struct VusLangPlugin {
 | `日期_解析(字符串, 格式)` | `vus_plugin_date_parse` | 解析日期字符串 |
 | `日期_年/月/日/时/分/秒()` | `vus_plugin_date_year/month/day/hour/minute/second` | 获取当前时间各部分 |
 
-### 4.5 插件 / JSON 内置函数（依赖 `VUS_USE_PY`）
+### 4.5 插件 / JSON 内置函数
 
-> **依赖标注**：以下函数在编译期定义 `VUS_USE_PY`（`python3-config` 可用时由 Makefile 自动注入）时经进程内嵌 Python 生效；未定义时相应函数降级（JSON 解析/生成返回空、进程内调用回退子进程）。
+> **依赖标注**：`JSON_解析/生成/查询` 基于内嵌 **yyjson**（纯 C）**默认可用**，无需 Python；嵌入式（进程内）插件调用与 `typeof` 在编译期定义 `VUS_USE_PY`（`python3-config` 可用时由 Makefile 自动注入）时经 libpython 生效，未定义时 `typeof` 降级为恒返回 `"空"`、进程内调用回退子进程方案。
 
 | 函数 | 运行时 | 说明 |
 |------|--------|------|
 | `插件_运行(插件, 命令)` | `vus_plugin_run_vux` | 子进程运行 .vux Python 插件 |
-| `插件_运行JSON(插件, 命令)` | `vus_plugin_run_vux_inproc` / `vus_plugin_run_vux_json` | 进程内/结构化调用插件 |
-| `JSON_解析(字符串)` | `vus_json_parse` | JSON → 结构化 `VusObject*` |
-| `JSON_生成(对象)` | `vus_json_generate` | `VusObject*` → JSON 字符串 |
+| `插件_运行JSON(插件, 命令)` | `vus_plugin_run_vux_json` / `vus_plugin_run_vux_inproc` | 子进程/进程内调用，返回 JSON 结构化结果 |
+| `JSON_解析(字符串)` | `vus_json_parse` | JSON → 结构化 `VusObject*`（yyjson）|
+| `JSON_生成(对象)` | `vus_json_generate` | `VusObject*` → JSON 字符串（yyjson）|
+| `JSON_查询(json, 路径)` | `vus_json_query` | 按 `a.b[0]` 路径取字段（yyjson）|
+| `对象文本(值)` | `vus_object_to_string` | 结构化对象安全转文本 |
+| `字典_键(字典)` | `vus_dict_keys` | 返回字典键列表 |
 
 ### 4.6 分级日志内置函数（EasyLogger 集成）
 
@@ -266,9 +292,16 @@ typedef struct VusLangPlugin {
 - `断言`、`退出`、`长度`、`拼接`、`分割`、`替换`、`取子串`、`取整`、`取随机数`、`创建列表`、`添加元素`、`取元素`、`删除元素`、`列表长度`、`遍历列表`、`创建字典`、`字典设值`、`字典取值`、`字典删除`、`字典长度`、`读取文件`、`写入文件`、`追加文件`、`删除文件`、`文件是否存在`、`当前时间` 等旧式名称。
 - **异步 `等待`**：`VUS_TOKEN_CN_AWAIT` 仅定义 Token，解析器**未实现**，不可用。
 
-> 结论：**当前真正可用的内置函数** = 核心内置（打印/输入/转数字/转文本/类型）+ 日志 + 上述 tui_/网络_/文件_/日期_ 四组 + 插件/JSON（受限 `VUS_USE_PY`）。GUI（`图形_*`）不在本手册范围，尚未完成。
+> 结论：**当前真正可用的内置函数** = 核心内置（打印/输入/转数字/转文本/类型）+ 日志 + tui_/网络_/文件_/日期_/文本_/列表_/字典_ 组 + 插件/JSON（JSON 基于 yyjson 默认可用）+ **GUI**（`图形_*` GuiLite 画布流、`界面_*` VUA 组件流）。
 
-### 4.8 Meilisearch 搜索插件（.vux 功能插件）
+### 4.8 GUI 内置函数（已实现，两套机制）
+
+| 机制 | 平台 | 函数族 | 文档 |
+|------|------|--------|------|
+| **画布交互流** | Termux / Linux X11 | `图形_*`（绘制/控件/图片/动画/滚动/页面/事件，GuiLite）| [API_REFERENCE.md 第 1 章](API_REFERENCE.md) |
+| **组件解析流** | Android APK | `界面_*`（`.vua` 多屏导航 + 事件绑定，Java View 渲染）| [VUA_REFERENCE.md](VUA_REFERENCE.md) / [VUA_RENDER_TREE.md](VUA_RENDER_TREE.md) |
+
+### 4.9 Meilisearch 搜索插件（.vux 功能插件）
 
 VUS 插件系统的功能插件，用 Python 封装 Meilisearch 全文搜索引擎，提供中文子命令接口（服务健康/索引管理/文档 CRUD/全文搜索/同义词/设置管理）。
 
@@ -393,6 +426,13 @@ vus build --apk main.vus [--ndk-path <路径>] [--app-name <名称>] [--output <
 | test_plugins.vus | 插件运行时函数 |
 | test_logger.vus | 分级日志 |
 | test_import.vus | 导入机制 |
+| test_gui.vus / test_gui_btn.vus / test_gui_ctrl(adv).vus | GUI 画布流（控件/事件，headless 可测） |
+| test_gui_shape_adv.vus / test_gui_png.vus / test_gui_font.vus / test_gui_media.vus | GUI 绘制原语 / 图片 / 字体 / 媒体动画 |
+| test_gui_pages.vus / test_gui_pages_adv.vus / test_pages_ext.vus | GUI 多页面导航 |
+| test_gui_md_line_scroll.vus | Markdown 渲染 / 滚动容器 |
+| test_xyz_basic.vus / test_vus_chart.vus | 体感音游运行时 / 谱面生成 |
+| test_vus_abi.vus / test_vus_lang.vus / test_vus_plugin.vus | C ABI / 语言插件 / 功能插件 |
+| vua_smoke.c | VUA 渲染树 / 严格校验 / 按 ID 触发（`gcc -I rt rt/vua.c rt/yyjson/yyjson.c tests/vua_smoke.c`） |
 
 错误路径用例位于 `tests/error_tests/`（缺冒号、未闭合字符串/列表、泛型未闭合、结构体无名、括号不匹配等），运行脚本 `tests/run_error_tests.sh`。
 
@@ -442,12 +482,15 @@ make test                            # 调用 vus test
 | `vus vux run <插件>` | 运行插件 |
 | `vus vusx list` | 列出项目中配置的 vusx 依赖 |
 | `vus vusx info <路径>` | 查看 vusx 插件信息 |
-| `vus vusx build <路径>` | 编译 vusx 插件 |
+| `vus vusx build <路径>` | 编译 vusx 插件（库式，`omit_main`） |
+| `vus vaz expand <页面目录> -v <包.vaz|目录>` | 展开 `.vaz` 扩展包（控件模板 + 逻辑库） |
 
 ### 8.4 其他
 
 | 命令 | 说明 |
 |------|------|
+| `vus chart <音频> [-o 输出文件]` | 从音频生成体感音游谱面 JSON（chart 格式，估算 BPM/节拍） |
+| `vus lsp` | 启动语言服务器（JSON-RPC 补全，可集成 ACode / GUI Designer） |
 | `vus --help` / `vus -h` | 显示帮助信息 |
 | `vus --version` / `vus -v` | 显示版本信息（含 ABI 版本） |
 
@@ -469,25 +512,36 @@ make test                            # 调用 vus test
 ```
 vus/
 ├── src/                    # 编译器源码
-│   ├── main.c              # CLI 入口（命令分发、vus 流程编排）
+│   ├── main.c              # CLI 入口（命令分发：run/build/test/init/update/lang/vux/vusx/vaz/chart/lsp）
 │   ├── lexer.c/h           # 词法分析器
 │   ├── parser.c/h          # 语法分析器
 │   ├── token.c/h           # Token 类型（90 余种）
 │   ├── ast.c/h             # 抽象语法树（30 余种节点）
-│   ├── generator.c/h       # 代码生成器
-│   ├── config.c/h          # 配置加载 + VusConfig 定义
+│   ├── generator.c/h       # 代码生成器（含生成代码优化 + GUI/界面_* 映射）
+│   ├── config.c/h          # 配置加载 + VusConfig 定义（含 omit_main）
 │   ├── vus_abi.c           # C ABI 实现 + 编译流水线核心
 │   ├── vus_plugin.c        # .vux 插件系统
 │   ├── vus_lang.c/h        # .vulage 语言插件系统
-│   ├── vus_vusx.c/h        # .vusx 插件系统
-│   └── vus_apk.c/h         # APK 打包
+│   ├── vus_vusx.c/h        # .vusx 插件系统（库式编译）
+│   ├── vus_apk.c/h         # APK 打包（嵌入 VUA 壳）
+│   ├── vus_vaz.c/h         # .vaz 扩展包展开
+│   ├── vus_chart.c/h       # 体感音游谱面生成
+│   └── lsp/                # 语言服务器（lsp.c、vus_builtin.c/h 内置函数元数据表）
 ├── rt/                     # 运行时库
-│   ├── libvus_rt.c         # 运行时实现
-│   ├── libvus_rt.h         # 运行时类型定义与函数原型
+│   ├── libvus_rt.c/h       # 运行时实现 + 类型定义（含性能优化路径）
 │   ├── vus_coro.c/h        # 协程实现
+│   ├── vus_rt_shim.c       # 运行时 shim
 │   ├── elog_port.c         # EasyLogger 移植层
 │   ├── easylogger/         # EasyLogger 日志库（inc/ + src/）
-│   └── guilite/            # GUI 原型（尚未完成，不参与当前功能）
+│   ├── yyjson/             # JSON 解析/生成库（内置）
+│   ├── guilite/            # GuiLite UI 框架头文件
+│   ├── guilite_bridge.c/h  # 图形_* → GuiLite C 桥接
+│   ├── guilite_wrapper.cpp # GuiLite C++ 包装
+│   ├── guilite_platform.c  # X11 / headless 平台层
+│   ├── guilite_gles.c/h    # GLES 加速平台层（可选）
+│   ├── gifdec/  + nanosvg/ # GIF / SVG 解码
+│   ├── vua.c/h             # VUA 组件流运行时（渲染树/事件/屏栈）
+│   └── vus_xyz.c           # 体感音游运行时（mpv + termux-sensor）
 ├── include/vus/            # 公共 API 头文件
 │   ├── vus.h               # 核心类型与顶层编译封装
 │   ├── vus_abi.h           # C ABI 接口
@@ -501,19 +555,26 @@ vus/
 │       ├── 示例/           # 插件开发示例
 │       ├── meilisearch/    # Meilisearch 搜索插件（含 tests/）
 │       └── meilisearch_localdeployment/  # Meilisearch 本地部署扩展
-├── tests/                  # 测试用例（.vus + error_tests/ + 运行脚本）
+├── tests/                  # 测试用例（.vus + error_tests/ + vua_smoke.c + 运行脚本）
+├── testdata/               # 测试数据（.vua 界面样本、vua_controls.json、vaz 样本等）
+├── .bench/                 # 性能基准（big.vus 大文件、hot.vus 热循环）
 ├── scripts/                # 工具脚本
 │   ├── build_release.sh    # 预编译包构建
+│   ├── build_lsp_android.sh
 │   ├── vux_plugin_manager.py
 │   ├── vux_plugin_entry.py
 │   └── index_vus_docs.py
-├── examples/               # 示例程序（含 plugins/ 插件示例）
+├── examples/               # 示例程序（GUI 示例 gui_*.vus、体感音游 xyz_game.vus/solace_game.vus、vua-android/ APK 壳工程、gui-designer/ 可视化设计器、acode-vus-lsp-plugin/、plugins/）
 ├── docs/                   # 文档
 │   ├── LANGUAGE_REFERENCE.md    # 语言参考手册（已实现 vs 未实现权威标注）
-│   ├── API_REFERENCE.md         # API/插件接口参考（接口权威）
+│   ├── API_REFERENCE.md         # 内置函数参考（图形_*/界面_* 全量）
+│   ├── VUA_REFERENCE.md         # VUA 界面定义规范（Android 组件流）
+│   ├── VUA_RENDER_TREE.md       # VUA 渲染树格式（native → Java）
 │   ├── ARCHITECTURE.md          # 架构与模块实现
 │   ├── PROJECT_BRIEFING.md      # 项目简介
 │   ├── STATUS.md                # 状态报告（功能清单、测试状态、已知 Bug）
+│   ├── PERFORMANCE.md            # 性能优化专项记录（生成代码/编译/运行时）
+│   ├── PLUGIN_USAGE.md           # 插件系统使用指南（vux/vusx/.vulage/vaz）
 │   ├── TUTORIAL.md              # 从零开始教程
 │   ├── COMPILER_GUIDELINES.md   # 编译器开发指南
 │   ├── ECOSYSTEM.md             # 本文件（生态全景）
@@ -536,20 +597,27 @@ VUS 编译器（C11）
   ├── 标准 C 库（glibc / musl）— 必需
   ├── POSIX 线程（pthread）— 必需（线程支持）
   ├── EasyLogger — 运行时内置（rt/easylogger/），分级日志
+  ├── yyjson — 运行时内置（rt/yyjson/），JSON（默认可用）
+  ├── GuiLite — 运行时内置（rt/guilite/ + 桥接/平台层），图形_* 画布流
+  ├── libpng + FreeType — 图形_背景图/图形_图片(.png)/图形_字体_加载（GUI 链接期）
+  ├── mpv — 音频后端（vus_xyz，运行时 spawn；不可用时音频安全返回 0）
+  ├── termux-sensor — 传感器后端（Android Termux，体感音游）
   ├── libcurl（可选，VUS_HAVE_CURL）— 网络插件运行时函数
-  ├── libpython（可选，VUS_USE_PY）— 进程内嵌入 Python（插件/JSON）
+  ├── libpython（可选，VUS_USE_PY）— 进程内嵌入 Python（插件进程内调用、typeof）
   ├── GCC / Clang — 编译后端（将生成的 C 代码编译为可执行文件）
-  └── Android NDK（可选）— APK 打包
+  └── Android NDK（可选）— APK 打包（含 VUA 壳）
 ```
 
-**无外部依赖的组件**：词法分析器、语法分析器、AST、代码生成器、配置加载、TUI 函数、文件操作函数、日期时间函数、运行时核心（VusString/VusList/VusDict/VusClosure/VusError/VusObject）、协程（setjmp/longjmp + 汇编，不依赖 ucontext）、EasyLogger。
+**无外部依赖的组件**：词法分析器、语法分析器、AST、代码生成器、配置加载、TUI 函数、文件操作函数、日期时间函数、运行时核心（VusString/VusList/VusDict/VusClosure/VusError/VusObject）、协程（setjmp/longjmp + 汇编，不依赖 ucontext）、EasyLogger、yyjson（JSON）、VUA（`.vua` 解析/渲染树）。
 
 **条件编译宏**：
 
 | 宏 | 生效范围 |
 |----|----------|
 | `VUS_HAVE_CURL` | 网络插件运行时函数（需 `-lcurl`） |
-| `VUS_USE_PY` | 进程内嵌入 Python（`vus_py_init`、`vus_plugin_run_vux_inproc`、`vus_plugin_run_vux_json`、`vus_json_*`） |
+| `VUS_USE_PY` | 进程内嵌入 Python（`vus_py_init`、`vus_plugin_run_vux_inproc`、`vus_typeof` 完整实现） |
+
+（宏默认由 Makefile 依据环境自动注入；JSON 与 GUI 不需要宏即可用。）
 
 ---
 
@@ -560,7 +628,7 @@ VUS 编译器（C11）
 | v0.1 | 基础语言 + 插件体系 + C ABI | ✅ 完成 |
 | v0.2 | 调试体验优化 + 预编译包 + 安装脚本 | ✅ 完成 |
 | v1.0-alpha | 泛型 + 结构体 + 多线程/协程 + APK 打包 | ✅ 完成 |
-| v1.0-beta | 语言核心稳定 + APK 修复优化 + TUI/网络/文件/日期/日志 插件 + Meilisearch 插件 + EasyLogger | ✅ 完成 |
+| v1.0-beta | 语言核心稳定 + APK 修复优化 + TUI/网络/文件/日期/日志 插件 + Meilisearch 插件 + EasyLogger + **GUI 双机制（GuiLite 画布流 + VUA 组件流）+ 体感音游 + 生成代码/运行时性能优化 + 插件系统修复（vusx omit_main、JSON 死循环）+ JSON(yyjson) 默认可用** | ✅ 完成 |
 | v1.0 | 正式版 + 加密/数据库 | 🚀 未来 |
 | v7.0 | 包管理器仓库（`vus install` 生态） | 🚀 未来 |
 | v8.0 | 编译器自举（VUS 编译自身） | 🚀 未来 |

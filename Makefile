@@ -5,11 +5,15 @@
 # --- 变量 ---
 CC       = gcc
 CXX      = g++
-CFLAGS   = -Wall -Wextra -g -O2 -std=c11 -Wno-format-truncation
+CFLAGS   = -Wall -Wextra -g -O2 -std=c11 -Wno-format-truncation $(VERSION_DEF)
 SRC_DIR  = src
 RT_DIR   = rt
 BUILD_DIR = build
 TEST_DIR = tests
+
+# 版本号（发布/安装/帮助均使用；可 make VUS_VERSION=xxx 覆盖）
+VUS_VERSION ?= 3.0.20260904150204
+VERSION_DEF = -DVUS_VERSION_STR=\"$(VUS_VERSION)\"
 
 # libpython 检测（可选）：存在则启用进程内嵌入，否则降级子进程
 PY_INC := $(shell python3-config --includes 2>/dev/null)
@@ -247,16 +251,22 @@ clean:
 # 安装 / 卸载
 # =============================================================================
 
-install: vus
+install: all
 	install -m 755 vus /usr/local/bin/vus
 	install -d /usr/local/share/vus/scripts
 	install -m 644 scripts/vux_plugin_manager.py /usr/local/share/vus/scripts/
 	install -m 644 scripts/vux_plugin_entry.py /usr/local/share/vus/scripts/
-	install -d /usr/local/share/vus/examples/plugins
-	cp -r examples/plugins/* /usr/local/share/vus/examples/plugins/ 2>/dev/null || true
+	install -d /usr/local/share/vus/examples
+	install -m 644 examples/hello.vus /usr/local/share/vus/examples/
 	install -d /usr/local/share/vus/include/vus
+	install -m 644 include/vus/vus.h /usr/local/share/vus/include/vus/
+	install -m 644 include/vus/vus_abi.h /usr/local/share/vus/include/vus/
+	install -m 644 include/vus/vus_plugin.h /usr/local/share/vus/include/vus/
 	install -m 644 include/vus/vus_lang.h /usr/local/share/vus/include/vus/
 	install -m 644 include/vus/vus_vusx.h /usr/local/share/vus/include/vus/
+	install -d /usr/local/share/vus/rt
+	install -m 644 rt/libvus_rt.h /usr/local/share/vus/rt/
+	install -m 644 build/libvus_rt.a /usr/local/share/vus/rt/
 
 uninstall:
 	rm -f /usr/local/bin/vus

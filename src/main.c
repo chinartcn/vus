@@ -28,6 +28,11 @@
 #include <unistd.h>
 #include <sys/wait.h>
 
+/* 版本号：优先使用 Makefile 注入的 VUS_VERSION_STR（默认 "3.0.20260904150204"，VUS 首个正式版） */
+#ifndef VUS_VERSION_STR
+#define VUS_VERSION_STR "3.0.20260904150204"
+#endif
+
 /* ============ 文件读取辅助函数 ============ */
 
 static char *read_file(const char *path, size_t *out_len) {
@@ -429,18 +434,35 @@ static int vus_init(int force) {
     /* 检查是否已存在 vus.json */
     struct stat st;
     if (!force && stat("vus.json", &st) == 0) {
-        printf("vus.json 已存在。使用 --force 重新初始化。\n");
+        printf("vus.json 已存在。如需重新初始化请加 --force。\n");
         return 0;
     }
 
-    printf("==== VUS 项目初始化向导 v0.1 ====\n");
+    printf("==== VUS 项目初始化向导 v%s ====\n", VUS_VERSION_STR);
     printf("VUS 默认使用函数风格（中英混写，兼容 Python 用户习惯）。\n");
-    printf("如需易语言风格，请安装「易语言语法插件」: vus plugin install 易语言\n\n");
+    printf("如需易语言风格，请先加载语言插件: vus lang load <插件so路径>\n");
+    printf("（插件包在 plugins/lang/易语言/ 下，打包后为 易语言语法插件-x.y.z.vux）\n\n");
 
-    /* 生成 vus.json */
-    const char *json_template =
+    /* 交互式询问项目名称（非交互环境/空输入时使用默认值） */
+    char proj_name[128] = "我的项目";
+    char buf[256];
+    printf("项目名称 [%s]: ", proj_name);
+    fflush(stdout);
+    if (fgets(buf, sizeof(buf), stdin)) {
+        char *nl = strchr(buf, '\n');
+        if (nl) *nl = '\0';
+        if (buf[0] != '\0') {
+            strncpy(proj_name, buf, sizeof(proj_name) - 1);
+            proj_name[sizeof(proj_name) - 1] = '\0';
+        }
+    }
+    printf("正在初始化项目「%s」...\n", proj_name);
+
+    /* 生成 vus.json（名称取用户输入） */
+    char json_content[2048];
+    snprintf(json_content, sizeof(json_content),
         "{\n"
-        "    \"name\": \"我的项目\",\n"
+        "    \"name\": \"%s\",\n"
         "    \"version\": \"0.1.0\",\n"
         "    \"风格\": \"函数\",\n"
         "    \"语言插件\": \"\",\n"
@@ -455,10 +477,8 @@ static int vus_init(int force) {
         "        \"优化\": \"速度\",\n"
         "        \"ARM版本\": \"ARM64\"\n"
         "    }\n"
-        "}\n";
-
-    char json_content[2048];
-    snprintf(json_content, sizeof(json_content), "%s", json_template);
+        "}\n",
+        proj_name);
 
     FILE *fp = fopen("vus.json", "w");
     if (!fp) {
@@ -476,10 +496,19 @@ static int vus_init(int force) {
         int is_dir;
         const char *content;
     } items[] = {
-        {"main.vus", 0, "#// 主程序入口\n\n"},
+        {"main.vus", 0,
+            "#// 主程序入口（VUS 函数风格）\n"
+            "\n"
+            "定义 问候(名字):\n"
+            "    打印(\"你好，\" .. 名字 .. \"！\")\n"
+            "结束\n"
+            "\n"
+            "问候(\"世界\")   # 运行: vus run main.vus\n"
+            "# 更多语法请参考教程 docs/TUTORIAL.md 与语言参考 docs/LANGUAGE_REFERENCE.md\n"},
         {"测试", 1, NULL},
         {"构建", 1, NULL},
         {"libs", 1, NULL},
+        {"资源", 1, NULL},
         {NULL, 0, NULL}
     };
 
@@ -502,9 +531,10 @@ static int vus_init(int force) {
     }
 
     printf("\n项目初始化完成！\n");
-    printf("运行 `vus build --c-only main.vus` 编译为 C 代码。\n");
-    printf("运行 `vus build --exe main.vus` 编译为可执行文件。\n");
-    printf("运行 `vus run main.vus` 编译并运行。\n");
+    printf("快速开始：\n");
+    printf("  vus run main.vus          # 编译并运行（输出: 你好，世界！）\n");
+    printf("  vus build --exe main.vus  # 编译为可执行文件\n");
+    printf("  vus test                  # 运行「测试/」目录下的用例\n");
 
     return 0;
 }
@@ -642,21 +672,25 @@ static int vus_test(void) {
 /* ============ 帮助信息 ============ */
 
 static void print_help(void) {
-    printf("VUS 编译器 v0.1\n");
+    printf("VUS 编译器 v%s\n", VUS_VERSION_STR);
     printf("用法: vus <命令> [选项]\n\n");
-    printf("命令:\n");
-    printf("  build --c-only <file>   编译为 C 代码\n");
+    printf("编译与运行:\n");
+    printf("  run           <file>   编译并运行\n");
+    printf("  run --debug   <file>   编译并以调试模式运行（含栈追踪）\n");
+    printf("  build --c-only <file>  仅编译为 C 代码\n");
     printf("  build --exe   <file>   编译为可执行文件\n");
     printf("  build --apk   <file>   编译为 Android APK 项目\n");
     printf("                [--ndk-path <路径>] [--app-name <名称>] [--output <目录>]\n");
-    printf("  run           <file>   编译并运行\n");
-    printf("  run --debug   <file>   编译并以调试模式运行\n");
-    printf("  init                   交互式项目初始化\n");
-    printf("  test                   运行测试\n");
-    printf("  lang list              列出已安装语言插件\n");
+    printf("  test                   运行「测试/」目录下的测试用例\n\n");
+    printf("项目管理:\n");
+    printf("  init [--force]         交互式项目初始化\n");
+    printf("  update                 自动更新编译器（git 拉取或预编译包）\n");
+    printf("  chart <音频> [-o 文件] 生成体感音游谱面 chart.json\n\n");
+    printf("插件:\n");
+    printf("  lang list              列出已安装语言插件（.vulage）\n");
     printf("  lang load <文件>       加载语言插件\n");
     printf("  lang info <名称>       查看语言插件信息\n");
-    printf("  vux install <源>       安装 .vux 插件\n");
+    printf("  vux install <源>       安装 .vux 功能插件\n");
     printf("  vux build   [目录]     打包 .vux 插件\n");
     printf("  vux info    <插件>     查看插件信息\n");
     printf("  vux list               列出已安装插件\n");
@@ -664,18 +698,18 @@ static void print_help(void) {
     printf("  vusx list              列出项目中的 vusx 依赖\n");
     printf("  vusx info   <路径>     查看 vusx 插件信息\n");
     printf("  vusx build  <路径>     编译 vusx 插件\n");
-    printf("  chart <音频> [-o 文件] 生成体感音游谱面 chart.json\n");
-    printf("  update                 自动更新编译器\n");
+    printf("  vaz expand <页面目录> -v <包.vaz|目录>   展开 .vaz 扩展包\n\n");
+    printf("开发服务:\n");
+    printf("  lsp                    启动语言服务器（JSON-RPC 补全）\n");
     printf("  --version, -v          显示版本信息\n");
     printf("  --help, -h             显示此帮助\n\n");
     printf("示例:\n");
     printf("  vus init\n");
-    printf("  vus build --c-only main.vus\n");
-    printf("  vus build --exe main.vus\n");
     printf("  vus run main.vus\n");
+    printf("  vus build --exe main.vus\n");
     printf("  vus test\n");
-    printf("  vux install 示例\n");
-    printf("  vux list\n");
+    printf("  vus vux list\n");
+    printf("  vus chart 歌曲.mp3 -o 歌曲.chart.json\n");
 }
 
 /* ============ main 函数 ============ */
@@ -693,7 +727,7 @@ int main(int argc, char *argv[]) {
 
     /* --version */
     if (strcmp(cmd, "--version") == 0 || strcmp(cmd, "-v") == 0) {
-        printf("VUS 编译器 v0.1\n");
+        printf("VUS 编译器 v%s\n", VUS_VERSION_STR);
         printf("ABI 版本: %d.%d.%d\n",
                VUS_ABI_VERSION_MAJOR, VUS_ABI_VERSION_MINOR, VUS_ABI_VERSION_PATCH);
         return 0;

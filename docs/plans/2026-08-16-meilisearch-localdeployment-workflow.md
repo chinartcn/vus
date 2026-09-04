@@ -1,3 +1,7 @@
+> 文档版本：v1.0_apk（APK 功能时代）
+> 最后更新时间：2026-09-04
+
+
 ---
 intent: 为 VUS 提供 meilisearch_localdeployment 功能拓展包，可在本机部署并管理 Meilisearch 搜索服务（优先 Docker、回退官方二进制），并深度集成到 meilisearch 插件。
 success_criteria: 拓展可 build 成 .vux 包；支持 Docker/二进制两种部署；提供 安装/启动/停止/重启/状态/卸载/更新/日志/配置/集成 命令；多实例；`部署 集成` 生成 meilisearch config.json；单元测试覆盖平台解析/命令路由/config.json 生成/回退决策。

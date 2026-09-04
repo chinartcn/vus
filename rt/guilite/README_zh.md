@@ -1,3 +1,7 @@
+> 文档版本：v1.0_apk（APK 功能时代）
+> 最后更新时间：2026-09-04
+
+
 # 歡迎蒞臨 GUI-lite
 <p align="center">
     <img src="documents/logo.png" alt="Logo"/>

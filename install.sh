@@ -26,7 +26,7 @@ echo -ne "      \033[48;5;25m \033[48;5;26m    \033[0m   \033[48;5;26m \033[48;5
 echo -ne "       \033[48;5;25m \033[48;5;26m       \033[48;5;31m  \033[0m                                                       \033[0m"
 echo -ne "          \033[48;5;26m      \033[48;5;31m \033[0m                                                       \033[0m"
 echo ""
-echo -e "\033[36m  VUS 编程语言 — 安装工具 v1.0-beta\033[0m"
+echo -e "\033[36m  VUS 编程语言 — 安装工具 v3.0.20260904150204（正式版）\033[0m"
 echo -e "\033[36m  中西合璧，天下无敌\033[0m"
 echo -e "\033[36m============================================\033[0m"
 echo ""
@@ -40,6 +40,20 @@ progress() {
         sleep 0.1
     done
     printf "\n"
+}
+
+# 探测 GUI 图形运行时能否编译（libpng + FreeType 头）：
+# 用 gcc 预处理器 + pkg-config 探测，覆盖非默认头目录（如 /usr/include/freetype2）；
+# 与 Makefile / build_release.sh 的判定保持一致。gcc 不可用时视为缺失（会走核心依赖安装）。
+has_gui_headers() {
+    if ! command -v gcc >/dev/null 2>&1; then
+        return 1
+    fi
+    if ! printf '#include <png.h>\n' | gcc -x c -E - >/dev/null 2>&1; then
+        return 1
+    fi
+    FREETYPE_CFLAGS="$(pkg-config --cflags freetype2 2>/dev/null || true)"
+    printf '#include <ft2build.h>\n' | gcc -x c -E $FREETYPE_CFLAGS - >/dev/null 2>&1
 }
 
 echo ""
@@ -144,31 +158,44 @@ if [ "$INSTALL_FROM_SOURCE" -eq 1 ]; then
     DETECT_UPDATE=""
     DETECT_INSTALL=""
     DETECT_GROUP=""
+    DETECT_GUI_GROUP=""
     case "$ID" in
-        alpine)                       # musl libc：build-base 提供 gcc/make/musl-dev(头文件)
+        alpine)                       # musl libc：build-base 提供 gcc/make/musl-dev(头文件) 与 g++
             DETECT_UPDATE="apk update"
             DETECT_INSTALL="apk add"
             DETECT_GROUP="build-base git"
+            DETECT_GUI_GROUP="libpng-dev freetype-dev libx11-dev"
             ;;
         debian|ubuntu|linuxmint)
             DETECT_UPDATE="apt-get update"
             DETECT_INSTALL="apt-get install -y"
             DETECT_GROUP="build-essential git"
+            DETECT_GUI_GROUP="libpng-dev libfreetype-dev libx11-dev g++"
             ;;
         centos|rhel|fedora|rocky|almalinux)
             DETECT_INSTALL="dnf install -y"
             DETECT_GROUP="gcc make glibc-devel git"
+            DETECT_GUI_GROUP="libpng-devel freetype-devel libX11-devel gcc-c++"
             ;;
         arch|manjaro|endeavouros)
             DETECT_UPDATE="pacman -Sy"
             DETECT_INSTALL="pacman -S --noconfirm"
             DETECT_GROUP="base-devel git"
+            DETECT_GUI_GROUP="libpng freetype2 libx11"
             ;;
         opensuse*|sles)
             DETECT_INSTALL="zypper install -y"
             DETECT_GROUP="gcc make glibc-devel git"
+            DETECT_GUI_GROUP="libpng-devel freetype2-devel libX11-devel gcc-c++"
             ;;
     esac
+
+    # 检测 GUI 图形依赖是否已具备（libpng + FreeType 开发头，gcc 探测）：
+    # 已具备 → 编译阶段会自动 make all 构建 GUI 运行时；缺失 → 询问是否补装
+    GUI_HEADERS_PRESENT=0
+    if has_gui_headers; then
+        GUI_HEADERS_PRESENT=1
+    fi
 
     echo "检查依赖..."
     if [ -n "$DETECT_GROUP" ]; then
@@ -228,6 +255,43 @@ if [ "$INSTALL_FROM_SOURCE" -eq 1 ]; then
     else
         echo "  ⚠️  未能自动识别系统 ($ID)，请手动确认已安装: git / gcc / make / libc 头文件"
     fi
+
+    # ---------- GUI 图形依赖（可选） ----------
+    # 规则：
+    #   VUS_GUI=1   → 无条件安装 GUI 依赖（自动，适合脚本化）
+    #   VUS_GUI=0   → 跳过（默认）
+    #   VUS_GUI 未设置且为交互终端 → 询问一次是否需要 GUI 图形支持
+    if [ -n "$DETECT_GUI_GROUP" ] && [ "$GUI_HEADERS_PRESENT" -ne 1 ]; then
+        WANT_GUI=""
+        if [ "$VUS_GUI" = "1" ]; then
+            WANT_GUI="1"
+        elif [ "$VUS_GUI" != "0" ] && [ -t 1 ]; then
+            printf "  GUI 图形支持（图形_* 画布流）需要 libpng/libfreetype/X11 开发包，是否一并安装? [y/N] "
+            read -r gans
+            case "$gans" in
+                y|Y) WANT_GUI="1" ;;
+            esac
+        fi
+
+        if [ "$WANT_GUI" = "1" ]; then
+            PRFX=""
+            [ "$(id -u)" = "0" ] || PRFX="sudo "
+            echo "  安装 GUI 图形依赖: $DETECT_INSTALL $DETECT_GUI_GROUP"
+            if [ -n "$DETECT_UPDATE" ]; then
+                ${PRFX}${DETECT_UPDATE} || true
+            fi
+            if ${PRFX}${DETECT_INSTALL} $DETECT_GUI_GROUP; then
+                echo "  ✅ GUI 图形依赖安装完成（将构建含 GUI 的完整运行时）"
+            else
+                echo "  ⚠️  GUI 依赖安装失败（不影响核心安装，可稍后手动安装后重跑本脚本）"
+            fi
+        elif [ "$VUS_GUI" = "1" ]; then
+            : # 已尝试安装 VUS_GUI 明确要求
+        else
+            echo "  （跳过 GUI 图形依赖；如需 GUI 功能，可设置 VUS_GUI=1 重跑本脚本，"
+            echo "    或在安装后安装 libpng-dev/libfreetype-dev/libx11-dev 再 make all）"
+        fi
+    fi
     echo ""
 
     # 克隆仓库
@@ -251,20 +315,22 @@ if [ "$INSTALL_FROM_SOURCE" -eq 1 ]; then
     echo "编译 VUS 编译器..."
     # 核心目标 `vus`（编译器 + LSP）只依赖 libc，任何系统都能编。
     # GUI 图形运行时(rt/guilite)额外依赖 libpng / FreeType / 桌面 X11，
-    # 仅在检测到 png.h + ft2build.h 时才尝试全量构建(包含 GUI)，否则跳过，
+    # 仅在检测到对应开发头时才尝试全量构建(包含 GUI)，否则跳过，
     # 避免在缺少图形库或不支持桌面的系统(如 ACode 的 Alpine)上编译失败。
-    if [ -f /usr/include/png.h ] || [ -f /usr/local/include/png.h ]; then
+    if has_gui_headers; then
         MAKE_TARGET="all"
-        echo "  (检测到 libpng，构建含 GUI 图形运行时)"
+        echo "  (检测到 libpng/libfreetype，构建含 GUI 图形运行时)"
     else
         MAKE_TARGET="vus"
-        echo "  (未检测到 libpng，仅构建编译器+LSP，跳过 GUI 运行时)"
+        echo "  (未检测到 GUI 依赖，仅构建编译器+LSP，跳过 GUI 运行时)"
+        echo "  提示: 如需 GUI 功能，请安装 libpng-dev libfreetype-dev libx11-dev 后重跑本脚本"
     fi
     progress "编译中..."
     if make -C "$INSTALL_DIR" "$MAKE_TARGET" 2>&1; then
         echo "  ✅ 编译成功"
     else
         echo "  ❌ 编译失败"
+        echo "    若是在安装 GUI 依赖后仍失败，可尝试: make -C $INSTALL_DIR vus"
         exit 1
     fi
 
