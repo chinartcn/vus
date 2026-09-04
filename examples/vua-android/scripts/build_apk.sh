@@ -57,7 +57,10 @@ if [ ! -f "$VUS_C" ] || [ "$TESTDATA_SRC/vua_test.vus" -nt "$VUS_C" ]; then
   rm -f "$TESTDATA_SRC/构建/vua_test.c"
   ( cd "$TESTDATA_SRC" && "$VUS_BIN" build --c-only vua_test.vus >/dev/null 2>&1 )
   cp "$TESTDATA_SRC"/构建/vua_test.c "$VUS_C"
-  sed -i 's/^int main(void)/int vus_main(void)/' "$VUS_C"
+  # generator 现生成 main(int argc, char** argv) + vus_cli_init(argc, argv)；
+  # APK 场景按 jni_bridge 的 `extern int vus_main(void)` 约定改名，并清空 CLI 参数。
+  sed -i -e 's/^int main(.*)/int vus_main(void)/' \
+         -e 's/vus_cli_init(argc, argv)/vus_cli_init(0, NULL)/' "$VUS_C"
 fi
 
 # ---------- 1. 编译 native .so ----------
