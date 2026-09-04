@@ -1,6 +1,6 @@
 {
-  "versionCode": 15,
-  "versionName": "2.4",
+  "versionCode": 16,
+  "versionName": "2.5",
   "apkUrl": "https://gitee.com/rtccn_mc/vus/raw/master/testdata/VUS.apk",
-  "changelog": "修复 2.3 空屏：渲染树指纹转 jlong 未屏蔽符号位，负指纹被误判为无屏"
+  "changelog": "修复空屏：1) 渲染树校验放宽——未知控件/字段降级为占位透传，不再整屏加载失败白屏；2) 整树以 byte[] 传输 + View diff 增量更新 + 页面缓存，渲染更快"
 }

@@ -65,6 +65,8 @@ struct VusString {
 
 VusString* vus_string_new(const char* s);
 VusString* vus_string_new_len(const char* s, int len);
+/* 字符串驻留：高频重复键名/常量返回缓存实例（借用语义，调用方 vus_unref 归还） */
+VusString* vus_string_intern(const char* s);
 VusString* vus_string_concat(VusString* a, VusString* b);
 VusString* vus_string_slice(VusString* s, int start, int len);
 int vus_string_len(VusString* s);

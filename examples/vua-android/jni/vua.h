@@ -115,6 +115,9 @@ void vua_screen_free(VuaScreen *screen);
 /* 屏名（通常为 .vua 文件名），供 vua_session_back_to 匹配；无返回 NULL。 */
 const char *vua_screen_name(VuaScreen *screen);
 
+/* 屏序号：push 时唯一分配，用于 View diff 判断"是否还是同一屏"。 */
+uint64_t vua_screen_seq(VuaScreen *screen);
+
 /* ============ 规范化渲染树（native → Java） ============ */
 
 /*
@@ -139,6 +142,10 @@ VusDict *vua_state(VuaScreen *screen);
 
 /* 写入 变量 = 值。var 为变量名，val 为 VUA 值（VusString* 或 VusObject*）。 */
 void vua_state_set(VuaScreen *screen, VusString *var, void *val);
+
+/* 高频路径：变量名直接给 C 串（走字符串驻留，避免每次重建 VusString 键）。 */
+void vua_state_set_cstr(VuaScreen *screen, const char *var, void *val);
+VusString *vua_state_get_or_empty_cstr(VuaScreen *screen, const char *var);
 
 /* 读取 变量的当前值；变量不存在返回 NULL。 */
 void *vua_state_get(VuaScreen *screen, VusString *var);

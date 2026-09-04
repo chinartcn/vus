@@ -233,10 +233,10 @@ public final class VuaBridge {
     public static native int vuaInit();
 
     /**
-     * native：返回当前屏（栈顶）的规范化渲染树 JSON；无屏/失败返回 null。
-     * 返回的字符串在 native 侧缓存所有（不得释放），Java 无需处理。
+     * native：返回当前屏（栈顶）的规范化渲染树 JSON 字节（UTF-8）；无屏返回 null。
+     * 以 byte[] 传输省去 NewStringUTF 全量校验/转换；字符串在 native 侧缓存所有。
      */
-    public static native String vuaRenderTree();
+    public static native byte[] vuaRenderTreeBytes();
 
     /**
      * native：返回当前屏渲染树的内容指纹（版本号协议）。
@@ -244,6 +244,12 @@ public final class VuaBridge {
      * 无屏返回 -1。
      */
     public static native long vuaRenderHash();
+
+    /**
+     * native：当前屏序号（View diff）。序号不变 = 仍是同一屏（仅变量值变化，
+     * 可增量更新文本控件）；变化 = 换页。无屏返回 -1。
+     */
+    public static native long vuaScreenId();
 
     /**
      * native：设置 VUS/VUA 运行时的工作目录（应传 Context.getFilesDir()）。

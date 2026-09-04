@@ -34,6 +34,7 @@ import android.widget.TextView;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -46,15 +47,20 @@ public final class VuaRenderer {
     private static final int BG_LIGHT      = 0xFFF5F6FA; // 页面浅灰底（Material Light windowBackground）
     private static final int PAGE_CACHE_MAX = 6;          // 页面 View 缓存上限（LRU 逐出）
 
-    /** 页面 View 缓存条目：已构建好的整棵子树 + 输入控件快照。
-     *  缓存命中（重新进入同一页面且渲染树内容相同）时直接挂回 root，
-     *  跳过 JSON 解析与整树 View 重建；输入控件真实状态随 View 保留。 */
+    /** 页面 View 缓存条目：已构建好的整棵子树 + 输入控件/变量文本/变量值快照。
+     *  缓存命中（重新进入同一页面且内容相同）时直接挂回 root，跳过 JSON 解析与
+     *  整树 View 重建；输入控件真实状态随 View 保留。 */
     private static final class PageCache {
         final View view;
         final Map<String, View> inputs;
-        PageCache(View view, Map<String, View> inputs) {
+        final Map<String, TextView> varTexts;
+        final Map<String, String> lastVars;
+        PageCache(View view, Map<String, View> inputs,
+                  Map<String, TextView> varTexts, Map<String, String> lastVars) {
             this.view = view;
             this.inputs = inputs;
+            this.varTexts = varTexts;
+            this.lastVars = lastVars;
         }
     }
 
@@ -62,8 +68,11 @@ public final class VuaRenderer {
     private final ViewGroup root;              // 把重建的 View 树放进这里
     private final Map<String, View> inputs;    // id -> 输入控件（供手机回填/取值）
     private final Map<String, String> savedVals; // variable/id -> 上次输入值（重建时恢复控件状态）
+    private final Map<String, TextView> varTexts; // variable -> 普通文本控件（View diff 增量更新用）
+    private final Map<String, String> lastVars;   // variable -> 上次显示的变量值（diff 基准）
     private boolean darkTheme = false;
     private long lastFp = -2L;                 // 当前显示内容的指纹（-2 初始占位，强制首帧）
+    private long lastScreenId = -2L;           // 当前显示内容的屏序号（判断是否同一屏）
     private final LinkedHashMap<Long, PageCache> pageCache; // 渲染树指纹 -> 已构建 View（LRU）
 
     public VuaRenderer(Context ctx, ViewGroup root) {
@@ -71,45 +80,63 @@ public final class VuaRenderer {
         this.root = root;
         this.inputs = new HashMap<>();
         this.savedVals = new HashMap<>();
+        this.varTexts = new HashMap<>();
+        this.lastVars = new HashMap<>();
         this.pageCache = new LinkedHashMap<>(16, 0.75f, true);   // accessOrder=true → LRU
     }
 
-    /** 版本号协议：native 只传内容指纹，据此决定动作，命中时连渲染树 JSON 都不取。
+    /** 版本号协议 + View diff：仅凭指纹/屏序号决定动作。
      *  1) 指纹与当前显示相同 → 零工作量；
-     *  2) 页面 View 缓存命中（重新进入同页且内容未变，可跨屏实例）→ 直接显缓存；
-     *  3) 未命中 → 取整树 JSON 解析构建，构建结果按指纹入 LRU 缓存。
+     *  2) 页面 View 缓存命中（换页 + 内容未变，可跨屏实例）→ 直接显缓存；
+     *  3) 同一屏（屏序号不变）→ 变量文本增量更新（View diff，只 setText 变化的控件）；
+     *  4) 其余 → 取整树 JSON 解析构建，构建结果按指纹入 LRU 缓存。
      *  无屏指纹 < 0 → 显示空界面占位。 */
     public void render(long fp) {
         if (fp == lastFp) return;                           // 当前内容未变
+        long sid = fp >= 0 ? VuaBridge.vuaScreenId() : -1;
         if (fp >= 0) {
-            PageCache hit = pageCache.get(fp);              // 命中（get 自动 LRU 置新）
+            PageCache hit = pageCache.get(fp);              // 换页缓存命中（get 自动 LRU 置新）
             if (hit != null) {
-                root.removeAllViews();
-                root.addView(hit.view, matchWrap());
-                inputs.clear();
-                inputs.putAll(hit.inputs);                  // 输入控件引用随缓存恢复
-                lastFp = fp;
+                swapPage(hit, fp, sid);
                 return;
+            }
+            if (sid == lastScreenId && lastScreenId >= 0) {
+                /* 同一屏、内容变化 → View diff：先取新树尝试仅更新变化的文本 */
+                try {
+                    byte[] raw = VuaBridge.vuaRenderTreeBytes();
+                    if (raw != null) {
+                        JSONObject parsed = new JSONObject(new String(raw, StandardCharsets.UTF_8));
+                        if (tryVarUpdate(parsed)) {
+                            lastFp = fp;                    // 文本已同步，当前内容即新指纹
+                            return;
+                        }
+                    }
+                } catch (Exception ignored) { }
             }
         }
         saveInputs();
         root.removeAllViews();
         lastFp = fp;
+        lastScreenId = sid;
         if (fp < 0) {
             root.addView(TextView(ctx, "(空界面)"));
             return;
         }
-        String tree = VuaBridge.vuaRenderTree();
+        byte[] raw = VuaBridge.vuaRenderTreeBytes();
+        String tree = raw == null ? null : new String(raw, StandardCharsets.UTF_8);
         try {
             if (tree == null || tree.isEmpty()) throw new Exception("空渲染树");
             JSONObject parsed = new JSONObject(tree);
             darkTheme = "dark".equalsIgnoreCase(parsed.optString("主题", parsed.optString("theme", "light")));
             root.setBackgroundColor(darkTheme ? 0xFF121212 : BG_LIGHT);
             /* 先构建到透明包装容器，整棵子树才能脱离 root 缓存复用 */
+            varTexts.clear();
             LinearLayout wrapper = new LinearLayout(ctx);
             wrapper.setOrientation(LinearLayout.VERTICAL);
             buildInto(parsed, wrapper);
             root.addView(wrapper, matchWrap());
+            lastVars.clear();
+            lastVars.putAll(collectVars(parsed, new HashMap<String, String>()));
             cachePage(fp, wrapper);
         } catch (Exception e) {
             String msg = "渲染失败: " + e.getMessage();
@@ -119,11 +146,65 @@ public final class VuaRenderer {
 
     /** 页面 View 入缓存（以指纹为 key，LRU，超出上限逐出最久未用的页）。 */
     private void cachePage(long fp, View view) {
-        pageCache.put(fp, new PageCache(view, new HashMap<>(inputs)));
+        pageCache.put(fp, new PageCache(view, new HashMap<>(inputs),
+                new HashMap<>(varTexts), new HashMap<>(lastVars)));
         while (pageCache.size() > PAGE_CACHE_MAX) {
             long eldest = pageCache.keySet().iterator().next();
             pageCache.remove(eldest);
         }
+    }
+
+    /** 换页缓存命中：挂回该页 View，并恢复输入/变量文本/变量值快照。 */
+    private void swapPage(PageCache hit, long fp, long sid) {
+        root.removeAllViews();
+        root.addView(hit.view, matchWrap());
+        inputs.clear();
+        inputs.putAll(hit.inputs);
+        varTexts.clear();
+        varTexts.putAll(hit.varTexts);
+        lastVars.clear();
+        lastVars.putAll(hit.lastVars);
+        lastFp = fp;
+        lastScreenId = sid;
+    }
+
+    /** View diff：新树只更新"变量文本"值变化的部分；若变化涉及非文本控件则
+     *  退化返回 false（调用方走全量重建）。文本变化成功返回 true。 */
+    private boolean tryVarUpdate(JSONObject tree) {
+        Map<String, String> next = collectVars(tree, new HashMap<String, String>());
+        boolean changed = false;
+        for (Map.Entry<String, String> e : next.entrySet()) {
+            String old = lastVars.get(e.getKey());
+            if (old == null || !old.equals(e.getValue())) { changed = true; break; }
+        }
+        if (!changed) return false;                 // 变量未变却指纹不同 → 安全退化全量
+        for (Map.Entry<String, String> e : next.entrySet()) {
+            String old = lastVars.get(e.getKey());
+            if (old != null && old.equals(e.getValue())) continue;
+            TextView tv = varTexts.get(e.getKey());
+            if (tv == null) return false;           // 变化变量不是普通文本 → 退化全量
+            tv.setText(e.getValue());
+        }
+        lastVars.clear();
+        lastVars.putAll(next);
+        return true;
+    }
+
+    /** 递归收集渲染树中所有 variable → 显示值。 */
+    private static Map<String, String> collectVars(JSONObject node, Map<String, String> out) {
+        String variable = node.optString("variable", "");
+        if (!variable.isEmpty()) {
+            out.put(variable, node.optString("内容", node.optString("value", "")));
+        }
+        JSONArray ch = node.optJSONArray("children");
+        if (ch == null) ch = node.optJSONArray("子组件");
+        if (ch != null) {
+            for (int i = 0; i < ch.length(); i++) {
+                JSONObject c = ch.optJSONObject(i);
+                if (c != null) collectVars(c, out);
+            }
+        }
+        return out;
     }
 
     /* ---------- 分发 ---------- */
@@ -211,6 +292,9 @@ public final class VuaRenderer {
         // 标题类文本用主题主色，正文保持正文色
         if (styleB == Typeface.BOLD) t.setTextColor(darkTheme ? 0xFF8FB4FF : COLOR_PRIMARY);
         rememberInput(node, t);
+        // View diff：登记变量绑定文本，供同屏增量更新（只 setText 变化的部分）
+        String variable = node.optString("variable", "");
+        if (!variable.isEmpty()) varTexts.put(variable, t);
         return t;
     }
 
