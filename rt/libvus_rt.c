@@ -27,6 +27,15 @@ void vus_unref(void* obj) {
     }
 }
 
+/* 变量赋值热路径：*slot = v（v/旧值均可 NULL）。生成器把原先
+ * { _tmp = v; vus_ref(_tmp); vus_unref(*slot); *slot = _tmp; } 收敛成一行。 */
+void vus_var_set(VusString** slot, VusString* v) {
+    if (!slot) return;
+    if (v) vus_ref(v);
+    if (*slot) vus_unref(*slot);
+    *slot = v;
+}
+
 // ============ 字符串 ============
 
 VusString* vus_string_new(const char* s) {
@@ -36,16 +45,13 @@ VusString* vus_string_new(const char* s) {
 }
 
 VusString* vus_string_new_len(const char* s, int len) {
-    VusString* str = (VusString*)malloc(sizeof(VusString));
+    /* 单块分配：头 + 负载一次 malloc（data 指向块尾），省一次 malloc 与释放 */
+    VusString* str = (VusString*)malloc(sizeof(VusString) + (size_t)len + 1);
     if (!str) return NULL;
     str->ref = 1;
     str->len = len;
-    str->data = (char*)malloc(len + 1);
-    if (!str->data) {
-        free(str);
-        return NULL;
-    }
-    memcpy(str->data, s, len);
+    str->data = (char*)(str + 1);
+    if (s && len > 0) memcpy(str->data, s, (size_t)len);
     str->data[len] = '\0';
     return str;
 }
@@ -113,12 +119,11 @@ VusString* vus_string_intern(const char* s) {
 
 /* 分配指定长度、data 未初始化的新串（ref=1；调用方自行填充 data）。 */
 static VusString* vus_string_new_raw(int len) {
-    VusString* s = (VusString*)malloc(sizeof(VusString));
+    VusString* s = (VusString*)malloc(sizeof(VusString) + (size_t)len + 1);
     if (!s) return NULL;
     s->ref = 1;
     s->len = len;
-    s->data = (char*)malloc((size_t)len + 1);
-    if (!s->data) { free(s); return NULL; }
+    s->data = (char*)(s + 1);
     return s;
 }
 
@@ -716,13 +721,34 @@ int64_t vus_to_int(VusString* s, int* err) {
     return result;
 }
 
+/* 整数 → 字符串驻留缓存（同 vus_string_intern 借用语义）：热循环里 _i/计数器
+ * 的 vus_to_string(N) 命中缓存实例，免每次 malloc+复制。VusString 内容不可变。
+ * 返回 ref+1 借用（调用方 vus_unref 归还）；缓存自身持保底引用，换出时释放。 */
+#define VUS_NUMSTR_SLOTS 128
+static VusString *g_numstr_pool[VUS_NUMSTR_SLOTS];
+
 VusString* vus_to_string(int64_t n) {
     char buf[64];
     int len = snprintf(buf, sizeof(buf), "%lld", (long long)n);
     if (len < 0) len = 0;
     if (len >= (int)sizeof(buf)) len = (int)sizeof(buf) - 1;
-    /* 用 snprintf 返回值做长度，免 vus_string_new 内二次 strlen 扫描 */
-    return vus_string_new_len(buf, len);
+
+    unsigned slot = ((unsigned)n * 2654435761u) % VUS_NUMSTR_SLOTS;
+    VusString *cached = g_numstr_pool[slot];
+    if (cached && cached->len == len && memcmp(cached->data, buf, (size_t)len) == 0) {
+        vus_ref(cached);               /* 本次借用 */
+        return cached;
+    }
+    VusString *nv = vus_string_new_len(buf, len);
+    if (!nv) return NULL;
+    if (g_numstr_pool[slot]) {         /* 换出旧驻留 */
+        VusString *old = g_numstr_pool[slot];
+        g_numstr_pool[slot] = NULL;
+        vus_unref(old);
+    }
+    g_numstr_pool[slot] = nv;          /* 缓存保底引用 */
+    vus_ref(nv);                       /* 本次借用（调用方 unref 归还） */
+    return nv;
 }
 
 // vus_compare：比较两个字符串。若两者都能解析为整数则按数值比较，

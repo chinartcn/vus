@@ -29,9 +29,7 @@ void vus_unref(void *obj) {
     }
     int *r = (int *)obj;
     if (--(*r) <= 0) {
-        VusString *s = (VusString *)obj;
-        if (s->data) free(s->data);
-        free(s);
+        free(obj); /* 单块分配：头 + data 一次 malloc，data 指向块内 */
     }
 }
 
@@ -39,12 +37,11 @@ void vus_unref(void *obj) {
 VusString *vus_string_new(const char *s) {
     if (!s) s = "";
     size_t l = strlen(s);
-    VusString *st = (VusString *)malloc(sizeof(VusString));
+    VusString *st = (VusString *)malloc(sizeof(VusString) + l + 1);
     if (!st) return NULL;
     st->ref = 1;
     st->len = (int)l;
-    st->data = (char *)malloc(l + 1);
-    if (!st->data) { free(st); return NULL; }
+    st->data = (char *)(st + 1);
     memcpy(st->data, s, l + 1);
     return st;
 }
