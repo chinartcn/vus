@@ -1,12 +1,21 @@
 #!/usr/bin/env bash
-# build_apk.sh — 用 NDK + build-tools 手工编译 VUS APK（无需 Gradle）
-# 用法: scripts/build_apk.sh [--abi arm64-v8a] [--ndk /workspace/android/ndk] [--sdk /workspace/android]
+# build_apk.sh — 用 NDK + build-tools 手工编译 VUS APK（无需 Gradle）、完整构建链
+# 用法: scripts/build_apk.sh [--abi arm64-v8a|armeabi-v7a|x86_64|all]
+#                            [--ndk /workspace/android/ndk] [--sdk /workspace/android]
+#
+# 依据反馈（docs/VUS开发体验反馈-安卓计算器APK.md §3）实现：
+#   P3/3.1 JNI 桥自动生成 + 符号核对：jni_bridge.c 由 scripts/gen_jni_bridge.py
+#         从 Java native 声明生成（符号随包名自动对齐），构建后 nm 校验 Java_* 导出。
+#   P4/3.3 JDK 版本探测与降级：优先 JDK8；JDK9+ 自动加 --release 8（d8/build-tools31 只认老 class）。
+#         --abi all 一次产出 arm64-v8a + armeabi-v7a + x86_64 打进同一 APK。
+#   P5/3.2 native 单一真源：rt/ 唯一，jni/ 不再留存 vua/libvus_rt/yyjson 副本
+#         （历史上 jni/ 副本与 rt/ 分叉导致改错源文件），构建全部从 rt/ 编译。
 #
 # 产物: <工作目录>/dist/VUS.apk  （可安装、已签名）
 set -euo pipefail
 
 # ---------- 参数 ----------
-ABI="${ABI:-arm64-v8a}"
+ABI="${ABI:-all}"
 NDK="${NDK:-/workspace/android/ndk}"
 SDK="${SDK:-/workspace/android}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"          # examples/vua-android
@@ -20,7 +29,9 @@ ASSETS="$ROOT/app/src/main/assets"
 MANIFEST="$ROOT/AndroidManifest.xml"
 
 VUS_C="${VUS_C:-$ROOT/build/vus_app.c}"            # 由 vua_test.vus 生成
-VUA_SRC="${VUA_SRC:-$ROOT/../../rt}"               # rt/ 目录(vua.c/libvus_rt.c/vus_coro.c/yyjson)
+VUA_SRC="${VUA_SRC:-$ROOT/../../rt}"               # native 运行时唯一真源（P5）
+GEN_BRIDGE="${GEN_BRIDGE:-$ROOT/../../scripts/gen_jni_bridge.py}"
+BRIDGE="$ROOT/jni/jni_bridge.c"                    # 生成产物（P3，勿手改）
 # 可选 .vaz 扩展包（插件式：目录含 vaz.json 即启用；逻辑依赖已在 vua_test.vus 用 导入 "包名" 声明）
 VAZ="${VAZ:-$TESTDATA_SRC/vaz/common-controls}"
 
@@ -28,17 +39,51 @@ VAZ="${VAZ:-$TESTDATA_SRC/vaz/common-controls}"
 BT="$SDK/bt/android-14"
 AJ="$SDK/platforms/android-34/android.jar"
 TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
-JAVAC="${JAVA_HOME:+$JAVA_HOME/bin/}javac"
+
+if [ "$ABI" = "all" ]; then
+    ABIS=(arm64-v8a armeabi-v7a x86_64)
+else
+    ABIS=("$ABI")
+fi
 
 WORK="$ROOT/build/tmp"
 STM="$ROOT/build/staged"
-LS="$ROOT/build/libs/$ABI"
 
 printf '== VUS APK build ==\n'
 printf '  ABI=%s  NDK=%s  SDK=%s\n' "$ABI" "$NDK" "$SDK"
-mkdir -p "$WORK" "$STM" "$LS"
+for a in "${ABIS[@]}"; do mkdir -p "$WORK/classes" "$STM"; done
+
+# ---------- JDK 探测与降级（P4/3.3） ----------
+# d8（build-tools 31）只认 class 文件 <= Java 11（实测 JDK 8 最稳；新版 d8 兼容差）。
+# 策略：有 JDK8 用 JDK8；否则用任意 JDK9+ 并加 --release 8 编出 class 52。
+find_javac() {
+    local c
+    for c in \
+        "${JAVA_HOME:-}/bin/javac" \
+        /root/.local/share/mise/installs/java/temurin-8.0/bin/javac \
+        /usr/lib/jvm/java-8-*/bin/javac \
+        /usr/lib/jvm/temurin-8*/bin/javac \
+        /usr/lib/jvm/adoptopenjdk-8*/bin/javac ; do
+        [ -n "$c" ] && [ -x "$c" ] && echo "$c" && return 0
+    done
+    command -v javac >/dev/null 2>&1 && command -v javac && return 0
+    return 1
+}
+JAVAC="$(find_javac)" || { echo "错误: 找不到 javac（设置 JAVA_HOME）" >&2; exit 1; }
+JAVA_VER="$("$JAVAC" -version 2>&1 | tr -d '"' | awk '{print $2}')"
+JAVA_MAJOR="$(echo "$JAVA_VER" | awk -F. '{print ($1==1)?$2:$1}')"
+JAVA_MAJOR="${JAVA_MAJOR:-0}"
+# 编译选项：JDK8 用 -source/target；JDK9+ 用 --release（生成 class 52，d8-31 可解）
+if [ "$JAVA_MAJOR" -ge 9 ]; then
+    JAVAC_ARGS=(--release 8)
+    echo "[jdk] $JAVAC ($JAVA_VER) 检测到 JDK9+，自动 --release 8 降级（d8 兼容）"
+else
+    JAVAC_ARGS=(-source 8 -target 8)
+    echo "[jdk] $JAVAC ($JAVA_VER) JDK8，直接 -source/-target 8"
+fi
 
 # ---------- 0. 同步资产（vua 页面 + 控件表以 testdata 为单一来源） ----------
+mkdir -p "$ASSETS"
 cp "$TESTDATA_SRC"/vua_home.vua "$TESTDATA_SRC"/vua_settings.vua \
    "$TESTDATA_SRC"/vua_logic.vua "$TESTDATA_SRC"/vua_class.vua \
    "$TESTDATA_SRC"/vua_controls.json "$ASSETS/"
@@ -50,14 +95,13 @@ if [ -d "$ROOT/plugins/dist" ]; then
 fi
 
 # ---------- 0b. 可选: .vaz 控件模板展开（无包则跳过，核心分层不变） ----------
+VUS_BIN="${VUS_BIN:-$ROOT/../../vus}"
 if [ -f "$VAZ/vaz.json" ]; then
-  VUS_BIN="${VUS_BIN:-$ROOT/../../vus}"
   echo "[0b] 展开 .vaz 控件模板: $VAZ"
   "$VUS_BIN" vaz expand "$ASSETS" -v "$VAZ"
 fi
 
 # ---------- 0c. 生成 vus_app.c（vua_test.vus 内 导入 "通用控件包" 由编译器自动展开） ----------
-VUS_BIN="${VUS_BIN:-$ROOT/../../vus}"
 if [ ! -f "$VUS_C" ] || [ "$TESTDATA_SRC/vua_test.vus" -nt "$VUS_C" ]; then
   echo "[0c/6] 由 vua_test.vus 生成 vus_app.c"
   rm -f "$TESTDATA_SRC/构建/vua_test.c"
@@ -69,38 +113,65 @@ if [ ! -f "$VUS_C" ] || [ "$TESTDATA_SRC/vua_test.vus" -nt "$VUS_C" ]; then
          -e 's/vus_cli_init(argc, argv)/vus_cli_init(0, NULL)/' "$VUS_C"
 fi
 
-# ---------- 0d. 同步 rt/vua.* + libvus_rt 到 jni（编译 native 前，保证声明/实现最新） ----------
-cp "$VUA_SRC/vua.c" "$VUA_SRC/vua.h" "$VUA_SRC/libvus_rt.c" "$VUA_SRC/libvus_rt.h" "$ROOT/jni/"
+# ---------- 0d. JNI 桥自动生成 + rt 单一真源校验（P3/P5） ----------
+echo "[0d] 生成 jni_bridge.c（由 Java native 声明自动生成）"
+mkdir -p "$(dirname "$BRIDGE")"
+python3 "$GEN_BRIDGE" --java "$JAVA_SRC" --class VuaBridge --bridge "$BRIDGE" 2>&1
+# P5 校验：jni/ 里任何残留的旧 rt 副本都不许再出现（历史上 vua.c/libvus_rt.c 两副本分叉，
+# 改错源文件；现构建全部从 rt/ 编译，jni/ 只留生成产物 jni_bridge.c）
+for f in vua.c vua.h libvus_rt.c libvus_rt.h; do
+  if [ -f "$ROOT/jni/$f" ]; then
+    echo "[0d] 清理残留旧副本 jni/$f —— rt/ 是唯一真源" >&2
+    rm -f "$ROOT/jni/$f"
+  fi
+done
 
-# ---------- 1. 编译 native .so ----------
-echo "[1/6] 编译 native ($ABI) -> libvus_app.so"
-case "$ABI" in
-  arm64-v8a) CC="$TC/aarch64-linux-android21-clang" ;;
-  armeabi-v7a) CC="$TC/armv7a-linux-androideabi21-clang" ;;
-  x86_64) CC="$TC/x86_64-linux-android21-clang" ;;
-  *) echo "未知 ABI: $ABI"; exit 1 ;;
-esac
-"$CC" -O2 -std=c11 -fPIC \
-  -I"$ROOT/jni" -I"$ROOT/jni/yyjson" -I"$ROOT/jni/easylogger/inc" -I"$VUA_SRC" \
-  "$ROOT/jni/jni_bridge.c" \
-  "$VUA_SRC/vua.c" \
-  "$VUA_SRC/libvus_rt.c" \
-  "$VUA_SRC/vus_coro.c" \
-  "$ROOT/jni/easylogger/src/elog.c" \
-  "$ROOT/jni/easylogger/src/elog_utils.c" \
-  "$ROOT/jni/easylogger/elog_port.c" \
-  "$VUS_C" \
-  "$VUA_SRC/yyjson/yyjson.c" \
-  -shared -o "$LS/libvus_app.so" -llog -lm
+# ---------- 1. 编译 native .so（rt/ 直接编译，多 ABI 循环） ----------
+for ABI in "${ABIS[@]}"; do
+  echo "[1/6] 编译 native ($ABI) -> libvus_app.so"
+  case "$ABI" in
+    arm64-v8a) CC="$TC/aarch64-linux-android21-clang" ;;
+    armeabi-v7a) CC="$TC/armv7a-linux-androideabi21-clang" ;;
+    x86_64) CC="$TC/x86_64-linux-android21-clang" ;;
+    *) echo "未知 ABI: $ABI"; exit 1 ;;
+  esac
+  LS="$ROOT/build/libs/$ABI"
+  mkdir -p "$LS"
+  "$CC" -O2 -std=c11 -fPIC \
+    -I"$ROOT/jni" -I"$VUA_SRC" -I"$VUA_SRC/easylogger/inc" \
+    "$ROOT/jni/jni_bridge.c" \
+    "$VUA_SRC/vua.c" \
+    "$VUA_SRC/libvus_rt.c" \
+    "$VUA_SRC/vus_coro.c" \
+    "$VUA_SRC/easylogger/src/elog.c" \
+    "$VUA_SRC/easylogger/src/elog_utils.c" \
+    "$VUA_SRC/elog_port.c" \
+    "$VUS_C" \
+    "$VUA_SRC/yyjson/yyjson.c" \
+    -shared -o "$LS/libvus_app.so" -llog -lm
 
-# ---------- 1b. 同步 rt/vua.* 到 jni（保证声明最新） ----------
-cp "$VUA_SRC/vua.c" "$VUA_SRC/vua.h" "$ROOT/jni/"
+  # ---- P3 符号核对：Java 声明 必须 全部在 .so 里导出 ----
+  if ! python3 "$GEN_BRIDGE" --expect --java "$JAVA_SRC" --class VuaBridge \
+     > "$WORK/jni_expect_$ABI.txt" 2>/dev/null; then
+    echo "[1] JNI 声明提取失败" >&2; exit 1
+  fi
+  NM="${TC}/llvm-nm"
+  [ -x "$NM" ] || NM="nm"
+  missing=0
+  while read -r sym; do
+    [ -z "$sym" ] && continue
+    if ! "$NM" -D --defined-only "$LS/libvus_app.so" | grep -q " T $sym$"; then
+      echo "  [JNI 校验] 缺少导出符号: $sym" >&2
+      missing=1
+    fi
+  done < "$WORK/jni_expect_$ABI.txt"
+  echo "  [JNI 校验] $ABI 导出 $(wc -l < "$WORK/jni_expect_$ABI.txt") 个 Java_* 符号${missing:+(缺失!)}"
+  [ "$missing" -eq 0 ] || { echo "JNI 符号校验失败，中止" >&2; exit 1; }
+done
 
 # ---------- 2. 编译 Java -> classes.dex ----------
 echo "[2/6] 编译 Java -> classes.dex"
-rm -rf "$WORK/classes"; mkdir -p "$WORK/classes"
-JAVA8="/root/.local/share/mise/installs/java/temurin-8.0/bin/javac"
-"$JAVA8" -cp "$AJ" -d "$WORK/classes" "$JAVA_SRC"/*.java 2>&1
+"$JAVAC" "${JAVAC_ARGS[@]}" -cp "$AJ" -d "$WORK/classes" "$JAVA_SRC"/*.java 2>&1
 rm -rf "$WORK/dex"; mkdir -p "$WORK/dex"
 "$BT/d8" --release --min-api 21 --output "$WORK/dex" "$WORK/classes"/com/vus/android/*.class
 
@@ -109,7 +180,11 @@ echo "[3/6] aapt 编译资源并打包"
 rm -rf "$STM"; mkdir -p "$STM" "$STM/lib" "$STM/assets"
 # classes.dex 必须放在 APK 根目录，否则安装时报 "code is missing"
 cp "$WORK/dex/classes.dex" "$STM/classes.dex"
-mkdir -p "$STM/lib/$ABI"; cp "$LS/libvus_app.so" "$STM/lib/$ABI/"
+# 多 ABI：全部打进 lib/<abi>/（P4）
+for ABI in "${ABIS[@]}"; do
+  mkdir -p "$STM/lib/$ABI"
+  cp "$ROOT/build/libs/$ABI/libvus_app.so" "$STM/lib/$ABI/"
+done
 cp "$ASSETS"/vua_home.vua "$ASSETS"/vua_settings.vua "$ASSETS"/vua_logic.vua \
    "$ASSETS"/vua_class.vua "$ASSETS"/vua_controls.json "$STM/assets/"
 cp "$ASSETS"/*.jpg "$ASSETS"/*.png "$STM/assets/" 2>/dev/null || true

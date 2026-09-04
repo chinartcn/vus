@@ -256,6 +256,7 @@ install: all
 	install -d /usr/local/share/vus/scripts
 	install -m 644 scripts/vux_plugin_manager.py /usr/local/share/vus/scripts/
 	install -m 644 scripts/vux_plugin_entry.py /usr/local/share/vus/scripts/
+	install -m 644 scripts/gen_jni_bridge.py /usr/local/share/vus/scripts/
 	install -d /usr/local/share/vus/examples
 	install -m 644 examples/hello.vus /usr/local/share/vus/examples/
 	install -d /usr/local/share/vus/include/vus

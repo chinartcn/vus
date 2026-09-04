@@ -364,31 +364,46 @@ VusApkResult vus_compile_to_apk(const char *file, VusConfig *config,
         copy_file(src, dst);
     }
 
-    /* 6. 生成 VUA JNI 桥接代码（examples/vua-android/jni_bridge.c → 当前包名） */
+    /* 6. 生成 VUA JNI 桥接代码。
+     * 首选：调用 scripts/gen_jni_bridge.py 从 Java native 声明自动生成（P3）——
+     * 符号名随实际包名 pkg_name 生成，包名怎么变都不再需要手改 jni_bridge.c，
+     * 消灭「手工对齐 JNI 符号 / 模板残留旧包名」类运行期崩溃。
+     * 回退：python3 不可用时走模板替换（examples/vua-android/jni_bridge.c）。 */
     {
         char tpl_dir[1024];
         snprintf(tpl_dir, sizeof(tpl_dir), "%s/../examples/vua-android", config->rt_dir);
-        char tpl[1024], dst[1024];
-        snprintf(tpl, sizeof(tpl), "%s/jni_bridge.c", tpl_dir);
+        char java_tpl[1024], dst[1024];
+        snprintf(java_tpl, sizeof(java_tpl), "%s/app/src/main/java/com/vus/android", tpl_dir);
         snprintf(dst, sizeof(dst), "%s/jni_bridge.c", jni_dir);
 
-        /* 包名 → JNI 各种写法（点/斜杠/下划线） */
-        char pkg_slash[256], pkg_under[256];
-        size_t k = 0;
-        for (size_t i = 0; pkg_name[i]; i++) pkg_slash[k++] = (pkg_name[i] == '.') ? '/' : pkg_name[i];
-        pkg_slash[k] = '\0';
-        k = 0;
-        for (size_t i = 0; pkg_name[i]; i++) pkg_under[k++] = (pkg_name[i] == '.') ? '_' : pkg_name[i];
-        pkg_under[k] = '\0';
+        char gen[3072];
+        snprintf(gen, sizeof(gen),
+                 "python3 \"%s/../scripts/gen_jni_bridge.py\" --java \"%s\" --package \"%s\" "
+                 "--class VuaBridge --bridge \"%s\" 2>&1",
+                 config->rt_dir, java_tpl, pkg_name, dst);
+        if (system(gen) != 0 || access(dst, F_OK) != 0) {
+            fprintf(stderr, "[vus-apk] JNI 桥自动生成失败，回退到模板替换（建议安装 python3）\n");
+            char tpl[1024];
+            snprintf(tpl, sizeof(tpl), "%s/jni_bridge.c", tpl_dir);
 
-        /* 分步替换：斜杠 JNI 类名、下划线符号名、点包名，最后落到 jni_bridge.c */
-        char tmp[1024];
-        snprintf(tmp, sizeof(tmp), "%s/_jb.c", jni_dir);
-        if (copy_file_subst(tpl, tmp, "com_vus_android", pkg_under) == 0 &&
-            copy_file_subst(tmp, dst, "com/vus/android", pkg_slash) == 0) {
-            remove(tmp);
-        } else {
-            remove(tmp);
+            /* 包名 → JNI 各种写法（点/斜杠/下划线） */
+            char pkg_slash[256], pkg_under[256];
+            size_t k = 0;
+            for (size_t i = 0; pkg_name[i]; i++) pkg_slash[k++] = (pkg_name[i] == '.') ? '/' : pkg_name[i];
+            pkg_slash[k] = '\0';
+            k = 0;
+            for (size_t i = 0; pkg_name[i]; i++) pkg_under[k++] = (pkg_name[i] == '.') ? '_' : pkg_name[i];
+            pkg_under[k] = '\0';
+
+            /* 分步替换：斜杠 JNI 类名、下划线符号名、点包名，最后落到 jni_bridge.c */
+            char tmp[1024];
+            snprintf(tmp, sizeof(tmp), "%s/_jb.c", jni_dir);
+            if (copy_file_subst(tpl, tmp, "com_vus_android", pkg_under) == 0 &&
+                copy_file_subst(tmp, dst, "com/vus/android", pkg_slash) == 0) {
+                remove(tmp);
+            } else {
+                remove(tmp);
+            }
         }
     }
 

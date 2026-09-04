@@ -1460,10 +1460,18 @@ static yyjson_mut_val* vus_json_vus_to_mut(yyjson_mut_doc* doc, void* obj) {
     }
 }
 
-/* JSON_解析：解析 JSON 字符串为结构化对象 */
-void* vus_json_parse(VusString* s) {
+/* JSON_解析：解析 JSON 字符串为结构化对象。
+ * 幂等（P7）：输入已是列表/字典（VusObject* TYPE_LIST/TYPE_DICT）时 ref+1 原样返回，
+ * 使旧写法 JSON_解析(文本_分割(...)) 在文本_分割 直接返回列表后依旧可用。 */
+void* vus_json_parse(void* s) {
     if (!s) return NULL;
-    yyjson_doc* doc = yyjson_read(vus_string_cstr(s), (size_t)vus_string_len(s), 0);
+    if (vus_is_object(s)) {
+        VusObject* o = (VusObject*)s;
+        if (o->type == TYPE_LIST || o->type == TYPE_DICT) { vus_ref(o); return o; }
+        return NULL;
+    }
+    /* 非容器：按 VusString* 的 JSON 文本解析 */
+    yyjson_doc* doc = yyjson_read(vus_string_cstr((VusString*)s), (size_t)vus_string_len((VusString*)s), 0);
     if (!doc) return NULL;
     yyjson_val* root = yyjson_doc_get_root(doc);
     VusObject* o = root ? vus_json_val_to_object(root) : NULL;
@@ -2023,18 +2031,23 @@ VusString* vus_plugin_shell_exec(VusString* cmd) {
     return result;
 }
 
-/* ---- 文本分割：按分隔符拆成 JSON 数组字符串（供文件管理器逐行渲染目录） ---- */
-VusString* vus_plugin_text_split(VusString* text, VusString* sep) {
-    if (!text) return vus_string_new("[]");
+/* ---- 文本分割：按分隔符直接拆成列表（P7：免去「JSON 数组字符串 → JSON_解析」中间层） ----
+ * 返回 VusObject*（TYPE_LIST，ref=1），元素为 VusString*（每段，含末尾空段）。
+ * 空文本返回空列表；分隔符为空时默认按换行 \n。旧写法
+ *  JSON_解析(文本_分割(...)) 依旧可用：vus_json_parse 对列表输入幂等返回。 */
+void* vus_plugin_text_split(VusString* text, VusString* sep) {
+    if (!text) return NULL;
     const char* s = vus_string_cstr(text);
     size_t slen = strlen(s);
     const char* sp = (sep && vus_string_cstr(sep)) ? vus_string_cstr(sep) : "\n";
     size_t splen = strlen(sp);
     if (splen == 0) splen = 1;
 
-    yyjson_mut_doc* doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val* arr = yyjson_mut_arr(doc);
-    yyjson_mut_doc_set_root(doc, arr);
+    VusObject* o = (VusObject*)calloc(1, sizeof(VusObject));
+    if (!o) return NULL;
+    o->ref = 1; o->magic = VUS_OBJECT_MAGIC; o->type = TYPE_LIST;
+    o->u.list = vus_list_new(TYPE_MIXED);
+    VusList* list = o->u.list;
 
     const char* start = s;
     const char* p = s;
@@ -2042,24 +2055,24 @@ VusString* vus_plugin_text_split(VusString* text, VusString* sep) {
     while (p <= end) {
         size_t remain = (size_t)(end - p);
         if (splen <= remain && memcmp(p, sp, splen) == 0) {
-            yyjson_mut_arr_append(arr, yyjson_mut_strncpy(doc, start, (size_t)(p - start)));
+            vus_list_append(list, vus_string_new_len(start, (int)(p - start)));
             p += splen;
             start = p;
             continue;
         }
         /* 到达末尾：追加最后一段（含末尾空段处理） */
         if (p == end) {
-            yyjson_mut_arr_append(arr, yyjson_mut_strncpy(doc, start, (size_t)(p - start)));
+            vus_list_append(list, vus_string_new_len(start, (int)(p - start)));
             break;
         }
         p++;
     }
-    size_t outlen = 0;
-    char* out = yyjson_mut_write(doc, 0, &outlen);
-    yyjson_mut_doc_free(doc);
-    VusString* result = out ? vus_string_new_len(out, (int)outlen) : vus_string_new("[]");
-    if (out) free(out);
-    return result;
+    return o;
+}
+
+/* ---- 文本_行：按换行 \n 直接拆成列表（一步到位） ---- */
+void* vus_plugin_text_lines(VusString* text) {
+    return vus_plugin_text_split(text, NULL);
 }
 
 /* ---- 日期时间 ---- */

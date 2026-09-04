@@ -80,6 +80,25 @@ void vus_closure_call(VusClosure *c, void *args) {
     if (c && c->func) c->func(c->env, args);
 }
 
+char *vus_string_cstr(VusString *s) { return s ? s->data : (char *)""; }
+
+VusString *vus_string_intern(const char *s) { return vus_string_new(s); }
+
+/* vua_trigger_event 事件派发日志用：返回字典键列表（元素 VusString*） */
+VusList *vus_dict_keys(VusDict *d) {
+    VusList *l = (VusList *)malloc(sizeof(VusList));
+    if (!l) return NULL;
+    l->ref = 1; l->len = 0; l->cap = 4; l->type = 0;
+    l->items = (void **)malloc(sizeof(void *) * 4);
+    if (!d) return l;
+    TImpl *t = DI(d);
+    for (int i = 0; i < t->n; i++) {
+        if (l->len >= l->cap) { l->cap *= 2; l->items = (void **)realloc(l->items, (size_t)l->cap * sizeof(void *)); }
+        l->items[l->len++] = vus_string_new(t->kv[i].key);
+    }
+    return l;
+}
+
 /* D 段用：按ID触发后应被调到的 handler */
 static const char *g_triggered = NULL;
 static void my_handler(void *env, void *args) { (void)env; (void)args; g_triggered = "保存"; }
@@ -122,13 +141,18 @@ int main(void) {
         vua_screen_free(s);
     }
 
-    printf("== B: 未知字段应拒绝 ==\n");
+    printf("== B: 未知字段降级透传（不阻断整屏）==\n");
     err.code = 0;
+    /* 当前契约：未知扩展属性不再报错，而是原样透传（Java 侧当扩展属性），
+     * 避免新属性把整屏校验失败 → 白屏（见 vua.c vua_validate_node）。 */
     const char *vua3 = "{\"type\":\"界面\",\"乱码\":\"x\"}";
     VuaScreen *s3 = vua_screen_load(vua3, &err);
-    CHECK(s3 == NULL, "未知字段导致加载失败");
-    CHECK(err.code == VUA_ERR_UNKNOWN_FIELD, "错误码为 UNKNOWN_FIELD");
-    if (s3) vua_screen_free(s3);
+    CHECK(s3 != NULL, "未知扩展属性应可加载（降级透传）");
+    if (s3) {
+        const char *rt3 = vua_screen_dump_rendertree(s3);
+        CHECK(rt3 && strstr(rt3, "\"乱码\":\"x\"") != 0, "未知属性透传进渲染树");
+        vua_screen_free(s3);
+    }
 
     printf("== D: 按ID触发 → 事件派发到 handler ==\n");
     {
@@ -148,14 +172,15 @@ int main(void) {
         }
     }
 
-    printf("== C: 未知控件类型应拒绝（加载控件表后）==\n");
+    printf("== C: 未知控件类型降级透传（加载控件表后不阻断）==\n");
     err.code = 0;
     vua_control_table_load("{\"控件表\":{\"界面\":{\"字段\":{}}}}", &err);
     CHECK(err.code == 0, "控件表加载");
+    /* 当前契约：未知控件类型降级为"透传 + 递归子节点"，Java 渲染占位控件，
+     * 绝不因单个未知节点阻断整屏（见 vua.c）。 */
     const char *vua4 = "{\"type\":\"界面\",\"子组件\":[{\"type\":\"不存在控件\"}]}";
     VuaScreen *s4 = vua_screen_load(vua4, &err);
-    CHECK(s4 == NULL, "未知类型导致加载失败");
-    CHECK(err.code == VUA_ERR_UNKNOWN_TYPE, "错误码为 UNKNOWN_TYPE");
+    CHECK(s4 != NULL, "未知类型应透传加载（防白屏降级）");
     if (s4) vua_screen_free(s4);
 
     vua_rt_shutdown();

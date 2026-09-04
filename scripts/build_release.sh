@@ -137,15 +137,24 @@ build_target() {
 
     # 随包文件：运行时源码/头（生成代码编译期使用 rt 目录）
     cp -r "$SCRIPT_DIR/rt" "$pkg_dir/rt"
-    # 脚本（vux 插件管理/入口）
+    # 脚本（vux 插件管理/入口 + JNI 桥生成器等）
     mkdir -p "$pkg_dir/scripts"
-    cp "$SCRIPT_DIR/scripts/vux_plugin_manager.py" "$SCRIPT_DIR/scripts/vux_plugin_entry.py" "$pkg_dir/scripts/"
+    cp "$SCRIPT_DIR/scripts/vux_plugin_manager.py" "$SCRIPT_DIR/scripts/vux_plugin_entry.py" \
+       "$SCRIPT_DIR/scripts/gen_jni_bridge.py" "$pkg_dir/scripts/"
     # 公共 API 头文件
     mkdir -p "$pkg_dir/include/vus"
     cp "$SCRIPT_DIR/include/vus/"*.h "$pkg_dir/include/vus/"
     # 示例（install.sh 一键测试用到 examples/hello.vus；其余按需随包）
     mkdir -p "$pkg_dir/examples"
     cp "$SCRIPT_DIR/examples/hello.vus" "$pkg_dir/examples/"
+    # VUA 参考工程（反馈 2.2：`vus build --apk` 直接附带最小参考渲染器/完整构建链），
+    # 不随包 dist 产物与本地 build 缓存
+    if [ -d "$SCRIPT_DIR/examples/vua-android" ]; then
+        cp -r "$SCRIPT_DIR/examples/vua-android" "$pkg_dir/examples/vua-android"
+        rm -rf "$pkg_dir/examples/vua-android/dist" "$pkg_dir/examples/vua-android/build"
+    fi
+    # vus_os 示例（文件管理器/终端，演示 文本_分割 直接返回列表）
+    cp "$SCRIPT_DIR/examples/vus_os.vus" "$pkg_dir/examples/" 2>/dev/null || true
     # 测试用例（安装后 vus test / 一键测试需要）
     mkdir -p "$pkg_dir/tests"
     cp "$SCRIPT_DIR/tests/test_hello.vus" "$SCRIPT_DIR/tests/test_variables.vus" \

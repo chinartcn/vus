@@ -287,6 +287,21 @@ static int     g_vua_bind_count = 0;     /* 包装函数序号，用于唯一命
 static int     g_uses_vua = 0;           /* 用户代码是否用了 界面_*（决定 include vua.h）*/
 static VusAstProgram *g_vua_prog = NULL; /* 当前生成中的 AST 根（界面_绑定 查事件函数参数用） */
 
+/* 顶层全局变量名集合：parser 在函数内对任何赋值一律标记 is_local=1，
+ * 若不把「顶层已声明的名字」排除出局部收集，函数内对全局变量的赋值会在函数
+ * 顶部生成同名局部声明（VusString* vus_x = NULL;），遮蔽文件级全局，
+ * 导致函数内（含 界面_绑定 事件函数）读写全局变量静默失效。
+ * 收集这些名字后，gen_collect_locals 对全局名跳过 → 函数内直接引用文件级符号。 */
+static char *s_global_names[512];
+static int    s_global_count = 0;
+
+static int gen_is_global_name(const char *name) {
+    if (!name) return 0;
+    for (int i = 0; i < s_global_count; i++)
+        if (s_global_names[i] && strcmp(s_global_names[i], name) == 0) return 1;
+    return 0;
+}
+
 /* 按函数名在 AST 根里查函数定义；未找到返回 NULL。 */
 static VusAstFunctionDef *gen_vua_find_func(const char *name) {
     if (!g_vua_prog || !name || !g_vua_prog->statements) return NULL;
@@ -609,6 +624,12 @@ static int eval_const_int(VusAstNode *node, int64_t *out) {
     }
 }
 
+/* 判断 AST 节点是否为字符串字面量（供「字符串 + 字符串」编译期警告，P7）：
+ * 动态类型下只有字面量能静态判定，与反馈场景「"7" + "5" 悄悄变加法」一致。 */
+static int node_is_string_literal(VusAstNode *node) {
+    return node && node->type == VUS_AST_STRING_LITERAL;
+}
+
 static char *gen_expr_binary(GenBuf *buf, VusAstBinaryOp *bin) {
     /* 整棵子树为纯整数常量表达式 → 编译期算出最终值，直接进字面量池
      * （vus_literal("N") 与 vus_to_string(N) 输出一致，免运行时分配） */
@@ -621,6 +642,14 @@ static char *gen_expr_binary(GenBuf *buf, VusAstBinaryOp *bin) {
 
     char *folded = gen_binary_cfold(buf, bin);
     if (folded) return folded;
+
+    /* P7 (1.3)：`字符串 + 字符串` 编译期警告 —— `+` 是算术加法，`..` 才是拼接；
+     * "7" + "5" 会静默得到 12，新用户想拼字符串时会踩坑。 */
+    if (strcmp(bin->op, "+") == 0 &&
+        node_is_string_literal(bin->left) && node_is_string_literal(bin->right)) {
+        fprintf(stderr, "警告: 第 %d 行: 字符串 + 字符串会被当作算术加法（如 \"7\"+\"5\" → 12）；"
+                        "拼接字符串请用 ..\n", bin->line);
+    }
 
     char *left = gen_expr(buf, bin->left);
     char *right = gen_expr(buf, bin->right);
@@ -828,6 +857,23 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
                     gen_emit_line(g_vua_premain, "    }");
                 } else {
                     gen_emit_line(g_vua_premain, "    }");
+                }
+            }
+            /* P6: 事件参数匹配告警——回调变量/字面量里没找到形参名时打印 stderr（进
+             * logcat），避免"界面无反应"/参数为 NULL 的静默失败。仅在事件携带参数
+             * （_args 非空）时检查，纯点击无参事件不告警。 */
+            if (hfunc && hfunc->params && nparams > 0) {
+                for (size_t i = 0; i < nparams && i < hfunc->params->count; i++) {
+                    VusAstNode *pn = hfunc->params->items[i];
+                    const char *pname = NULL;
+                    if (pn->type == VUS_AST_PARAM) pname = ((VusAstParam *)pn)->name;
+                    else if (pn->type == VUS_AST_PARAM_DEFAULT) pname = ((VusAstParamDefault *)pn)->name;
+                    if (!pname || !pname[0]) continue;
+                    char wbuf[640];
+                    snprintf(wbuf, sizeof(wbuf),
+                        "    if (_args && !_va[%zu]) fprintf(stderr, \"[vua] 事件参数未匹配: 形参 '%s' 未从回调变量/字面量获取到值（检查 .vua 事件键与函数形参名）\\n\");",
+                        i + 1, pname);
+                    gen_emit_line(g_vua_premain, wbuf);
                 }
             }
             gen_emit_linef(g_vua_premain, "    vus_%s(_va);", hs);
@@ -2092,7 +2138,8 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
         }
     }
 
-    /* 文本分割：按分隔符拆成 JSON 数组字符串，供"文件管理器"逐行渲染目录 */
+    /* 文本分割：按分隔符直接拆成列表（P7：返回值已是列表，免去 JSON_解析 中间层）。
+     * 旧写法 JSON_解析(文本_分割(...)) 仍可用（vus_json_parse 幂等）。 */
     if (strcmp(call->func_name, "文本_分割") == 0) {
         if (call->args && call->args->count >= 2) {
             char *a = gen_expr(buf, call->args->items[0]);
@@ -2102,7 +2149,19 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
             free(a); free(b);
             return strdup(result);
         }
-        return strdup("vus_string_new(\"[]\")");
+        return strdup("vus_plugin_text_split(vus_string_new(\"\"), NULL)");
+    }
+
+    /* 文本_行：按换行 \n 拆成列表（一步到位，P7） */
+    if (strcmp(call->func_name, "文本_行") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_text_lines(%s)", a);
+            free(a);
+            return strdup(result);
+        }
+        return strdup("vus_plugin_text_lines(vus_string_new(\"\"))");
     }
 
     /* ============= 插件调用内置函数 ============= */
@@ -2966,6 +3025,9 @@ static void gen_collect_locals(VusAstFunctionDef *func, VusAstNode *node, VusAst
         if (assign->is_local) {
             /* 参数名已在函数顶部声明，跳过，避免重复声明 */
             if (gen_is_param_name(func, assign->target)) return;
+            /* 顶层全局变量：不收集为局部，否则函数内局部声明遮蔽文件级全局，
+             * 导致函数内（含事件函数）读写全局变量静默失效 */
+            if (gen_is_global_name(assign->target)) return;
             /* 检查是否已收集 */
             for (size_t i = 0; i < locals->count; i++) {
                 VusAstIdentifier *id = (VusAstIdentifier *)locals->items[i];
@@ -3288,6 +3350,7 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config) {
     g_uses_gui = 0; /* 每次生成前重置 GUI 使用标记 */
     g_uses_vua = 0; /* 每次生成前重置 VUA 使用标记 */
     g_vua_bind_count = 0;
+    s_global_count = 0; /* 每次生成前重置全局变量名集合 */
     if (g_vua_premain) { free(g_vua_premain->data); free(g_vua_premain); g_vua_premain = NULL; }
     if (g_vua_fwd) { free(g_vua_fwd->data); free(g_vua_fwd); g_vua_fwd = NULL; }
 
@@ -3343,6 +3406,10 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config) {
                 name = ((VusAstGlobalDecl *)node)->name;
             }
             if (!name) continue;
+            /* 登记为全局名：函数内同名赋值不收集为局部（修复函数内全局变量不可用） */
+            if (!gen_is_global_name(name) && s_global_count < 512) {
+                s_global_names[s_global_count++] = (char *)name;
+            }
             char san[256];
             gen_sanitize_name(name, san, sizeof(san));
             char decl[320];

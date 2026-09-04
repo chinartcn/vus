@@ -642,6 +642,24 @@ void vua_trigger_event(VuaScreen *screen, const char *event_name, VusDict *vars)
     if (!event_name) return;
     VusDict *ev = g_events ? g_events : vua_events_table();
     if (!ev) return;
+    /* 事件派发日志（P6）：事件名 + 参数键值写 stderr，Android 端进 logcat，
+     * 用于快速定位"事件没反应/参数没接上"类静默失败。 */
+    fprintf(stderr, "[vua] 触发事件: %s", event_name);
+    if (vars) {
+        VusList *ks = vus_dict_keys(vars);
+        if (ks && ks->len) {
+            fprintf(stderr, " 参数:");
+            for (int i = 0; i < ks->len; i++) {
+                VusString *k = ks->items[i];
+                if (!k) continue;
+                void *dv = vus_dict_get(vars, k);
+                fprintf(stderr, " %s=%s", vus_string_cstr(k),
+                        dv ? vus_string_cstr((VusString *)dv) : "?");
+            }
+        }
+        if (ks) vus_unref((void *)ks);
+    }
+    fprintf(stderr, "\n");
     VusString *key = vus_string_new(event_name);
     if (!key) return;
     VusClosure *handler = (VusClosure *)vus_dict_get(ev, key);

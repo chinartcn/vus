@@ -390,10 +390,16 @@ vus build --apk main.vus [--ndk-path <路径>] [--app-name <名称>] [--output <
 - **NDK 检测** — 依序探测显式路径 → `ANDROID_NDK_HOME` → `ANDROID_HOME` 下常见 NDK 版本目录 → 默认路径；未找到时仅生成项目结构并提示手动构建。
 - **包名** — 取反向域名 `com.vus.<应用名>` 并小写化。
 - **`main()` 替换** — 自动替换为 `vus_main()` 避免冲突。
-- **运行时库嵌入** — 自动复制 `libvus_rt.h`/`libvus_rt.c` 到 jni 目录。
-- **JNI 桥接** — 自动把包名点号改为下划线，导出 `Java_<com_vus_app>_MainActivity_runVus(...)`，内部用 `fmemopen` 捕获 stdout 并调用 `vus_main()`。
-- **构建脚本** — 生成 `Android.mk`（含 libvus_rt.c 与 `-DVUS_HAVE_CURL`）、`Application.mk`（`APP_ABI=arm64-v8a armeabi-v7a x86_64`）、`AndroidManifest.xml`。
+- **运行时单一真源（P5）** — `rt/` 是唯一真源，APK 构建时由 `vus_apk.c` 现场拷贝 `libvus_rt.c`/`vua.c`/`yyjson` 到生成工程的 jni 目录，仓库不再留存第二份拷贝（历史两副本分叉过）。
+- **JNI 桥自动生成（P3）** — `vus build --apk` 调用 `scripts/gen_jni_bridge.py`，从 Java `native` 声明生成 `jni_bridge.c`：符号名随实际包名自动对齐（包名怎么变都不再需要手改），Java 声明与 C 实现一一对应、缺失即构建报错；`python3` 缺失时回退模板替换。
+- **完整构建链（P4）** — 一次产完的多 ABI 完整链见参考工程 `examples/vua-android/scripts/build_apk.sh`（NDK clang → javac → d8 → aapt → zip → zipalign → apksigner）：
+  - **JDK 探测与降级**：优先 JDK8；JDK9+ 自动加 `--release 8`（d8/build-tools 31 只认老 class 文件，实测 javac 25 编出的 class 69 会直接报 `Unsupported class file major version`）。
+  - **多 ABI 一次产出**：`--abi all`（默认）同时编 `arm64-v8a` + `armeabi-v7a` + `x86_64`，全部打进同一个 APK 的 `lib/<abi>/`。
+  - **JNI 符号核对**：.so 构建后自动 `nm -D | grep Java_*` 与 Java 声明逐一比对，缺符号即中止（消灭"包名/方法名改了就运行期崩溃"）。
+- **构建脚本** — 生成 `Android.mk`（含 rt 源文件与 `-DVUS_HAVE_CURL`）、`Application.mk`（`APP_ABI=arm64-v8a armeabi-v7a x86_64`）、`AndroidManifest.xml`。
 - **自动构建** — 有 NDK 时调用 `ndk-build` 实际构建，否则提示手动构建。
+
+> **参考工程**：`examples/vua-android/`（VUA 组件流最小 APK）自带 `scripts/build_apk.sh`，可直接 `scripts/build_apk.sh --abi all` 复现完整 APK 构建，是自建工程的蓝本。
 
 ---
 

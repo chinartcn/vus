@@ -285,8 +285,10 @@ VusString* vus_plugin_run_vux_inproc(VusString* plugin, VusString* cmd);
 /* 进程内调用 .vux 插件，返回结构化 VusObject*（列表/字典/字符串），失败返回 NULL */
 void* vus_plugin_run_vux_json(VusString* plugin, VusString* cmd);
 
-/* JSON 字符串 -> 结构化 VusObject*（组合容器），失败返回 NULL */
-void* vus_json_parse(VusString* s);
+/* JSON 字符串 -> 结构化 VusObject*（组合容器），失败返回 NULL。
+ * 幂等：输入已是列表/字典（VusObject* TYPE_LIST/TYPE_DICT）时 ref+1 原样返回，
+ * 使旧写法「JSON_解析(文本_分割(...))」在文本_分割 直接返回列表后依旧可用。 */
+void* vus_json_parse(void* s);
 
 /* 结构化 VusObject* -> JSON 字符串，失败返回空串 */
 VusString* vus_json_generate(void* obj);
@@ -310,8 +312,13 @@ VusString* vus_plugin_file_isdir(VusString* path);
 /* shell 命令执行：popen 捕获命令标准输出，返回输出文本(上限 64KB) */
 VusString* vus_plugin_shell_exec(VusString* cmd);
 
-/* 文本分割：按分隔符拆成 JSON 数组字符串（供文件管理器逐行渲染目录） */
-VusString* vus_plugin_text_split(VusString* text, VusString* sep);
+/* 文本分割：按分隔符直接拆成列表（VusObject* TYPE_LIST，元素 VusString*），
+ * 免去原先「JSON 数组字符串 → JSON_解析 → 列表」三步（P7）。
+ * 兼容说明：旧写法 JSON_解析(文本_分割(...)) 依旧可用 —— vus_json_parse 对
+ * 已是列表/字典的输入幂等返回。 */
+void* vus_plugin_text_split(VusString* text, VusString* sep);
+/* 文本_行：按换行符 \n 拆成列表的一步到位函数（元素 VusString*，含末尾空段） */
+void* vus_plugin_text_lines(VusString* text);
 
 /* 日期时间 */
 VusString* vus_plugin_date_now(VusString* dummy);

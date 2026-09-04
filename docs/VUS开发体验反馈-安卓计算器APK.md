@@ -10,6 +10,24 @@
 
 ---
 
+## 〇、修复状态（v3.0.20260904150204 正式版 已全部修复）
+
+| 反馈项 | 状态 | 落点 |
+|--------|------|------|
+| 1.1 全局变量在事件函数内不可用 | ✅ 已修复 | `src/generator.c` 收集顶层全局名、函数内不再生成同名局部变量；回归测试 `tests/test_global_event.vus` / `tests/test_vua_event_global.vus` + `driver_vua_global.c` |
+| 1.2 字符串操作链繁琐（文本_分割→JSON_解析→列表） | ✅ 已修复 | `文本_分割` 直接返回列表、新增 `文本_行`（`rt/libvus_rt.c`/`generator.c`）；旧写法 `JSON_解析(文本_分割(...))` 幂等兼容 |
+| 1.3 `+` 与 `..` 语义陷阱 | ✅ 已修复 | `字符串 + 字符串` 编译期警告（`generator.c`，提示改用 `..`） |
+| 1.4 事件参数映射无校验 | ✅ 已修复 | 事件派发打日志（事件名+参数）；`collect` 键与形参不匹配打 stderr 告警（`rt/vua.c`/`generator.c`） |
+| 2.1/2.2 渲染树协议文档不足 | ✅ 已修复 | `docs/VUA_RENDER_TREE.md`：`.vua 键 ↔ 渲染树键` 唯一契约对照表 + 最小参考渲染器说明 |
+| 2.3 版本号协议（renderHash）隐式 | ✅ 已修复 | 文档化指纹/屏序号/重建决策（`VUA_RENDER_TREE.md`） |
+| 3.1 JNI 符号手工对齐 | ✅ 已修复 | `scripts/gen_jni_bridge.py` 从 Java native 声明自动生成 `jni_bridge.c`（符号随包名自动对齐）；`build_apk.sh` 构建后 `nm` 核对导出 |
+| 3.2 native 运行时两份拷贝分叉 | ✅ 已修复 | `rt/` 唯一真源；删除 `examples/vua-android/jni/` 下全部 vua/libvus_rt/yyjson/easylogger 副本，构建全部从 `rt/` 编译 |
+| 3.3 手工构建链脆弱 | ✅ 已修复 | `build_apk.sh` 内置完整链：JDK 自动探测（JDK9+ 自动 `--release 8` 降级）、`--abi all` 多 ABI 一次产出、JNI 符号核对 |
+| 3.4 事件回传链路长且无中间校验 | ✅ 已修复 | `vua_trigger_event` 入口打印事件名 + 参数 JSON（logcat 可直接定位），同 1.4 |
+| 四.1 无法单测 / 缺桌面冒烟 | ✅ 已修复 | `tests/vua_smoke.c`（渲染树归一/校验冒烟）+ `driver_vua_global.c`（事件全局变量）已接入 `tests/run_tests.sh` |
+
+---
+
 ## 一、语言 / 运行时层面
 
 ### 1.1 全局变量在事件函数内不可用（最痛的点）
