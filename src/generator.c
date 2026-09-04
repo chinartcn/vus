@@ -369,6 +369,87 @@ static char *gen_binary_concat(const char *left, const char *right) {
     return r;
 }
 
+/* 判断 AST 节点是否为「纯十进制整数常量」：是则填值返回 1（供编译期折叠，避免
+ * 每步都走 vus_to_string(N) → vus_to_int() 的字符串往返）。 */
+static int node_int_literal(VusAstNode *node, int64_t *out) {
+    if (node && node->type == VUS_AST_NUMBER_LITERAL) {
+        VusAstNumber *n = (VusAstNumber *)node;
+        if (!n->is_float && n->value && n->value[0]) {
+            char *end = NULL;
+            long long v = strtoll(n->value, &end, 10);
+            if (end && *end == '\0') { *out = (int64_t)v; return 1; }
+        }
+    }
+    return 0;
+}
+
+/* gen_cond: 把 if/elif/while 的条件 AST 直接编译成 C 布尔表达式（int 语境），
+ * 替代原先「比较转成 "true"/"false" 字符串、再 strcmp=="true"」的三层包装。
+ * 语义等价：VUS 布尔值即字符串 "true"（真）/其他（假）。
+ *  - 比较/逻辑/取反 → 紧凑 C 运算符（短路语义与原先一致的，两段均无副作用）
+ *  - 其余表达式值 → (strcmp(vus_string_cstr(EXPR), "true") == 0)
+ * 调用方 free 返回值。 */
+static char *gen_cond(GenBuf *buf, VusAstNode *node) {
+    if (!node) return strdup("0");
+    if (node->type == VUS_AST_BINARY_OP) {
+        VusAstBinaryOp *b = (VusAstBinaryOp *)node;
+        const char *op = b->op;
+        if (strcmp(op, "and") == 0 || strcmp(op, "和") == 0 ||
+            strcmp(op, "or") == 0 || strcmp(op, "或") == 0) {
+            char *l = gen_cond(buf, b->left);
+            char *r = gen_cond(buf, b->right);
+            const char *cop = (strcmp(op, "or") == 0 || strcmp(op, "或") == 0) ? "||" : "&&";
+            size_t sz = strlen(l) + strlen(r) + 32;
+            char *res = (char *)malloc(sz);
+            snprintf(res, sz, "(%s %s %s)", l, cop, r);
+            free(l); free(r);
+            return res;
+        }
+        if (strcmp(op, "==") == 0 || strcmp(op, "!=") == 0 ||
+            strcmp(op, "<") == 0 || strcmp(op, ">") == 0 ||
+            strcmp(op, "<=") == 0 || strcmp(op, ">=") == 0) {
+            /* 双常量比较：编译期求值 */
+            int64_t lv, rv;
+            if (node_int_literal(b->left, &lv) && node_int_literal(b->right, &rv)) {
+                int truth = 0;
+                if (strcmp(op, "==") == 0) truth = (lv == rv);
+                else if (strcmp(op, "!=") == 0) truth = (lv != rv);
+                else if (strcmp(op, "<") == 0) truth = (lv < rv);
+                else if (strcmp(op, ">") == 0) truth = (lv > rv);
+                else if (strcmp(op, "<=") == 0) truth = (lv <= rv);
+                else if (strcmp(op, ">=") == 0) truth = (lv >= rv);
+                return strdup(truth ? "1" : "0");
+            }
+            char *l = gen_expr(buf, b->left);
+            char *r = gen_expr(buf, b->right);
+            size_t sz = strlen(l) + strlen(r) + 64;
+            char *res = (char *)malloc(sz);
+            snprintf(res, sz, "(vus_compare(%s, %s) %s 0)", l, r, op);
+            free(l); free(r);
+            return res;
+        }
+        /* 其余（算术等）按值表达式回退 */
+    }
+    if (node->type == VUS_AST_UNARY_OP) {
+        VusAstUnaryOp *u = (VusAstUnaryOp *)node;
+        if (strcmp(u->op, "not") == 0 || strcmp(u->op, "非") == 0) {
+            char *inner = gen_cond(buf, u->operand);
+            size_t sz = strlen(inner) + 16;
+            char *res = (char *)malloc(sz);
+            snprintf(res, sz, "(!%s)", inner);
+            free(inner);
+            return res;
+        }
+    }
+    /* 值表达式：保持原有「字符串为 "true" 才为真」语义 */
+    char *e = gen_expr(buf, node);
+    size_t sz = strlen(e) + 64;
+    char *res = (char *)malloc(sz);
+    snprintf(res, sz, "(strcmp(vus_string_cstr(%s), \"true\") == 0)", e);
+    free(e);
+    return res;
+}
+
 /* gen_binary_compare: 比较运算符 (==, !=, <, >, <=, >=) → "true"/"false"
  * 使用 vus_compare 智能比较：两者均为数字时按数值比较，否则按字典序。
  * 修复了旧实现用 vus_to_int 把非数字字符串都转 0 导致 "abc"=="xyz" 误判为真的缺陷。
@@ -377,7 +458,7 @@ static char *gen_binary_compare(const char *left, const char *right, const char 
     size_t sz = strlen(left) + strlen(right) + 128;
     char *r = (char *)malloc(sz);
     snprintf(r, sz,
-        "vus_string_new((vus_compare(%s, %s) %s 0) ? \"true\" : \"false\")",
+        "vus_literal((vus_compare(%s, %s) %s 0) ? \"true\" : \"false\")",
         left, right, op);
     return r;
 }
@@ -405,12 +486,130 @@ static char *gen_binary_logical(const char *left, const char *right, const char 
     size_t sz = strlen(left) + strlen(right) + 128;
     char *r = (char *)malloc(sz);
     snprintf(r, sz,
-        "vus_string_new((strcmp(vus_string_cstr(%s), \"true\") == 0 %s strcmp(vus_string_cstr(%s), \"true\") == 0) ? \"true\" : \"false\")",
+        "vus_literal((strcmp(vus_string_cstr(%s), \"true\") == 0 %s strcmp(vus_string_cstr(%s), \"true\") == 0) ? \"true\" : \"false\")",
         left, op, right);
     return r;
 }
 
+/* 整数常量折叠（编译期求值）：
+ *  - 双纯整数常量：+ - * / % & | ^ << >> 与 .. 直接算出发送结果，
+ *    避免原先每步 vus_to_string(N) → vus_to_int() 的字符串往返；
+ *  - 单整数常量 + 纯算术（- * / % & | ^ << >>）：常量侧代以裸数字参与运算
+ *    （vus_to_int 两侧同级，语义等价）；"+"（vus_add 支持字符串拼接）不折叠。
+ * 无可折叠时返回 NULL，走原生成路径。 */
+static char *gen_binary_cfold(GenBuf *buf, VusAstBinaryOp *bin) {
+    int64_t lv = 0, rv = 0;
+    int li = node_int_literal(bin->left, &lv);
+    int ri = node_int_literal(bin->right, &rv);
+    const char *op = bin->op;
+
+    if (li && ri) {
+        if (strcmp(op, "..") == 0) {
+            char lstr[64], rstr[64], ele[128], ere[128];
+            snprintf(lstr, sizeof(lstr), "%lld", (long long)lv);
+            snprintf(rstr, sizeof(rstr), "%lld", (long long)rv);
+            gen_string_escape(lstr, ele, sizeof(ele));
+            gen_string_escape(rstr, ere, sizeof(ere));
+            size_t sz = strlen(ele) + strlen(ere) + 64;
+            char *res = (char *)malloc(sz);
+            snprintf(res, sz, "vus_string_new(\"%s%s\")", ele, ere);
+            return res;
+        }
+        if (strcmp(op, "+") == 0) {
+            char *res = (char *)malloc(64);
+            snprintf(res, 64, "vus_to_string(%lld)", (long long)(lv + rv));
+            return res;
+        }
+        if (strcmp(op, "-") == 0 || strcmp(op, "*") == 0 || strcmp(op, "/") == 0 ||
+            strcmp(op, "%") == 0 || strcmp(op, "&") == 0 || strcmp(op, "|") == 0 ||
+            strcmp(op, "^") == 0 || strcmp(op, "<<") == 0 || strcmp(op, ">>") == 0) {
+            char *res = (char *)malloc(128);
+            snprintf(res, 128, "vus_to_string((int64_t)(%lld %s %lld))",
+                     (long long)lv, op, (long long)rv);
+            return res;
+        }
+    }
+
+    /* 单常量 + 纯算术：常量侧用裸 int64 直接参与 C 运算 */
+    if (li != ri && (strcmp(op, "-") == 0 || strcmp(op, "*") == 0 || strcmp(op, "/") == 0 ||
+                     strcmp(op, "%") == 0 || strcmp(op, "&") == 0 || strcmp(op, "|") == 0 ||
+                     strcmp(op, "^") == 0 || strcmp(op, "<<") == 0 || strcmp(op, ">>") == 0)) {
+        char *res = NULL;
+        if (li) {
+            char *right = gen_expr(buf, bin->right);
+            size_t sz = strlen(right) + 64;
+            res = (char *)malloc(sz);
+            snprintf(res, sz, "vus_to_string(%lld %s vus_to_int(%s, &_err))",
+                     (long long)lv, op, right);
+            free(right);
+        } else {
+            char *left = gen_expr(buf, bin->left);
+            size_t sz = strlen(left) + 64;
+            res = (char *)malloc(sz);
+            snprintf(res, sz, "vus_to_string(vus_to_int(%s, &_err) %s %lld)",
+                     left, op, (long long)rv);
+            free(left);
+        }
+        return res;
+    }
+    return NULL;
+}
+
+/* 递归求值「纯整数常量表达式」：节点或其子树全部由整数常量 + 纯算术语义构成
+ * 时直接算出 int64 结果（含 '+'：vus_add 对两侧数字做整数加法，语义一致）。
+ * 任一环节出现变量/调用/字符串等非常量即返回 0。 */
+static int eval_const_int(VusAstNode *node, int64_t *out) {
+    if (!node) return 0;
+    switch (node->type) {
+        case VUS_AST_NUMBER_LITERAL: {
+            VusAstNumber *n = (VusAstNumber *)node;
+            if (n->is_float || !n->value) return 0;
+            char *end = NULL;
+            long long v = strtoll(n->value, &end, 10);
+            if (!end || *end != '\0') return 0;
+            *out = (int64_t)v;
+            return 1;
+        }
+        case VUS_AST_BINARY_OP: {
+            VusAstBinaryOp *b = (VusAstBinaryOp *)node;
+            const char *op = b->op;
+            if (strcmp(op, "+") == 0 || strcmp(op, "-") == 0 || strcmp(op, "*") == 0 ||
+                strcmp(op, "/") == 0 || strcmp(op, "%") == 0 || strcmp(op, "&") == 0 ||
+                strcmp(op, "|") == 0 || strcmp(op, "^") == 0 ||
+                strcmp(op, "<<") == 0 || strcmp(op, ">>") == 0) {
+                int64_t lv, rv;
+                if (!eval_const_int(b->left, &lv) || !eval_const_int(b->right, &rv)) return 0;
+                if (strcmp(op, "+") == 0) *out = lv + rv;
+                else if (strcmp(op, "-") == 0) *out = lv - rv;
+                else if (strcmp(op, "*") == 0) *out = lv * rv;
+                else if (strcmp(op, "/") == 0) *out = lv / rv;
+                else if (strcmp(op, "%") == 0) *out = lv % rv;
+                else if (strcmp(op, "&") == 0) *out = lv & rv;
+                else if (strcmp(op, "|") == 0) *out = lv | rv;
+                else if (strcmp(op, "^") == 0) *out = lv ^ rv;
+                else if (strcmp(op, "<<") == 0) *out = lv << rv;
+                else if (strcmp(op, ">>") == 0) *out = lv >> rv;
+                return 1;
+            }
+            return 0;
+        }
+        default:
+            return 0;
+    }
+}
+
 static char *gen_expr_binary(GenBuf *buf, VusAstBinaryOp *bin) {
+    /* 整棵子树为纯整数常量表达式 → 编译期算出最终值 */
+    int64_t cval;
+    if (eval_const_int((VusAstNode *)bin, &cval)) {
+        char *res = (char *)malloc(64);
+        if (res) snprintf(res, 64, "vus_to_string(%lld)", (long long)cval);
+        return res;
+    }
+
+    char *folded = gen_binary_cfold(buf, bin);
+    if (folded) return folded;
+
     char *left = gen_expr(buf, bin->left);
     char *right = gen_expr(buf, bin->right);
     char *result = NULL;
@@ -471,7 +670,7 @@ static char *gen_expr_unary(GenBuf *buf, VusAstUnaryOp *un) {
         size_t sz = strlen(operand) + 128;
         result = (char *)malloc(sz);
         snprintf(result, sz,
-            "vus_string_new((strcmp(vus_string_cstr(%s), \"true\") == 0) ? \"false\" : \"true\")",
+            "vus_literal((strcmp(vus_string_cstr(%s), \"true\") == 0) ? \"false\" : \"true\")",
             operand);
     } else if (strcmp(un->op, "~") == 0) {
         size_t sz = strlen(operand) + 128;
@@ -2211,17 +2410,18 @@ static char *gen_expr_string(GenBuf *buf, VusAstString *str) {
     gen_string_escape(str->value, escaped, sizeof(escaped));
     size_t sz = strlen(escaped) + 64;
     char *result = (char *)malloc(sz);
-    snprintf(result, sz, "vus_string_new(\"%s\")", escaped);
+    /* 不可变字面量 → 常驻池（避免每次调用 malloc+复制） */
+    snprintf(result, sz, "vus_literal(\"%s\")", escaped);
     return result;
 }
 
 static char *gen_expr_number(GenBuf *buf, VusAstNumber *num) {
     (void)buf;
     if (num->is_float) {
-        /* 浮点数作为字符串处理 */
+        /* 浮点数作为字符串处理（内容不可变 → 驻留池） */
         size_t sz = strlen(num->value) + 64;
         char *result = (char *)malloc(sz);
-        snprintf(result, sz, "vus_string_new(\"%s\")", num->value);
+        snprintf(result, sz, "vus_literal(\"%s\")", num->value);
         return result;
     }
     size_t sz = strlen(num->value) + 64;
@@ -2233,9 +2433,9 @@ static char *gen_expr_number(GenBuf *buf, VusAstNumber *num) {
 static char *gen_expr_bool(GenBuf *buf, VusAstBool *b) {
     (void)buf;
     if (b->value) {
-        return strdup("vus_string_new(\"true\")");
+        return strdup("vus_literal(\"true\")");
     }
-    return strdup("vus_string_new(\"false\")");
+    return strdup("vus_literal(\"false\")");
 }
 
 static char *gen_expr(GenBuf *buf, VusAstNode *node) {
@@ -2430,9 +2630,9 @@ static void gen_stmt_expr(GenBuf *buf, VusAstExprStmt *stmt) {
 }
 
 static void gen_stmt_if(GenBuf *buf, VusAstIf *if_stmt) {
-    char *cond = gen_expr(buf, if_stmt->condition);
+    char *cond = gen_cond(buf, if_stmt->condition);
 
-    gen_emit_linef(buf, "if (strcmp(vus_string_cstr(%s), \"true\") == 0) {", cond);
+    gen_emit_linef(buf, "if (%s) {", cond);
     free(cond);
     buf->indent++;
 
@@ -2448,8 +2648,8 @@ static void gen_stmt_if(GenBuf *buf, VusAstIf *if_stmt) {
     /* elif 子句 */
     if (if_stmt->elif_conditions) {
         for (size_t i = 0; i < if_stmt->elif_conditions->count; i++) {
-            char *econd = gen_expr(buf, if_stmt->elif_conditions->items[i]);
-            gen_emit_linef(buf, "else if (strcmp(vus_string_cstr(%s), \"true\") == 0) {", econd);
+            char *econd = gen_cond(buf, if_stmt->elif_conditions->items[i]);
+            gen_emit_linef(buf, "else if (%s) {", econd);
             free(econd);
             buf->indent++;
             if (if_stmt->elif_bodies && i < if_stmt->elif_bodies->count) {
@@ -2542,9 +2742,9 @@ static void gen_stmt_for_each(GenBuf *buf, VusAstForEach *fe) {
 }
 
 static void gen_stmt_while(GenBuf *buf, VusAstWhile *wl) {
-    char *cond = gen_expr(buf, wl->condition);
+    char *cond = gen_cond(buf, wl->condition);
 
-    gen_emit_linef(buf, "while (strcmp(vus_string_cstr(%s), \"true\") == 0) {", cond);
+    gen_emit_linef(buf, "while (%s) {", cond);
     free(cond);
     buf->indent++;
 

@@ -50,6 +50,32 @@ VusString* vus_string_new_len(const char* s, int len) {
     return str;
 }
 
+/* ============ 字符串常量字面量池 ============
+ * 生成器把源码字符串字面量替换为 vus_literal("...")：同内容返回同一常驻实例，
+ * 省去高频路径每次 malloc+复制。VusString 内容不可变（无原地修改 API），
+ * 池持保底引用，借出不增减引用计数、调用方不得释放/修改内容。单线程使用。 */
+#define VUS_LIT_SLOTS 256
+static VusString *g_lit_pool[VUS_LIT_SLOTS];
+
+static unsigned vus_literal_hash(const char *s, int len) {
+    unsigned h = 5381;
+    for (int i = 0; i < len; i++) h = h * 33 + (unsigned char)s[i];
+    return h;
+}
+
+VusString* vus_literal(const char* s) {
+    if (!s) return NULL;
+    int len = (int)strlen(s);
+    int slot = (int)(vus_literal_hash(s, len) % VUS_LIT_SLOTS);
+    VusString* v = g_lit_pool[slot];
+    if (v && v->len == len && memcmp(v->data, s, (size_t)len) == 0) return v;
+    VusString* nv = vus_string_new_len(s, len);   /* ref=1 由池持有 */
+    if (!nv) return NULL;
+    if (g_lit_pool[slot]) vus_unref(g_lit_pool[slot]);
+    g_lit_pool[slot] = nv;
+    return nv;
+}
+
 /* ============ 字符串驻留（进程级小缓存） ============
  * 用于高频重复的键名/常量（如 界面_设置("计数", v) 的变量名），避免每次调用
  * 都 malloc+复制。语义：与 vus_string_new 同，返回 ref+1 的借用（调用方 vus_unref
@@ -568,16 +594,48 @@ VusString* vus_input(VusString* prompt) {
     return vus_string_new(buf);
 }
 
+/* 兼容结构化值（JSON_查询/JSON_解析 返回的 VusObject）在比较/转数字场景的自动解包：
+ * 标量(字符串)直接返回内部文本；列表/字典序列化为 JSON 文本（owned=1，调用方 vus_unref）。
+ * 直接传 VusString* 时原样返回（owned=0），避免把 VusObject 当 VusString 解引用野指针。 */
+static VusString *vus_value_unwrap(void *v, int *owned);
+
 VusString* vus_add(VusString* a, VusString* b) {
+    int oa = 0, ob = 0;
+    VusString *ta = vus_value_unwrap(a, &oa);
+    VusString *tb = vus_value_unwrap(b, &ob);
+
+    /* 快速路径（同 vus_compare/vus_to_int 的首字符短路）：两参首字符都不是
+     * 数字/正负号/空白 → 必非数字 → 直接字符串拼接，省两次 strtoll。
+     * 文本拼接是最常见场景（日志/插值消息），收益立竿见影。 */
+    if (ta && tb && ta->data && tb->data) {
+        char ca = ta->data[0], cb = tb->data[0];
+        int na = (ca >= '0' && ca <= '9') || ca == '+' || ca == '-' ||
+                 ca == ' ' || ca == '\t' || ca == '\n' || ca == '\v' || ca == '\f' || ca == '\r';
+        int nb = (cb >= '0' && cb <= '9') || cb == '+' || cb == '-' ||
+                 cb == ' ' || cb == '\t' || cb == '\n' || cb == '\v' || cb == '\f' || cb == '\r';
+        if (!na && !nb) {
+            VusString *r = vus_string_concat(ta, tb);
+            if (oa) vus_unref(ta);
+            if (ob) vus_unref(tb);
+            return r;
+        }
+    }
+
     int err_a = 0, err_b = 0;
-    int64_t na = vus_to_int(a, &err_a);
-    int64_t nb = vus_to_int(b, &err_b);
+    int64_t na = vus_to_int(ta, &err_a);
+    int64_t nb = vus_to_int(tb, &err_b);
     if (err_a == 0 && err_b == 0) {
         /* 两个都是合法数字，做算术加法 */
-        return vus_to_string(na + nb);
+        VusString *r = vus_to_string(na + nb);
+        if (oa) vus_unref(ta);
+        if (ob) vus_unref(tb);
+        return r;
     }
     /* 否则做字符串拼接 */
-    return vus_string_concat(a, b);
+    VusString *r = vus_string_concat(ta, tb);
+    if (oa) vus_unref(ta);
+    if (ob) vus_unref(tb);
+    return r;
 }
 
 /* 兼容结构化值（JSON_查询/JSON_解析 返回的 VusObject）在比较/转数字场景的自动解包：
