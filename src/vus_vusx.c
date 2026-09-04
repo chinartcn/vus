@@ -266,12 +266,15 @@ int vus_vusx_compile(VusVusxPlugin *plugin, VusConfig *config) {
 
     tokens = vus_lexer_steal_tokens(lexer, &token_count);
     vus_lexer_free(lexer);
-    free(source);
+    /* 注意：source 不能在此释放——标识符 Token 的 start 指向 source 内存，
+     * parser 在 AST 生成期间仍会读取这些指针。与 vus_compile_to_c 保持一致，
+     * 待 parse 完成、AST 生成后再释放 source。 */
 
     /* 4. 语法分析 */
     VusParser *parser = vus_parser_new(tokens, token_count);
     if (!parser) {
         vus_lexer_free_tokens(tokens, token_count);
+        free(source);
         return -1;
     }
 
@@ -281,21 +284,26 @@ int vus_vusx_compile(VusVusxPlugin *plugin, VusConfig *config) {
                 plugin->main_vus, vus_parser_error(parser));
         vus_parser_free(parser);
         vus_lexer_free_tokens(tokens, token_count);
+        free(source);
         return -1;
     }
 
     vus_parser_free(parser);
     vus_lexer_free_tokens(tokens, token_count);
 
-    /* 5. 代码生成 */
-    char *c_code = vus_generate_c(program, config);
+    /* 5. 代码生成（库式：不生成 main，插件 .o 链接进宿主程序） */
+    VusConfig gen_config = *config;
+    gen_config.omit_main = 1;
+    char *c_code = vus_generate_c(program, &gen_config);
     if (!c_code) {
         fprintf(stderr, "vus_vusx: code generation failed for '%s'\n", plugin->main_vus);
         vus_ast_node_free((VusAstNode *)program);
+        free(source);
         return -1;
     }
 
     vus_ast_node_free((VusAstNode *)program);
+    free(source);
 
     /* 6. 写入 C 文件 */
     FILE *fp = fopen(plugin->c_output, "w");

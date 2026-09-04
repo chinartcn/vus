@@ -268,9 +268,17 @@ int vus_config_load(VusConfig *config, const char *project_dir)
     /* 遍历所有字段 */
     while (json_peek(&ctx) != '}' && ctx.pos < ctx.len && !ctx.error) {
         char field_key[256];
+        /* 跳过字段间空白与逗号，避免 json_skip_value 无法推进导致死循环 */
+        json_skip_ws(&ctx);
+        if (json_peek(&ctx) == ',') {
+            json_next(&ctx);
+            json_skip_ws(&ctx);
+        }
         if (json_peek(&ctx) != '"') {
+            size_t old_pos = ctx.pos;
             json_skip_value(&ctx);
-            if (json_peek(&ctx) == ',') json_next(&ctx);
+            /* 若无法推进（分隔符/空白/数组收尾等边界字符），前进一步避免死循环 */
+            if (ctx.pos == old_pos) json_next(&ctx);
             continue;
         }
         json_parse_string(&ctx, field_key, sizeof(field_key));
