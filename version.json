@@ -1,6 +1,6 @@
 {
-  "versionCode": 9,
-  "versionName": "1.8",
+  "versionCode": 10,
+  "versionName": "1.9",
   "apkUrl": "https://gitee.com/rtccn_mc/vus/raw/master/testdata/VUS.apk",
-  "changelog": "新增 DEX 逻辑拓展：拓展_调用 内建 + ExtensionLoader 热加载插件（仅逻辑，含示例 sample 插件：求和/阶乘）"
+  "changelog": "修复 DEX 拓展崩溃：JSON_查询 结构化值与 真 比较导致 vus_compare 野指针（比较/转数字自动解包结构值）"
 }
