@@ -177,11 +177,11 @@ BODY_VUA_SCREEN_ID = """
 """
 
 BODY_VUA_TRIGGER = """
-    return do_trigger(env, event_name, vars_json, 0);
+    return do_trigger(env, eventName, varsJson, 0);
 """
 
 BODY_VUA_TRIGGER_BY_ID = """
-    return do_trigger(env, node_id, vars_json, 1);
+    return do_trigger(env, nodeId, varsJson, 1);
 """
 
 KNOWN_BODIES = {

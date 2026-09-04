@@ -200,7 +200,7 @@ Java_com_vus_android_VuaBridge_vuaSetRootDir(JNIEnv *env, jclass clazz, jstring 
 JNIEXPORT jint JNICALL
 Java_com_vus_android_VuaBridge_vuaTrigger(JNIEnv *env, jclass clazz, jstring eventName, jstring varsJson) {
 
-    return do_trigger(env, event_name, vars_json, 0);
+    return do_trigger(env, eventName, varsJson, 0);
 
 }
 

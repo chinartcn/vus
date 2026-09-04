@@ -10,6 +10,19 @@ release/
 *.o
 *.a
 tests/test_plugin_inproc
+examples/vua-android/jni/
+tests/vua_smoke
+
+# 性能/演示脚手架
+.bench/
+
+# 单文件合并产物与运行时日志
+/vus-full
+/vus-full.c
+**/vus.log
+
+# 插件打包产物
+*.vux
 
 # 系统文件
 .DS_Store

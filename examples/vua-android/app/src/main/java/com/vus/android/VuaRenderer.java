@@ -13,16 +13,21 @@ import android.content.Context;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.Typeface;
-import android.graphics.Bitmap;
 import android.text.InputType;
+import android.webkit.JavascriptInterface;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.AbsListView;
+import android.widget.BaseAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.ListView;
 import android.widget.SeekBar;
 import android.widget.Spinner;
 import android.widget.ArrayAdapter;
@@ -226,6 +231,8 @@ public final class VuaRenderer {
             case "下拉": case "spinner":     { spinnerView(node, parent); return; }
             case "图片": case "image":       { imageView(node, parent); return; }
             case "课表": case "table": case "grid": { classTable(node, parent); return; }
+            case "列表": case "list": case "listview": { listView(node, parent); return; }
+            case "网页": case "web": case "浏览器": { webView(node, parent); return; }
             default: {
                 // 未知/扩展 type：降级为一个文本框占位（严格原则下应报错，这里保证不崩）。
                 TextView t = TextView(ctx);
@@ -452,13 +459,30 @@ public final class VuaRenderer {
 
     private void imageView(JSONObject node, ViewGroup parent) {
         final ImageView iv = new ImageView(ctx);
-        String src = node.optString("src", "");
+        String src = node.optString("src", node.optString("地址", ""));
+
+        /* 远程图片（http/https）：异步加载 + 内存/磁盘缓存（ImageLoader），不卡 UI 线程 */
+        if (src.startsWith("http://") || src.startsWith("https://")) {
+            iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            iv.setPadding(dp(4), dp(4), dp(4), dp(4));
+            int w = node.optInt("宽", 0), h = node.optInt("高", 0);
+            if (w <= 0) w = dp(160);
+            if (h <= 0) h = dp(160);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    w, h, node.optInt("权重", 0));
+            lp.gravity = Gravity.CENTER;
+            parent.addView(iv, lp);
+            ImageLoader.get().load(src, iv);
+            rememberInput(node, iv);
+            return;
+        }
+
         // 尝试从文件目录加载图片（extractAssets 已释放到 getFilesDir）
         if (!src.isEmpty()) {
             try {
                 java.io.File imgFile = new java.io.File(ctx.getFilesDir(), src);
                 if (imgFile.exists()) {
-                    Bitmap bm = BitmapFactory.decodeFile(imgFile.getAbsolutePath());
+                    android.graphics.Bitmap bm = BitmapFactory.decodeFile(imgFile.getAbsolutePath());
                     if (bm != null) {
                         iv.setImageBitmap(bm);
                         iv.setAdjustViewBounds(true);
@@ -478,6 +502,244 @@ public final class VuaRenderer {
         tv.setPadding(dp(8), dp(16), dp(8), dp(16));
         parent.addView(tv);
         rememberInput(node, tv);
+    }
+
+    /* ---------- 新控件：列表（ListView 虚拟化 + 复用，项多不卡） ----------
+     * 渲染树节点：{ type:"列表", 数据:[ "标题" | {"标题":"..","副标题":"..","图片":".."} ],
+     *              "加载更多":"事件名"(滚动到底触发), 事件:{...}(行点击), "高度":dp(默认480) }
+     * ListView 的 Adapter getView convertView 复用机制 = 长列表只渲染可视区，
+     * View 数量与屏幕高度相关、与数据条数无关（对应反馈「长列表性能」）。 */
+    private void listView(final JSONObject node, final ViewGroup parent) {
+        final JSONArray data = node.optJSONArray("数据");
+        if (data == null || data.length() == 0) {
+            parent.addView(TextView(ctx, "(空列表)"));
+            return;
+        }
+        final int rows = data.length();
+        final String evName = eventName(node);
+        final JSONArray collect = eventCollect(node);
+        final String loadMore = node.optString("加载更多", node.optString("onReachEnd", ""));
+
+        final int titleId = View.generateViewId();
+        final int subId   = View.generateViewId();
+        final int titleColor = darkTheme ? 0xFFE0E0E0 : 0xFF1A1F2E;
+        final int subColor   = darkTheme ? 0xFF9A9A9A : 0xFF6B7280;
+
+        final ListView lv = new ListView(ctx);
+        lv.setDivider(new android.graphics.drawable.ColorDrawable(
+                darkTheme ? 0x26FFFFFF : 0x14000000));
+        lv.setDividerHeight(dp(1));
+        lv.setBackgroundColor(darkTheme ? 0xFF1E1E1E : 0xFFFFFFFF);
+
+        lv.setAdapter(new BaseAdapter() {
+            public int getCount() { return rows; }
+            public Object getItem(int pos) { return data.opt(pos); }
+            public long getItemId(int pos) { return pos; }
+            public View getView(int pos, View convertView, ViewGroup p) {
+                // convertView 复用核心：滑出屏幕的 item 视图直接回收重用
+                final LinearLayout row;
+                final TextView titleTv, subTv;
+                final ImageView imgV;
+                if (convertView == null) {
+                    row = new LinearLayout(ctx);
+                    row.setOrientation(LinearLayout.HORIZONTAL);
+                    row.setGravity(Gravity.CENTER_VERTICAL);
+                    row.setPadding(dp(12), dp(10), dp(12), dp(10));
+                    row.setMinimumHeight(dp(52));
+                    imgV = new ImageView(ctx);
+                    imgV.setScaleType(ImageView.ScaleType.FIT_CENTER);
+                    imgV.setVisibility(View.GONE);
+                    row.addView(imgV, new LinearLayout.LayoutParams(dp(44), dp(44)));
+                    LinearLayout texts = new LinearLayout(ctx);
+                    texts.setOrientation(LinearLayout.VERTICAL);
+                    titleTv = new TextView(ctx);
+                    titleTv.setId(titleId);
+                    titleTv.setTextSize(15);
+                    titleTv.setSingleLine(true);
+                    titleTv.setTextColor(titleColor);
+                    subTv = new TextView(ctx);
+                    subTv.setId(subId);
+                    subTv.setTextSize(12);
+                    subTv.setSingleLine(true);
+                    subTv.setVisibility(View.GONE);
+                    subTv.setTextColor(subColor);
+                    texts.addView(titleTv);
+                    texts.addView(subTv);
+                    row.addView(texts, new LinearLayout.LayoutParams(
+                            0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                    convertView = row;
+                } else {
+                    row = (LinearLayout) convertView;
+                    titleTv = (TextView) convertView.findViewById(titleId);
+                    subTv = (TextView) convertView.findViewById(subId);
+                    imgV = (ImageView) ((ViewGroup) convertView).getChildAt(0);
+                }
+
+                /* 数据项取值：字符串 或 {标题,副标题,图片} */
+                Object item = data.opt(pos);
+                String title = item instanceof String ? (String) item : "";
+                String sub = "";
+                String img = "";
+                if (item instanceof JSONObject) {
+                    JSONObject o = (JSONObject) item;
+                    title = o.optString("标题", o.optString("text", o.optString("title", "")));
+                    sub = o.optString("副标题", o.optString("sub", o.optString("summary", "")));
+                    img = o.optString("图片", o.optString("src", ""));
+                }
+                titleTv.setText(title);
+                if (sub.isEmpty()) {
+                    subTv.setVisibility(View.GONE);
+                } else {
+                    subTv.setVisibility(View.VISIBLE);
+                    subTv.setText(sub);
+                }
+                if (img.startsWith("http://") || img.startsWith("https://")) {
+                    imgV.setVisibility(View.VISIBLE);
+                    ImageLoader.get().load(img, imgV);
+                } else {
+                    imgV.setVisibility(View.GONE);
+                }
+                // 整行点击目标（recycled 视图不残留监听：监听器绑在 lv 上，不绑 item）
+                row.setTag(pos);
+                return convertView;
+            }
+        });
+
+        /* 行点击 → 事件派发（默认携带 下标 + 点击行文本；再合并输入控件/回调变量） */
+        lv.setOnItemClickListener((a, v, pos, id) -> {
+            Object item = data.opt(pos);
+            String title = item instanceof String ? (String) item
+                    : item instanceof JSONObject ? ((JSONObject) item).optString("标题", "")
+                    : "";
+            StringBuilder vb = new StringBuilder("{");
+            vb.append("\"下标\":").append(pos)
+              .append(",\"值\":\"").append(escapeJs(title)).append("\"");
+            String base = collectVars(node);
+            if (base.length() > 2) {                       // 非空 {} 则合并
+                vb.append(',').append(base.substring(1, base.length() - 1));
+            }
+            vb.append('}');
+            if (evName != null) {
+                VuaBridge.vuaTrigger(evName, vb.toString());
+            } else {
+                VuaBridge.vuaTriggerById(node.optString("id"), vb.toString());
+            }
+            refresh();
+        });
+
+        /* 滚动到底（最后一项可见）→ 触发「加载更多」事件（分页/并发控制由 .vus 侧做） */
+        if (!loadMore.isEmpty()) {
+            final boolean[] loading = {false};
+            lv.setOnScrollListener(new AbsListView.OnScrollListener() {
+                public void onScrollStateChanged(AbsListView view, int state) { }
+                public void onScroll(AbsListView view, int firstVisible,
+                                     int visibleCount, int totalCount) {
+                    if (totalCount > 0 && firstVisible + visibleCount >= totalCount && !loading[0]) {
+                        loading[0] = true;
+                        VuaBridge.vuaTrigger(loadMore, "{}");
+                    }
+                }
+            });
+        }
+
+        /* 高度 = 可视行数 * 行高（列表数据再多也不超过 maxH，内部滚动由 ListView 负责） */
+        int rowH = dp(54);
+        int maxH = dp(node.optInt("高度", 480));
+        int listH = Math.min(rows * rowH, maxH);
+        parent.addView(lv, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, listH));
+    }
+
+    /* ---------- 新控件：网页/富文本（WebView + JS 桥 + Markdown→HTML） ----------
+     * 渲染树节点：
+     *   { type:"网页", "url":"https://..." }                     直接加载网址
+     *   { type:"网页", "html":"<b>..</b>", "高度":600 }           渲染 HTML
+     *   { type:"网页", "内容":"# 标题\n**粗体** 文本", ... }      Markdown→HTML
+     * JS 回 VUA：window.vus.onEvent("事件名", "{...json}") →
+     *   vuaTrigger 派发到 .vus 登记的 界面_绑定 处理函数（JS 回调接回事件链路）。 */
+    private void webView(final JSONObject node, ViewGroup parent) {
+        final WebView wv = new WebView(ctx);
+        WebSettings ws = wv.getSettings();
+        ws.setJavaScriptEnabled(true);
+        ws.setDomStorageEnabled(true);
+        try { ws.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW); } catch (Exception ignored) { }
+
+        /* JS 桥：网页内 window.vus.onEvent('保存', '{...}') → vuaTrigger */
+        wv.addJavascriptInterface(new Object() {
+            @JavascriptInterface
+            public void onEvent(final String name, final String json) {
+                com.vus.android.VuaBridge.postToTrigger(name, json);
+            }
+            @JavascriptInterface
+            public void triggerById(final String id, final String json) {
+                com.vus.android.VuaBridge.postToTriggerById(id, json);
+            }
+        }, "vus");
+
+        int h = node.optInt("高度", 480);
+        parent.addView(wv, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(h)));
+
+        String url = node.optString("url", "");
+        String html = node.optString("html", "");
+        String content = node.optString("内容", node.optString("markdown", node.optString("text", "")));
+        try {
+            if (!url.isEmpty()) {
+                wv.loadUrl(url);
+            } else if (!html.isEmpty()) {
+                wv.loadDataWithBaseURL(null, html, "text/html", "UTF-8", null);
+            } else if (!content.isEmpty()) {
+                wv.loadDataWithBaseURL(null, mdToHtml(content),
+                        "text/html", "UTF-8", null);
+            }
+        } catch (Exception ignored) { }
+    }
+
+    /* ---------- 极简 Markdown → HTML（无第三方库，覆盖常见语法） ---------- */
+    static String mdToHtml(String md) {
+        StringBuilder out = new StringBuilder();
+        out.append("<html><body style='padding:12px;margin:0;font-family:sans-serif;"
+                + "color:#222;line-height:1.6'><div>");
+        boolean inCode = false, inUl = false;
+        String[] lines = md.split("\n");
+        for (String raw : lines) {
+            String line = raw.trim();
+            if (line.startsWith("```")) {
+                if (inCode) { out.append("</code></pre>"); inCode = false; }
+                else { out.append("<pre><code>"); inCode = true; }
+                continue;
+            }
+            if (inCode) { out.append(esc(line)).append("\n"); continue; }
+            if (line.isEmpty()) { out.append("</div><div>"); continue; }
+            if (line.startsWith("### ")) { out.append("<h3>").append(inline(line.substring(4))).append("</h3>"); continue; }
+            if (line.startsWith("## "))  { out.append("<h2>").append(inline(line.substring(3))).append("</h2>"); continue; }
+            if (line.startsWith("# "))   { out.append("<h1>").append(inline(line.substring(2))).append("</h1>"); continue; }
+            if (line.startsWith("- ") || line.startsWith("* ")) {
+                if (!inUl) { out.append("<ul>"); inUl = true; }
+                out.append("<li>").append(inline(line.substring(2))).append("</li>");
+                continue;
+            }
+            if (line.startsWith("> ")) { out.append("<blockquote>").append(inline(line.substring(2))).append("</blockquote>"); continue; }
+            if (inUl) { out.append("</ul>"); inUl = false; }
+            out.append("<p>").append(inline(line)).append("</p>");
+        }
+        if (inUl) out.append("</ul>");
+        if (inCode) out.append("</code></pre>");
+        out.append("</div></body></html>");
+        return out.toString();
+    }
+
+    /** 行内：转义 + **粗体**、*斜体*、[链接](url) */
+    private static String inline(String s) {
+        String r = esc(s);
+        r = r.replaceAll("\\*\\*(.+?)\\*\\*", "<b>$1</b>");
+        r = r.replaceAll("\\*(.+?)\\*", "<i>$1</i>");
+        r = r.replaceAll("\\[([^]]+)\\]\\(([^)]+)\\)", "<a href='$2'>$1</a>");
+        return r;
+    }
+
+    private static String esc(String s) {
+        return s == null ? "" : s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
     }
 
     /* ---------- 新控件：课表（TableLayout 表格） ---------- */

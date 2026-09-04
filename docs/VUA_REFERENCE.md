@@ -151,7 +151,7 @@ VUS 现有两套互不借用、边界清晰的 UI 机制，**不要混谈**：
 
 > 输入控件的「变化」仅指**值确认**（失焦/提交）时的事件；变量的实际写入时机见第四节规则 8。
 
-> **实现状态**：当前 APK 内置控件表（`testdata/vua_controls.json`）已登记 `界面/列/行/卡片/文本/按钮/输入框/复选框/开关/滑块/下拉/图片/课表`；`VuaRenderer.java` 使用 Android SDK 标准 View（`TextView/Button/EditText/CheckBox/Switch/SeekBar/Spinner/ImageView/LinearLayout/TableLayout` 等）逐 `type` 建控件。控件表之外的 `type` 按"扩展控件"处理——需要先在控件表登记、并由 Java 侧或 `.vaz` 展开提供实现。
+> **实现状态**：当前 APK 内置控件表（`testdata/vua_controls.json`）已登记 `界面/列/行/卡片/文本/按钮/输入框/复选框/开关/滑块/下拉/图片/列表/网页/课表`；`VuaRenderer.java` 使用 Android SDK 标准 View（`TextView/Button/EditText/CheckBox/Switch/SeekBar/Spinner/ImageView/LinearLayout/TableLayout/ListView/WebView` 等）逐 `type` 建控件；其中 `列表` 用 ListView + Adapter（`convertView` 复用，只渲染可视区，长列表不卡），`网页` 用 WebView（`url`/`html`/`内容`(Markdown) 三种输入，JS 经 `window.vus.onEvent` 回接 `vuaTrigger`）。控件表之外的 `type` 按"扩展控件"处理——需要先在控件表登记、并由 Java 侧或 `.vaz` 展开提供实现。
 
 ### 3) 展示控件
 
@@ -172,7 +172,7 @@ VUS 现有两套互不借用、边界清晰的 UI 机制，**不要混谈**：
 ```
 screen→界面  column→列  row→行  card→卡片  text→文本  image→图片  icon→图标
 button→按钮  text_input→输入框  tarea→多行输入  checkbox→复选框  switch→开关
-select→下拉  slider→滑块  list→列表  table→表格  ...
+select→下拉  slider→滑块  list→列表  web→网页  table→表格  ...
 ```
 
 **新写的 `.vua` 一律用中文 `type`**；别名仅为保证旧文件可读，不建议再用（否则词典联想易打架）。

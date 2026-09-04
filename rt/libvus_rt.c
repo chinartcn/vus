@@ -1218,6 +1218,100 @@ VusString* vus_plugin_http_download(VusString* url, VusString* filepath) {
 #endif
 }
 
+/* ---- JSON 字符串转义（"" 与 \ 前加 \）返回 malloc（调用方 free）---- */
+static char *vus_json_escape(const char *s) {
+    if (!s) return NULL;
+    size_t n = 0;
+    for (const char *q = s; *q; q++) if (*q == '"' || *q == '\\') n++;
+    char *out = (char *)malloc(strlen(s) + n + 1);
+    if (!out) return NULL;
+    char *p = out;
+    for (const char *q = s; *q; q++) { if (*q == '"' || *q == '\\') *p++ = '\\'; *p++ = *q; }
+    *p = '\0';
+    return out;
+}
+
+/* ---- 通用网络请求（覆盖反馈「认证/超时/重试」：自定义请求头如 token、超时秒、重试次数）----
+ * 网络_请求(方式, 地址, 头JSON, 数据, 超时秒, 重试次数)
+ * APK：走 Java 平台桥 http.request（headers/timeout/retry 全支持）；
+ * 桌面：回退 curl（GET/POST，headers 仅 APK 生效）。 */
+VusString* vus_plugin_http_request(VusString* method, VusString* url,
+                                   VusString* headers_json, VusString* body,
+                                   VusString* timeout_s, VusString* retry_s) {
+    const char *m = (method && vus_string_len(method) > 0) ? vus_string_cstr(method) : "GET";
+    const char *u = url ? vus_string_cstr(url) : "";
+    if (!u[0]) return vus_string_new("");
+    const char *h = (headers_json && vus_string_len(headers_json) > 0) ? vus_string_cstr(headers_json) : NULL;
+    const char *d = (body && vus_string_len(body) > 0) ? vus_string_cstr(body) : NULL;
+    int to = timeout_s ? atoi(vus_string_cstr(timeout_s)) : 30;
+    if (to <= 0) to = 30;
+    int rt = retry_s ? atoi(vus_string_cstr(retry_s)) : 0;
+    if (rt < 0) rt = 0;
+    if (rt > 10) rt = 10;
+
+    if (g_java_cb) {
+        char *eu = vus_json_escape(u);
+        char *ed = vus_json_escape(d ? d : "");
+        char *aj = NULL;
+        if (eu && ed) {
+            int n = asprintf(&aj,
+                "{\"method\":\"%s\",\"url\":\"%s\",\"headers\":%s,\"data\":\"%s\",\"timeout\":%d,\"retry\":%d}",
+                m, eu, h ? h : "{}", ed, to, rt);
+            if (n < 0) { free(aj); aj = NULL; }
+        }
+        free(eu); free(ed);
+        if (aj) {
+            VusString *jr = vus_java_rpc("http.request", aj);
+            free(aj);
+            if (jr) return jr;
+        }
+        return vus_string_new("");
+    }
+    /* 桌面回退 curl（headers 忽略） */
+    if (strcmp(m, "POST") == 0 || strcmp(m, "post") == 0)
+        return vus_plugin_http_post(url, body);
+    return vus_plugin_http_get(url);
+}
+
+/* ---- 文件上传（multipart/form-data，反馈「文件上传」）----
+ * 文件_上传(地址, 本地文件, 字段JSON, 头JSON)
+ * APK：走 Java 平台桥 http.upload（multipart 手写，支持附加字段+自定义头）；
+ * 桌面：回退 curl -F file=@path（仅文件，无附加字段），返回服务器响应文本。 */
+VusString* vus_plugin_http_upload(VusString* url, VusString* path,
+                                  VusString* fields_json, VusString* headers_json) {
+    (void)headers_json;   /* 桌面回退 curl 不支持自定义头；APK 由 Java 桥 http.upload 处理 */
+    if (!url || !path) return vus_string_new("0");
+    const char *u = vus_string_cstr(url);
+    const char *p = vus_string_cstr(path);
+    const char *f = (fields_json && vus_string_len(fields_json) > 0) ? vus_string_cstr(fields_json) : NULL;
+
+    if (g_java_cb) {
+        char *eu = vus_json_escape(u);
+        char *ep = vus_json_escape(p);
+        if (!eu || !ep) { free(eu); free(ep); return vus_string_new("0"); }
+        size_t cap = strlen(eu) + strlen(ep) + (f ? strlen(f) : 0) + 160;
+        char *aj = (char *)malloc(cap);
+        if (!aj) { free(eu); free(ep); return vus_string_new("0"); }
+        snprintf(aj, cap, "{\"url\":\"%s\",\"path\":\"%s\",\"fields\":%s,\"headers\":%s}",
+                 eu, ep, f ? f : "{}", "{}");
+        free(eu); free(ep);
+        /* Java 侧返回 data="1" 或 "0" */
+        VusString *jr = vus_java_rpc("http.upload", aj);
+        free(aj);
+        if (jr) return jr;
+        return vus_string_new("0");
+    }
+    /* 桌面回退: curl -F file=@本地路径（单引号包裹防止注入；返回服务器响应文本，失败空串） */
+    {
+        char cmd[4096];
+        int n = snprintf(cmd, sizeof(cmd),
+            "curl -s -m 60 -F 'file=@%s' %s",
+            p, u);
+        if (n <= 0 || (size_t)n >= sizeof(cmd)) return vus_string_new("0");
+        return vus_plugin_shell_exec(vus_string_new(cmd));
+    }
+}
+
 /* 拓展_调用（DEX 逻辑拓展，仅 APK）：把调用转给 Java 平台桥 ext.* 命名空间，
  * 原样返回 Java 响应 JSON 串（VUS 用 JSON_查询 取 ok/data/err）。
  * 桌面/纯 native 未注册 Java 回调时返回空串（DEX 拓展为 APK 独有能力，不回退）。 */

@@ -86,7 +86,7 @@ fi
 mkdir -p "$ASSETS"
 cp "$TESTDATA_SRC"/vua_home.vua "$TESTDATA_SRC"/vua_settings.vua \
    "$TESTDATA_SRC"/vua_logic.vua "$TESTDATA_SRC"/vua_class.vua \
-   "$TESTDATA_SRC"/vua_controls.json "$ASSETS/"
+   "$TESTDATA_SRC"/vua_advanced.vua "$TESTDATA_SRC"/vua_controls.json "$ASSETS/"
 cp "$TESTDATA_SRC"/*.jpg "$ASSETS"/ 2>/dev/null || true
 # 示例 DEX 逻辑拓展插件（ExtensionLoader 加载，检出 .sha256 即强制校验）
 if [ -d "$ROOT/plugins/dist" ]; then
@@ -165,7 +165,11 @@ for ABI in "${ABIS[@]}"; do
       missing=1
     fi
   done < "$WORK/jni_expect_$ABI.txt"
-  echo "  [JNI 校验] $ABI 导出 $(wc -l < "$WORK/jni_expect_$ABI.txt") 个 Java_* 符号${missing:+(缺失!)}"
+  if [ "$missing" -eq 0 ]; then
+      echo "  [JNI 校验] $ABI 导出 $(wc -l < "$WORK/jni_expect_$ABI.txt") 个 Java_* 符号全部通过"
+  else
+      echo "  [JNI 校验] $ABI 导出 $(wc -l < "$WORK/jni_expect_$ABI.txt") 个 Java_* 符号(缺失!)"
+  fi
   [ "$missing" -eq 0 ] || { echo "JNI 符号校验失败，中止" >&2; exit 1; }
 done
 
@@ -173,7 +177,17 @@ done
 echo "[2/6] 编译 Java -> classes.dex"
 "$JAVAC" "${JAVAC_ARGS[@]}" -cp "$AJ" -d "$WORK/classes" "$JAVA_SRC"/*.java 2>&1
 rm -rf "$WORK/dex"; mkdir -p "$WORK/dex"
-"$BT/d8" --release --min-api 21 --output "$WORK/dex" "$WORK/classes"/com/vus/android/*.class
+# dex 工具：SDK 下已有 R8 jar 则优先（build-tools 自带 d8 8.2.2-dev 对此工程的嵌套类
+# 有 NPE 崩溃 bug，R8 正式版正常；无 jar 时回退 d8）。--lib android.jar 为 desugar
+# lambda/默认接口方法提供 java.lang.Runnable 等平台类型。
+R8_JAR_FOUND="$(find "$SDK" -maxdepth 3 -name 'r8-*.jar' 2>/dev/null | head -1)"
+if [ -n "$R8_JAR_FOUND" ] && command -v java >/dev/null 2>&1; then
+  echo "[2/6] 用 R8 jar 做 dex: $R8_JAR_FOUND"
+  java -cp "$R8_JAR_FOUND" com.android.tools.r8.D8 --release --min-api 21 --lib "$AJ" \
+      --output "$WORK/dex" "$WORK/classes"/com/vus/android/*.class
+else
+  "$BT/d8" --release --min-api 21 --lib "$AJ" --output "$WORK/dex" "$WORK/classes"/com/vus/android/*.class
+fi
 
 # ---------- 3. 编译资源并打包 ----------
 echo "[3/6] aapt 编译资源并打包"
@@ -186,7 +200,7 @@ for ABI in "${ABIS[@]}"; do
   cp "$ROOT/build/libs/$ABI/libvus_app.so" "$STM/lib/$ABI/"
 done
 cp "$ASSETS"/vua_home.vua "$ASSETS"/vua_settings.vua "$ASSETS"/vua_logic.vua \
-   "$ASSETS"/vua_class.vua "$ASSETS"/vua_controls.json "$STM/assets/"
+   "$ASSETS"/vua_class.vua "$ASSETS"/vua_advanced.vua "$ASSETS"/vua_controls.json "$STM/assets/"
 cp "$ASSETS"/*.jpg "$ASSETS"/*.png "$STM/assets/" 2>/dev/null || true
 cp -r "$ASSETS/plugins" "$STM/assets/" 2>/dev/null || true
 

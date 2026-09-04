@@ -78,6 +78,7 @@ public class MainActivity extends Activity {
 
         // 平台能力桥（callJava）解析相对路径/文件目录需要应用 Context
         VuaBridge.appContext = getApplicationContext();
+        ImageLoader.get().attach(getApplicationContext());   // 远程图片缓存目录
 
         content = new FrameLayout(this);
         content.setLayoutParams(new ViewGroup.LayoutParams(

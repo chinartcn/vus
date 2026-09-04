@@ -19,18 +19,21 @@
 package com.vus.android;
 
 import android.content.Context;
+import android.os.Handler;
 import android.os.Looper;
 
 import org.json.JSONObject;
 
-import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
-import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -112,15 +115,39 @@ public final class VuaBridge {
                 return ok(sb.toString());
             }
             if ("http.get".equals(api)) {
-                byte[] b = httpGetBytes(a.optString("url"), null, 30000);
+                int timeout = a.optInt("timeout", 30);
+                int retry = a.optInt("retry", 2);
+                byte[] b = runHttp(a.optString("url"), null, timeout,
+                        headersOf(a.optJSONObject("headers")), retry);
                 return ok(b == null ? "" : new String(b, "UTF-8"));
             }
             if ("http.post".equals(api)) {
-                byte[] b = httpGetBytes(a.optString("url"), a.optString("data"), 30000);
+                int timeout = a.optInt("timeout", 30);
+                int retry = a.optInt("retry", 2);
+                byte[] b = runHttp(a.optString("url"), a.optString("data"), timeout,
+                        headersOf(a.optJSONObject("headers")), retry);
                 return ok(b == null ? "" : new String(b, "UTF-8"));
             }
+            /* 通用请求：method=GET|POST，headers 自定义请求头（如 Authorization token 认证）、
+             * timeout 秒、retry 重试次数。覆盖「认证/超时/重试」类需求。 */
+            if ("http.request".equals(api)) {
+                String method = "GET".equalsIgnoreCase(a.optString("method", "GET")) ? "GET" : "POST";
+                int timeout = a.optInt("timeout", 30);
+                int retry = a.optInt("retry", 2);
+                byte[] b = runHttp(a.optString("url"),
+                        "POST".equals(method) ? a.optString("data", "") : null,
+                        timeout, headersOf(a.optJSONObject("headers")), retry);
+                return ok(b == null ? "" : new String(b, "UTF-8"));
+            }
+            if ("http.upload".equals(api)) {
+                // multipart/form-data 文件上传：url + 本地文件 path + 附加字段 fields + 头 headers
+                boolean up = uploadMultipart(a.optString("url"), a.optString("path"),
+                        a.optJSONObject("fields"), headersOf(a.optJSONObject("headers")),
+                        a.optInt("timeout", 60));
+                return up ? ok("1") : err("上传失败");
+            }
             if ("http.download".equals(api)) {
-                byte[] b = httpGetBytes(a.optString("url"), null, 60000);
+                byte[] b = runHttp(a.optString("url"), null, 60, null, 2);
                 if (b == null) return ok("0");
                 File f = resolve(a.optString("path"));
                 new File(f.getParent()).mkdirs();
@@ -188,26 +215,54 @@ public final class VuaBridge {
         return Looper.myLooper() == Looper.getMainLooper();
     }
 
-    private static byte[] httpGetBytes(final String url, final String data, final int timeout) throws Exception {
-        if (!isMainThread()) return doHttp(url, data, timeout);
+    /** 线程安全请求入口：headers 自定义请求头、retry 重试；主线程自动转子线程等待。 */
+    private static byte[] runHttp(final String url, final String data, final int timeoutSec,
+                                  final Map<String, String> headers, final int retry) throws Exception {
+        if (!isMainThread()) return doHttp(url, data, timeoutSec, headers, retry);
         final byte[][] holder = new byte[1][];
         final Throwable[] terr = new Throwable[1];
         final CountDownLatch latch = new CountDownLatch(1);
         new Thread(() -> {
-            try { holder[0] = doHttp(url, data, timeout); }
+            try { holder[0] = doHttp(url, data, timeoutSec, headers, retry); }
             catch (Throwable t) { terr[0] = t; }
             finally { latch.countDown(); }
         }).start();
-        latch.await(timeout + 10000L, TimeUnit.MILLISECONDS);
-        if (terr[0] != null) throw new Exception(terr[0]);
+        try {
+            latch.await((long) timeoutSec + 60L, TimeUnit.SECONDS);
+        } catch (InterruptedException ie) {
+            return null;
+        }
+        if (terr[0] != null) return null;
         return holder[0];
     }
 
-    private static byte[] doHttp(String url, String data, int timeout) throws Exception {
+    private static byte[] doHttp(String url, String data, int timeoutSec,
+                                 Map<String, String> headers, int retry) throws Exception {
+        if (retry < 1) retry = 1;
+        Throwable last = null;
+        for (int attempt = 0; attempt < retry; attempt++) {
+            try {
+                return doHttpOnce(url, data, timeoutSec, headers);
+            } catch (Throwable t) {
+                last = t;                       // 超时/IO 错误：按 retry 次数重试
+            }
+        }
+        if (last != null) throw new Exception(last);
+        return null;
+    }
+
+    private static byte[] doHttpOnce(String url, String data, int timeoutSec,
+                                     Map<String, String> headers) throws Exception {
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-        conn.setConnectTimeout(timeout);
-        conn.setReadTimeout(timeout);
+        conn.setConnectTimeout(timeoutSec * 1000);
+        conn.setReadTimeout(timeoutSec * 1000);
         conn.setRequestProperty("User-Agent", "VUS-Android/1.0");
+        if (headers != null) {
+            for (Map.Entry<String, String> e : headers.entrySet()) {
+                if (e.getKey() != null && e.getValue() != null)
+                    conn.setRequestProperty(e.getKey(), e.getValue());
+            }
+        }
         if (data != null) {
             conn.setRequestMethod("POST");
             conn.setDoOutput(true);
@@ -224,6 +279,110 @@ public final class VuaBridge {
         while ((r = in.read(buf)) > 0) bos.write(buf, 0, r);
         in.close();
         return bos.toByteArray();
+    }
+
+    /** JSON 对象 → 请求头 Map（{"Authorization":"Bearer x", ...}）。 */
+    private static Map<String, String> headersOf(JSONObject h) {
+        if (h == null) return null;
+        Map<String, String> out = new HashMap<>();
+        Iterator<String> keys = h.keys();
+        while (keys.hasNext()) {
+            String k = keys.next();
+            out.put(k, h.optString(k));
+        }
+        return out.isEmpty() ? null : out;
+    }
+
+    /** multipart/form-data 文件上传（无第三方库，手写 multipart body）。
+     * path 为本地文件（相对 filesDir 或绝对路径）；fields 为附加表单字段。 */
+    private static boolean uploadMultipart(final String url, final String path,
+                                           final JSONObject fields,
+                                           final Map<String, String> headers,
+                                           final int timeoutSec) {
+        if (url == null || url.isEmpty() || path == null || path.isEmpty()) return false;
+        final boolean[] holder = new boolean[1];
+        if (!isMainThread()) {
+            try { holder[0] = doUpload(url, path, fields, headers, timeoutSec); }
+            catch (Throwable t) { holder[0] = false; }
+            return holder[0];
+        }
+        final CountDownLatch latch = new CountDownLatch(1);
+        new Thread(() -> {
+            try { holder[0] = doUpload(url, path, fields, headers, timeoutSec); }
+            catch (Throwable t) { holder[0] = false; }
+            finally { latch.countDown(); }
+        }).start();
+        try { latch.await((long) timeoutSec + 60L, TimeUnit.SECONDS); }
+        catch (InterruptedException ie) { return false; }
+        return holder[0];
+    }
+
+    private static boolean doUpload(String url, String path, JSONObject fields,
+                                    Map<String, String> headers, int timeoutSec) throws Exception {
+        File file = resolve(path);
+        if (!file.isFile()) return false;
+        String boundary = "----VUS" + System.currentTimeMillis();
+
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        byte[] CRLF = "\r\n".getBytes("UTF-8");
+        // 附加表单字段
+        if (fields != null) {
+            Iterator<String> ks = fields.keys();
+            while (ks.hasNext()) {
+                String k = ks.next();
+                body.write(("--" + boundary + CRLF).getBytes("UTF-8"));
+                body.write(("Content-Disposition: form-data; name=\"" + k + "\"" + CRLF + CRLF).getBytes("UTF-8"));
+                body.write(fields.optString(k).getBytes("UTF-8"));
+                body.write(CRLF);
+            }
+        }
+        // 文件部分
+        body.write(("--" + boundary + CRLF).getBytes("UTF-8"));
+        String filename = file.getName();
+        body.write(("Content-Disposition: form-data; name=\"file\"; filename=\"" + filename + "\"" + CRLF).getBytes("UTF-8"));
+        body.write(("Content-Type: application/octet-stream" + CRLF + CRLF).getBytes("UTF-8"));
+        InputStream in = new java.io.FileInputStream(file);
+        byte[] buf = new byte[16384];
+        int r;
+        while ((r = in.read(buf)) > 0) body.write(buf, 0, r);
+        in.close();
+        body.write(CRLF);
+        body.write(("--" + boundary + "--" + CRLF).getBytes("UTF-8"));
+        byte[] payload = body.toByteArray();
+
+        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+        conn.setConnectTimeout(timeoutSec * 1000);
+        conn.setReadTimeout(timeoutSec * 1000);
+        conn.setRequestMethod("POST");
+        conn.setDoOutput(true);
+        conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+        conn.setRequestProperty("User-Agent", "VUS-Android/1.0");
+        if (headers != null) {
+            for (Map.Entry<String, String> e : headers.entrySet()) {
+                if (e.getKey() != null && e.getValue() != null)
+                    conn.setRequestProperty(e.getKey(), e.getValue());
+            }
+        }
+        OutputStream os = conn.getOutputStream();
+        os.write(payload);
+        os.flush();
+        os.close();
+        int code = conn.getResponseCode();
+        InputStream resp = conn.getInputStream();
+        while (resp.read() != -1) { }            // 读完响应便于连接复用
+        resp.close();
+        return code >= 200 && code < 300;
+    }
+
+    /* ---- WebView JS 桥 → VUA 事件（反馈「JS 回调要接回 vuaTrigger 事件」） ----
+     * 网页内 window.vus.onEvent("事件名", "{...}") 由此转发；JS 回调线程不保证是
+     * 主线程，统一切主线程再进 native，避免跨线程 JNI 状态问题。 */
+    private static final Handler sMain = new Handler(Looper.getMainLooper());
+    public static void postToTrigger(final String name, final String varsJson) {
+        sMain.post(() -> vuaTrigger(name == null ? "" : name, varsJson == null ? "{}" : varsJson));
+    }
+    public static void postToTriggerById(final String id, final String varsJson) {
+        sMain.post(() -> vuaTriggerById(id == null ? "" : id, varsJson == null ? "{}" : varsJson));
     }
 
     /**

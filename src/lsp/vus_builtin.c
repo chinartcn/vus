@@ -586,6 +586,16 @@ static const VusBuiltin g_builtins[] = {
       "下载 URL 指向的文件到本地路径。返回 \"1\" 成功 / \"0\" 失败。",
       "网络_下载(\"https://example.com/file.zip\", \"/sdcard/file.zip\")",
       VUS_BUILTIN_NET },
+    { "网络_请求",
+      "网络_请求(方式, 地址, 头JSON, 数据, 超时秒, 重试次数)",
+      "通用 HTTP 请求：方式 GET/POST；头JSON 自定义请求头（如 {\"Authorization\":\"Bearer token\"} 做认证）；数据 为 POST 请求体；超时秒 与 重试次数 可空。APK 由 Java 平台桥实现，桌面回退 curl。",
+      "响应 = 网络_请求(\"GET\", \"https://api.example.com/user\", {\"Authorization\":\"Bearer t\"}, \"\", 30, 2)",
+      VUS_BUILTIN_NET },
+    { "文件_上传",
+      "文件_上传(地址, 本地文件, 字段JSON, 头JSON)",
+      "multipart/form-data 上传本地文件：地址 为目标 API；本地文件 为相对 filesDir 或绝对路径；字段JSON 为附加表单字段；头JSON 自定义请求头。APK 专属能力（桌面回退 curl 仅传文件）。返回 \"1\" 成功 / \"0\" 失败。",
+      "结果 = 文件_上传(\"https://api.example.com/upload\", \"photo.jpg\", {\"标签\":\"头像\"}, \"\")",
+      VUS_BUILTIN_NET },
 
     /* ==================== DEX 逻辑拓展（仅 APK） ==================== */
     { "拓展_调用",

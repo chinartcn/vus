@@ -320,6 +320,16 @@ void* vus_plugin_text_split(VusString* text, VusString* sep);
 /* 文本_行：按换行符 \n 拆成列表的一步到位函数（元素 VusString*，含末尾空段） */
 void* vus_plugin_text_lines(VusString* text);
 
+/* 通用网络请求（认证/超时/重试）：网络_请求(方式, 地址, 头JSON, 数据, 超时秒, 重试次数)
+ * APK 走 Java 平台桥（headers 自定义请求头如 token、timeout、retry）；桌面回退 curl。 */
+VusString* vus_plugin_http_request(VusString* method, VusString* url,
+                                   VusString* headers_json, VusString* body,
+                                   VusString* timeout_s, VusString* retry_s);
+/* 文件上传（multipart/form-data）：文件_上传(地址, 本地文件, 字段JSON, 头JSON)
+ * APK 走 Java 平台桥；桌面回退 curl -F（仅文件）。 */
+VusString* vus_plugin_http_upload(VusString* url, VusString* path,
+                                  VusString* fields_json, VusString* headers_json);
+
 /* 日期时间 */
 VusString* vus_plugin_date_now(VusString* dummy);
 VusString* vus_plugin_date_format(VusString* fmt);

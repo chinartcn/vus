@@ -2043,6 +2043,49 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
         }
     }
 
+    /* 网络_请求(方式, 地址, 头JSON, 数据, 超时秒, 重试次数)：认证头/超时/重试（缺省参数用默认值） */
+    if (strcmp(call->func_name, "网络_请求") == 0) {
+        const char *dft[6] = {"vus_string_new(\"GET\")", "vus_string_new(\"\")",
+                              "vus_string_new(\"\")", "vus_string_new(\"\")",
+                              "vus_string_new(\"30\")", "vus_string_new(\"0\")"};
+        char *parts[6] = {NULL, NULL, NULL, NULL, NULL, NULL};
+        if (call->args) {
+            for (size_t i = 0; i < call->args->count && i < 6; i++)
+                parts[i] = gen_expr(buf, call->args->items[i]);
+        }
+        char result[6144];
+        snprintf(result, sizeof(result),
+            "vus_plugin_http_request(%s, %s, %s, %s, %s, %s)",
+            parts[0] ? parts[0] : dft[0],
+            parts[1] ? parts[1] : dft[1],
+            parts[2] ? parts[2] : dft[2],
+            parts[3] ? parts[3] : dft[3],
+            parts[4] ? parts[4] : dft[4],
+            parts[5] ? parts[5] : dft[5]);
+        for (size_t i = 0; i < 6; i++) free(parts[i]);
+        return strdup(result);
+    }
+
+    /* 文件_上传(地址, 本地文件, 字段JSON, 头JSON)：multipart，APK 走 Java 平台桥 */
+    if (strcmp(call->func_name, "文件_上传") == 0) {
+        const char *dft2[4] = {"vus_string_new(\"\")", "vus_string_new(\"\")",
+                               "vus_string_new(\"\")", "vus_string_new(\"\")"};
+        char *parts[4] = {NULL, NULL, NULL, NULL};
+        if (call->args) {
+            for (size_t i = 0; i < call->args->count && i < 4; i++)
+                parts[i] = gen_expr(buf, call->args->items[i]);
+        }
+        char result[4096];
+        snprintf(result, sizeof(result),
+            "vus_plugin_http_upload(%s, %s, %s, %s)",
+            parts[0] ? parts[0] : dft2[0],
+            parts[1] ? parts[1] : dft2[1],
+            parts[2] ? parts[2] : dft2[2],
+            parts[3] ? parts[3] : dft2[3]);
+        for (size_t i = 0; i < 4; i++) free(parts[i]);
+        return strdup(result);
+    }
+
     /* ============= DEX 逻辑拓展（仅 APK） ============= */
     if (strcmp(call->func_name, "拓展_调用") == 0) {
         if (call->args && call->args->count >= 1) {
