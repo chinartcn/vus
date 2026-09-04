@@ -1,6 +1,6 @@
 {
-  "versionCode": 7,
-  "versionName": "1.6",
+  "versionCode": 8,
+  "versionName": "1.7",
   "apkUrl": "https://gitee.com/rtccn_mc/vus/raw/master/testdata/VUS.apk",
-  "changelog": "新增课表测试：Java 平台桥(网络/文件) + 界面_显示_JSON 动态渲染树"
+  "changelog": "新增「课表」控件：TableLayout 表格渲染（表头/节次/课程格，深浅色）；课表页改为课表控件动态上屏"
 }
