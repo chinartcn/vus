@@ -36,6 +36,7 @@ import org.json.JSONObject;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -43,6 +44,19 @@ public final class VuaRenderer {
 
     private static final int COLOR_PRIMARY = 0xFF2962FF; // 主题主色（与 styles.xml colorAccent 一致）
     private static final int BG_LIGHT      = 0xFFF5F6FA; // 页面浅灰底（Material Light windowBackground）
+    private static final int PAGE_CACHE_MAX = 6;          // 页面 View 缓存上限（LRU 逐出）
+
+    /** 页面 View 缓存条目：已构建好的整棵子树 + 输入控件快照。
+     *  缓存命中（重新进入同一页面且渲染树内容相同）时直接挂回 root，
+     *  跳过 JSON 解析与整树 View 重建；输入控件真实状态随 View 保留。 */
+    private static final class PageCache {
+        final View view;
+        final Map<String, View> inputs;
+        PageCache(View view, Map<String, View> inputs) {
+            this.view = view;
+            this.inputs = inputs;
+        }
+    }
 
     private final Context ctx;
     private final ViewGroup root;              // 把重建的 View 树放进这里
@@ -50,19 +64,35 @@ public final class VuaRenderer {
     private final Map<String, String> savedVals; // variable/id -> 上次输入值（重建时恢复控件状态）
     private boolean darkTheme = false;
     private String lastTree = null;            // 上次成功渲染的渲染树（内容相同则跳过重建）
+    private final LinkedHashMap<String, PageCache> pageCache; // 渲染树 JSON -> 已构建 View（LRU）
 
     public VuaRenderer(Context ctx, ViewGroup root) {
         this.ctx = ctx;
         this.root = root;
         this.inputs = new HashMap<>();
         this.savedVals = new HashMap<>();
+        this.pageCache = new LinkedHashMap<>(16, 0.75f, true);   // accessOrder=true → LRU
     }
 
-    /** 重建：清空根容器，把整棵树渲染进去。参数为 native 的渲染树 JSON 字符串。 */
+    /** 重建：清空根容器，把整棵树渲染进去。参数为 native 的渲染树 JSON 字符串。
+     *  三级快路径：
+     *  1) 渲染树与当前屏相同 → 不动作；
+     *  2) 页面 View 缓存命中（重新进入同一页面、内容未变）→ 直接把缓存子树挂回，
+     *     跳过 JSON 解析 / 整树 View 重建（本类的核心页面缓存）；
+     *  3) 未命中 → 正常解析并构建，构建结果入 LRU 缓存。 */
     public void render(String renderTreeJson, String fallbackError) {
-        // 渲染树缓存命中：native 侧 state 未变时返回同一份 JSON，
-        // 内容相同则整棵树无需重建（View 状态保持，省 JSON 解析 + View 构建）。
-        if (renderTreeJson != null && renderTreeJson.equals(lastTree)) return;
+        if (renderTreeJson != null) {
+            if (renderTreeJson.equals(lastTree)) return;            // 当前屏未变
+            PageCache hit = pageCache.get(renderTreeJson);          // 页面缓存命中（get 会 LRU 置新）
+            if (hit != null) {
+                root.removeAllViews();
+                root.addView(hit.view, matchWrap());
+                inputs.clear();
+                inputs.putAll(hit.inputs);                          // 输入控件引用随缓存恢复
+                lastTree = renderTreeJson;
+                return;
+            }
+        }
         saveInputs();   // 重建前先保存现有输入控件状态（下拉/滑块/输入框等）
         root.removeAllViews();
         if (renderTreeJson == null) {
@@ -75,10 +105,24 @@ public final class VuaRenderer {
             lastTree = renderTreeJson;
             darkTheme = "dark".equalsIgnoreCase(tree.optString("主题", tree.optString("theme", "light")));
             root.setBackgroundColor(darkTheme ? 0xFF121212 : BG_LIGHT);
-            buildInto(tree, root);
+            /* 先构建到透明包装容器，整棵子树才能脱离 root 缓存复用 */
+            LinearLayout wrapper = new LinearLayout(ctx);
+            wrapper.setOrientation(LinearLayout.VERTICAL);
+            buildInto(tree, wrapper);
+            root.addView(wrapper, matchWrap());
+            cachePage(renderTreeJson, wrapper);
         } catch (Exception e) {
             String msg = "渲染失败: " + e.getMessage();
             root.addView(TextView(ctx, msg));
+        }
+    }
+
+    /** 页面 View 入缓存（LRU，超出上限逐出最久未用的页）。 */
+    private void cachePage(String key, View view) {
+        pageCache.put(key, new PageCache(view, new HashMap<>(inputs)));
+        while (pageCache.size() > PAGE_CACHE_MAX) {
+            String eldest = pageCache.keySet().iterator().next();
+            pageCache.remove(eldest);
         }
     }
 
