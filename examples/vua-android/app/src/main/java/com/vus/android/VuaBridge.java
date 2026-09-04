@@ -52,9 +52,25 @@ public final class VuaBridge {
     /** Java 检查更新回调：由 VuaRenderer 按钮处理触发 */
     public static Runnable onCheckUpdate = null;
 
+    /** 渲染请求合并标志：native 换屏回调与按钮本地刷新多次请求合并为一次重建，
+     *  避免一次点击触发两次全量重建（先 runOnUiThread 排队、再 refresh 立即渲染）。 */
+    private static boolean renderPending = false;
+
+    /** 请求一次界面重建（合并）。native 重绘回调与 VuaRenderer.refresh 都走这里。 */
+    public static void requestRender() {
+        if (renderPending) return;
+        renderPending = true;
+        if (onRerender != null) onRerender.run();
+    }
+
+    /** 界面真正重建完成后调用，复位合并标志，允许下一次重建。 */
+    public static void renderHandled() {
+        renderPending = false;
+    }
+
     /** 被 native（jni_bridge.c）调用的入口；可能来自非 UI 线程，需自行切到主线程。 */
     public static void onNativeRerender() {
-        if (onRerender != null) onRerender.run();
+        requestRender();
     }
 
     /* ==================== Java 平台能力桥（网络/文件由 Java 暴露、VUS 调用） ====================

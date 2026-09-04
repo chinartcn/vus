@@ -578,6 +578,14 @@ int64_t vus_to_int(VusString* s, int* err) {
         if (err) *err = 1;
         return 0;
     }
+    /* 快速路径：strtoll 只会从数字/正负号/空白（含 \t\n\v\f\r）开头完整解析；
+     * 其余首字符（中文/普通文本常见）必然失败，直接短路，避免高频比较时两次 strtoll。 */
+    char c0 = s->data[0];
+    if (!((c0 >= '0' && c0 <= '9') || c0 == '+' || c0 == '-' ||
+          c0 == ' ' || c0 == '\t' || c0 == '\n' || c0 == '\v' || c0 == '\f' || c0 == '\r')) {
+        if (err) *err = 1;
+        return 0;
+    }
     char* endptr = NULL;
     int64_t result = strtoll(s->data, &endptr, 10);
     if (err) {
@@ -617,6 +625,13 @@ int vus_compare(VusString* a, VusString* b) {
 
 double vus_to_float(VusString* s, int* err) {
     if (!s || !s->data) {
+        if (err) *err = 1;
+        return 0.0;
+    }
+    /* 快速路径：同 vus_to_int，非数字起始（中文/普通文本）直接短路 strtod */
+    char c0 = s->data[0];
+    if (!((c0 >= '0' && c0 <= '9') || c0 == '+' || c0 == '-' ||
+          c0 == ' ' || c0 == '\t' || c0 == '\n' || c0 == '\v' || c0 == '\f' || c0 == '\r')) {
         if (err) *err = 1;
         return 0.0;
     }

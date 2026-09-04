@@ -1,6 +1,6 @@
 {
-  "versionCode": 10,
-  "versionName": "1.9",
+  "versionCode": 11,
+  "versionName": "2.0",
   "apkUrl": "https://gitee.com/rtccn_mc/vus/raw/master/testdata/VUS.apk",
-  "changelog": "修复 DEX 拓展崩溃：JSON_查询 结构化值与 真 比较导致 vus_compare 野指针（比较/转数字自动解包结构值）"
+  "changelog": "VUA 运行时加速：渲染请求合并消除一次点击两次全量重建；比较/转数字高频路径短路 strtoll/strtod"
 }

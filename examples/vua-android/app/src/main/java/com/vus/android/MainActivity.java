@@ -109,8 +109,12 @@ public class MainActivity extends Activity {
     }
 
     private void renderCurrent() {
-        String tree = VuaBridge.vuaRenderTree();
-        renderer.render(tree, "(空界面)");
+        try {
+            String tree = VuaBridge.vuaRenderTree();
+            renderer.render(tree, "(空界面)");
+        } finally {
+            VuaBridge.renderHandled();
+        }
     }
 
     /** 由 native 事件触发检查更新 */
