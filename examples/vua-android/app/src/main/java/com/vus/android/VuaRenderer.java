@@ -49,6 +49,7 @@ public final class VuaRenderer {
     private final Map<String, View> inputs;    // id -> 输入控件（供手机回填/取值）
     private final Map<String, String> savedVals; // variable/id -> 上次输入值（重建时恢复控件状态）
     private boolean darkTheme = false;
+    private String lastTree = null;            // 上次成功渲染的渲染树（内容相同则跳过重建）
 
     public VuaRenderer(Context ctx, ViewGroup root) {
         this.ctx = ctx;
@@ -59,14 +60,19 @@ public final class VuaRenderer {
 
     /** 重建：清空根容器，把整棵树渲染进去。参数为 native 的渲染树 JSON 字符串。 */
     public void render(String renderTreeJson, String fallbackError) {
+        // 渲染树缓存命中：native 侧 state 未变时返回同一份 JSON，
+        // 内容相同则整棵树无需重建（View 状态保持，省 JSON 解析 + View 构建）。
+        if (renderTreeJson != null && renderTreeJson.equals(lastTree)) return;
         saveInputs();   // 重建前先保存现有输入控件状态（下拉/滑块/输入框等）
         root.removeAllViews();
         if (renderTreeJson == null) {
+            lastTree = null;
             root.addView(TextView(ctx, fallbackError != null ? fallbackError : "(无渲染树)"));
             return;
         }
         try {
             JSONObject tree = new JSONObject(renderTreeJson);
+            lastTree = renderTreeJson;
             darkTheme = "dark".equalsIgnoreCase(tree.optString("主题", tree.optString("theme", "light")));
             root.setBackgroundColor(darkTheme ? 0xFF121212 : BG_LIGHT);
             buildInto(tree, root);

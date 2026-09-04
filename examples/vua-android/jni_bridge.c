@@ -110,10 +110,9 @@ Java_com_vus_android_VuaBridge_vuaRenderTree(JNIEnv *env, jclass clazz) {
     VuaSession *s = vua_global_session(NULL);
     VuaScreen *cur = s ? vua_session_current(s) : NULL;
     if (!cur) return NULL;
-    char *tree = (char *)vua_screen_dump_rendertree(cur);   /* malloc'd */
+    const char *tree = vua_screen_dump_rendertree(cur);   /* 所有权归 screen，不得 free */
     if (!tree) return NULL;
     jstring js = (*env)->NewStringUTF(env, tree);
-    free(tree);
     return js;
 }
 

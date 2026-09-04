@@ -81,6 +81,7 @@ struct VuaScreen {
     yyjson_doc *tree;         /* .vua 组件树（yyjson 文档，与渲染承担同一棵树） */
     VusDict    *state;        /* 屏内 变量→值 */
     VusDict    *events;       /* 事件名 → VusClosure* */
+    char       *render_cache; /* 渲染树缓存：state 未变时复用（vua_screen_dump_rendertree 所有者） */
 };
 
 struct VuaSession {
@@ -486,6 +487,7 @@ void vua_screen_free(VuaScreen *screen) {
     if (screen->tree) yyjson_doc_free(screen->tree);
     if (screen->state) vus_unref(screen->state);
     if (screen->events) vus_unref(screen->events);
+    free(screen->render_cache);
     free(screen);
 }
 
@@ -495,6 +497,11 @@ const char *vua_screen_name(VuaScreen *screen) { return screen ? screen->name : 
 
 const char *vua_screen_dump_rendertree(VuaScreen *screen) {
     if (!screen || !screen->tree) return NULL;
+
+    /* 渲染树缓存：screen 的 state / 屏树未变时直接复用上次序列化结果，
+     * 省去整树归一化 + JSON 序列化（高频路径：点击无状态变化 / 返回同屏）。
+     * 缓存由 vua_state_set 置脏（free），屏销毁时随 screen 释放。 */
+    if (screen->render_cache) return screen->render_cache;
 
     yyjson_mut_doc *md = yyjson_mut_doc_new(NULL);
     if (!md) return NULL;
@@ -509,7 +516,9 @@ const char *vua_screen_dump_rendertree(VuaScreen *screen) {
     size_t len = 0;
     char *out = yyjson_mut_write(md, 0, &len);
     yyjson_mut_doc_free(md);
-    return out;  /* malloc 分配，调用方 free() */
+    if (!out) return NULL;
+    screen->render_cache = out;   /* 所有权归 screen，调用方不得 free */
+    return out;
 }
 
 int vua_screen_dump_rendertree_len(const char *rendertree_json) {
@@ -520,7 +529,12 @@ int vua_screen_dump_rendertree_len(const char *rendertree_json) {
 
 VusDict *vua_state(VuaScreen *screen) { return screen ? screen->state : NULL; }
 void vua_state_set(VuaScreen *screen, VusString *var, void *val) {
-    if (screen && var && val) vus_dict_set(screen->state, var, val);
+    if (screen && var && val) {
+        vus_dict_set(screen->state, var, val);
+        /* state 变化 → 渲染树文本必然变化，作废缓存 */
+        free(screen->render_cache);
+        screen->render_cache = NULL;
+    }
 }
 void *vua_state_get(VuaScreen *screen, VusString *var) {
     return (screen && var) ? vus_dict_get(screen->state, var) : NULL;

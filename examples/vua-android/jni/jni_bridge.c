@@ -139,18 +139,17 @@ Java_com_vus_android_VuaBridge_vuaSetRootDir(JNIEnv *env, jclass clazz, jstring 
 }
 
 /* ---- vuaRenderTree ------------------------------------------------------ */
-/* 返回当前屏（栈顶）的规范化渲染树 JSON；无屏返回 NULL。 */
+/* 返回当前屏（栈顶）的规范化渲染树 JSON；无屏返回 NULL。
+ * 返回值由 screen 侧缓存所有（不得 free，见 vua_screen_dump_rendertree）。 */
 JNIEXPORT jstring JNICALL
 Java_com_vus_android_VuaBridge_vuaRenderTree(JNIEnv *env, jclass clazz) {
     (void)clazz;
     VuaSession *s = vua_global_session(NULL);
     VuaScreen *cur = s ? vua_session_current(s) : NULL;
     if (!cur) return NULL;
-    char *tree = (char *)vua_screen_dump_rendertree(cur);   /* malloc'd */
+    const char *tree = vua_screen_dump_rendertree(cur);
     if (!tree) return NULL;
-    jstring js = (*env)->NewStringUTF(env, tree);
-    free(tree);
-    return js;
+    return (*env)->NewStringUTF(env, tree);
 }
 
 /* ---- vuaTrigger / vuaTriggerById ----------------------------------------- */
