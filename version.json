@@ -1,6 +1,6 @@
 {
-  "versionCode": 5,
-  "versionName": "1.4",
+  "versionCode": 6,
+  "versionName": "1.5",
   "apkUrl": "https://gitee.com/rtccn_mc/vus/raw/master/testdata/VUS.apk",
-  "changelog": "修复点击星级评分崩溃（闭包参数数组越界）；星级参数真实传递到事件"
+  "changelog": "引入 Google Material 原生 UI：主色按钮/圆角卡片/描边输入框/浅灰页面背景"
 }

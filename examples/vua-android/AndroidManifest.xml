@@ -13,7 +13,8 @@
     <application
         android:label="VUS 测试"
         android:allowBackup="true"
-        android:hasCode="true">
+        android:hasCode="true"
+        android:theme="@style/Theme.VUS">
 
         <activity
             android:name="com.vus.android.MainActivity"

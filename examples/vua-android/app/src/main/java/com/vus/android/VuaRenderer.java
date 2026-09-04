@@ -39,6 +39,9 @@ import java.util.Map;
 
 public final class VuaRenderer {
 
+    private static final int COLOR_PRIMARY = 0xFF2962FF; // 主题主色（与 styles.xml colorAccent 一致）
+    private static final int BG_LIGHT      = 0xFFF5F6FA; // 页面浅灰底（Material Light windowBackground）
+
     private final Context ctx;
     private final ViewGroup root;              // 把重建的 View 树放进这里
     private final Map<String, View> inputs;    // id -> 输入控件（供手机回填/取值）
@@ -63,7 +66,7 @@ public final class VuaRenderer {
         try {
             JSONObject tree = new JSONObject(renderTreeJson);
             darkTheme = "dark".equalsIgnoreCase(tree.optString("主题", tree.optString("theme", "light")));
-            root.setBackgroundColor(darkTheme ? 0xFF121212 : Color.WHITE);
+            root.setBackgroundColor(darkTheme ? 0xFF121212 : BG_LIGHT);
             buildInto(tree, root);
         } catch (Exception e) {
             String msg = "渲染失败: " + e.getMessage();
@@ -112,9 +115,21 @@ public final class VuaRenderer {
         return ll;
     }
 
+    /** 竖容器（列/卡片/表单/界面）套圆角白卡片背景，浅灰页面上形成 Material 卡片层次。 */
+    private void styleVertCard(LinearLayout ll) {
+        android.graphics.drawable.GradientDrawable g = new android.graphics.drawable.GradientDrawable();
+        g.setColor(darkTheme ? 0xFF1E1E1E : 0xFFFFFFFF);
+        g.setCornerRadius(dp(14));
+        if (!darkTheme) g.setStroke(dp(1), 0x14000000);
+        ll.setBackground(g);
+        ll.setElevation(dp(1));
+        ll.setPadding(dp(16), dp(12), dp(16), dp(12));
+    }
+
     private void layout(JSONObject node, ViewGroup parent, boolean vert) throws Exception {
         LinearLayout ll = makeLayout(vert);
         parent.addView(ll, matchWrap());
+        if (vert) styleVertCard(ll);
         JSONArray ch = node.optJSONArray("children");
         if (ch == null) ch = node.optJSONArray("子组件");
         if (ch != null) {
@@ -140,6 +155,8 @@ public final class VuaRenderer {
             default: sp = 14;
         }
         t.setTextSize(sp); t.setTypeface(Typeface.DEFAULT, styleB);
+        // 标题类文本用主题主色，正文保持正文色
+        if (styleB == Typeface.BOLD) t.setTextColor(darkTheme ? 0xFF8FB4FF : COLOR_PRIMARY);
         rememberInput(node, t);
         return t;
     }
@@ -148,6 +165,18 @@ public final class VuaRenderer {
         final Button b = new Button(ctx);
         b.setText(node.optString("文字", node.optString("text", "确定")));
         b.setAllCaps(false);
+        String btxt = b.getText().toString();
+        if ("★".equals(btxt)) {
+            // 星级评分「★」用幽灵按钮：透明底 + 主色大字（主题 Colored 样式会误填色块）
+            b.setBackgroundColor(Color.TRANSPARENT);
+            b.setTextSize(22);
+            b.setTextColor(darkTheme ? 0xFF8FB4FF : COLOR_PRIMARY);
+            b.setMinHeight(0);
+        } else {
+            b.setMinHeight(dp(44));
+            b.setPadding(dp(18), 0, dp(18), 0);
+            if (darkTheme) b.setTextColor(0xFFE0E0E0);
+        }
         // 存事件名/id，供点击时派发
         final String evName = eventName(node);
         final JSONArray collect = eventCollect(node);
@@ -177,6 +206,20 @@ public final class VuaRenderer {
                                  : InputType.TYPE_CLASS_TEXT);
         e.setHint(node.optString("提示", node.optString("placeholder", "")));
         e.setSingleLine(!multiline);
+        // Material 风格：圆角浅底衬色输入框（弃默认下划线，外描边聚焦前后统一）
+        android.graphics.drawable.GradientDrawable eg = new android.graphics.drawable.GradientDrawable();
+        eg.setColor(darkTheme ? 0xFF2A2A2A : 0xFFF2F3F7);
+        eg.setCornerRadius(dp(10));
+        eg.setStroke(dp(1), darkTheme ? 0xFF444444 : 0xFFDDE2EC);
+        e.setBackground(eg);
+        e.setPadding(dp(12), dp(10), dp(12), dp(10));
+        e.setMinHeight(dp(46));
+        final int normalStroke = darkTheme ? 0xFF444444 : 0xFFDDE2EC;
+        e.setOnFocusChangeListener((v, has) -> {
+            android.graphics.drawable.GradientDrawable g2 = (android.graphics.drawable.GradientDrawable) e.getBackground();
+            g2.setStroke(dp(has ? 2 : 1), has ? COLOR_PRIMARY : normalStroke);
+        });
+        if (darkTheme) e.setTextColor(0xFFE0E0E0);
         // 记录 variable——用户在触发按钮时由 collectVars 从这里读值
         rememberInput(node, e);
         // 重建时恢复输入框已录入内容（避免整树刷新后清空）
