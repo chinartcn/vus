@@ -155,14 +155,16 @@ Java_com_vus_android_VuaBridge_vuaRenderTree(JNIEnv *env, jclass clazz) {
 /* ---- vuaRenderHash ------------------------------------------------------ */
 /* 渲染树内容指纹（版本号协议）：Java 只凭指纹决定是否重建/取 JSON。
  * 指纹未变 = 内容未变，可跳过整树传输；配合页面 View 缓存直接显缓存。
- * 无屏返回 -1。 */
+ * 无屏返回 -1。注意：FNV-1a 结果高位可能为 1，直接转有符号 jlong 会变负，
+ * 与"无屏 -1"冲突导致 Java 误判为空界面——必须屏蔽符号位（损失 1 bit 碰撞
+ * 余量，2^-63 概率可忽略）。 */
 JNIEXPORT jlong JNICALL
 Java_com_vus_android_VuaBridge_vuaRenderHash(JNIEnv *env, jclass clazz) {
     (void)env; (void)clazz;
     VuaSession *s = vua_global_session(NULL);
     VuaScreen *cur = s ? vua_session_current(s) : NULL;
     if (!cur) return -1;
-    return (jlong)vua_screen_rendertree_hash(cur);
+    return (jlong)(vua_screen_rendertree_hash(cur) & 0x7FFFFFFFFFFFFFFFULL);
 }
 
 /* ---- vuaTrigger / vuaTriggerById ----------------------------------------- */

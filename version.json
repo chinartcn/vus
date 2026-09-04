@@ -1,6 +1,6 @@
 {
-  "versionCode": 14,
-  "versionName": "2.3",
+  "versionCode": 15,
+  "versionName": "2.4",
   "apkUrl": "https://gitee.com/rtccn_mc/vus/raw/master/testdata/VUS.apk",
-  "changelog": "版本号协议：native 返回渲染树内容指纹，Java 只凭指纹决定动作——内容未变/页面缓存命中时连 JSON 都不传"
+  "changelog": "修复 2.3 空屏：渲染树指纹转 jlong 未屏蔽符号位，负指纹被误判为无屏"
 }
