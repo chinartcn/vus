@@ -844,7 +844,89 @@ static CURL* vus_curl_easy(const char* url) {
 }
 #endif
 
+/* ============ Java 平台能力桥（网络/文件等由 Java 暴露、VUS 调用） ============
+ * APK 环境：jni_bridge 在 JNI_OnLoad 通过 vus_set_java_callback 注册回调；
+ * VUS 的 网络_* / 文件_* 内建在 APK 内优先走 Java 实现（用户架构约定）。
+ * 桌面/纯 native 环境未注册回调时，各内建自动回退到本文件的内建实现（stdio/curl）。
+ * RPC 协议：入参 args 为 JSON 字符串；返回值 {"ok":1,"data":"..."} / {"ok":0,"err":"..."}。 */
+
+static void (*g_java_cb)(const char *api, const char *args, char **out) = NULL;
+
+void vus_set_java_callback(void (*fn)(const char *api, const char *args, char **out)) {
+    g_java_cb = fn;
+}
+
+/* 单键值 JSON 参数构造（值做 JSON 字符串转义），返回 malloc 缓冲（调用方 free）。 */
+static char *vus_java_json_kv(const char *key, const char *val) {
+    if (!key) return NULL;
+    if (!val) val = "";
+    size_t klen = strlen(key), vlen = strlen(val), cap = klen + vlen + 16;
+    char *out = (char *)malloc(cap);
+    if (!out) return NULL;
+    char *p = out;
+    *p++ = '{'; *p++ = '"';
+    memcpy(p, key, klen); p += klen;
+    *p++ = '"'; *p++ = ':'; *p++ = '"';
+    for (size_t i = 0; i < vlen; i++) {
+        char c = val[i];
+        if (c == '"' || c == '\\') { *p++ = '\\'; }
+        *p++ = c;
+    }
+    *p++ = '"'; *p++ = '}'; *p = '\0';
+    return out;
+}
+
+/* 双键值 JSON 参数构造（{"k1":"v1","k2":"v2"}），值做 JSON 转义，返回 malloc 缓冲。 */
+static char *vus_java_json_2(const char *k1, const char *v1, const char *k2, const char *v2) {
+    if (!k1 || !k2) return NULL;
+    if (!v1) v1 = "";
+    if (!v2) v2 = "";
+    size_t cap = strlen(k1) + strlen(v1) * 2 + strlen(k2) + strlen(v2) * 2 + 32;
+    char *out = (char *)malloc(cap);
+    if (!out) return NULL;
+    char *p = out;
+    *p++ = '{'; *p++ = '"'; memcpy(p, k1, strlen(k1)); p += strlen(k1); *p++ = '"'; *p++ = ':'; *p++ = '"';
+    for (size_t i = 0; i < strlen(v1); i++) { char c = v1[i]; if (c == '"' || c == '\\') *p++ = '\\'; *p++ = c; }
+    *p++ = '"'; *p++ = ','; *p++ = '"'; memcpy(p, k2, strlen(k2)); p += strlen(k2); *p++ = '"'; *p++ = ':'; *p++ = '"';
+    for (size_t i = 0; i < strlen(v2); i++) { char c = v2[i]; if (c == '"' || c == '\\') *p++ = '\\'; *p++ = c; }
+    *p++ = '"'; *p++ = '}'; *p = '\0';
+    return out;
+}
+
+/* 调用 Java 接口并解析返回 JSON：成功返回 data（新 VusString，调用方管理），失败返回 NULL。 */
+static VusString *vus_java_rpc(const char *api, const char *args_json) {
+    if (!g_java_cb || !api || !args_json) return NULL;
+    char *out = NULL;
+    g_java_cb(api, args_json, &out);
+    if (!out) return NULL;
+    VusString *resp = vus_string_new(out);
+    free(out);
+    if (!resp) return NULL;
+    VusString *ret = NULL;
+    yyjson_doc *doc = yyjson_read(vus_string_cstr(resp), (size_t)vus_string_len(resp), 0);
+    if (doc) {
+        yyjson_val *root = yyjson_doc_get_root(doc);
+        if (root && yyjson_is_obj(root)) {
+            yyjson_val *ok = yyjson_obj_get(root, "ok");
+            if (ok && yyjson_is_bool(ok) && yyjson_get_bool(ok)) {
+                yyjson_val *d = yyjson_obj_get(root, "data");
+                if (d && yyjson_is_str(d)) ret = vus_string_new(yyjson_get_str(d));
+            }
+        }
+        yyjson_doc_free(doc);
+    }
+    vus_unref(resp);
+    return ret;
+}
+
 VusString* vus_plugin_http_get(VusString* url) {
+    /* APK：Java 平台层实现；桌面回退 curl */
+    if (url) {
+        char *aj = vus_java_json_kv("url", vus_string_cstr(url));
+        VusString *jr = aj ? vus_java_rpc("http.get", aj) : NULL;
+        free(aj);
+        if (jr) return jr;
+    }
 #ifdef VUS_HAVE_CURL
     if (!url) return vus_string_new("");
     const char* c_url = vus_string_cstr(url);
@@ -870,6 +952,13 @@ VusString* vus_plugin_http_get(VusString* url) {
 }
 
 VusString* vus_plugin_http_post(VusString* url, VusString* data) {
+    /* APK：Java 平台层实现；桌面回退 curl */
+    if (url) {
+        char *aj = vus_java_json_2("url", vus_string_cstr(url), "data", data ? vus_string_cstr(data) : "");
+        VusString *jr = aj ? vus_java_rpc("http.post", aj) : NULL;
+        free(aj);
+        if (jr) return jr;
+    }
 #ifdef VUS_HAVE_CURL
     if (!url) return vus_string_new("");
     const char* c_url = vus_string_cstr(url);
@@ -898,6 +987,13 @@ VusString* vus_plugin_http_post(VusString* url, VusString* data) {
 }
 
 VusString* vus_plugin_http_download(VusString* url, VusString* filepath) {
+    /* APK：Java 平台层实现；桌面回退 curl */
+    if (url && filepath) {
+        char *aj = vus_java_json_2("url", vus_string_cstr(url), "path", vus_string_cstr(filepath));
+        VusString *jr = aj ? vus_java_rpc("http.download", aj) : NULL;
+        free(aj);
+        if (jr) return jr;   /* Java 返回 data="1" 成功 / "0" 失败 */
+    }
 #ifdef VUS_HAVE_CURL
     if (!url || !filepath) return vus_string_new("-1");
     const char* c_url = vus_string_cstr(url);
@@ -1524,6 +1620,13 @@ VusString* vus_typeof(void* obj) { (void)obj; return vus_string_new("空"); }
 #include <errno.h>
 
 VusString* vus_plugin_file_read(VusString* path) {
+    /* APK：Java 平台层实现；桌面回退 stdio */
+    if (path) {
+        char *aj = vus_java_json_kv("path", vus_string_cstr(path));
+        VusString *jr = aj ? vus_java_rpc("file.read", aj) : NULL;
+        free(aj);
+        if (jr) return jr;
+    }
     if (!path) return vus_string_new("");
     const char* c_path = vus_string_cstr(path);
     FILE* fp = fopen(c_path, "rb");
@@ -1544,6 +1647,13 @@ VusString* vus_plugin_file_read(VusString* path) {
 }
 
 VusString* vus_plugin_file_write(VusString* path, VusString* content) {
+    /* APK：Java 平台层实现；桌面回退 stdio */
+    if (path && content) {
+        char *aj = vus_java_json_2("path", vus_string_cstr(path), "content", vus_string_cstr(content));
+        VusString *jr = aj ? vus_java_rpc("file.write", aj) : NULL;
+        free(aj);
+        if (jr) return jr;
+    }
     if (!path || !content) return vus_string_new("-1");
     const char* c_path = vus_string_cstr(path);
     const char* c_data = vus_string_cstr(content);
@@ -1556,6 +1666,13 @@ VusString* vus_plugin_file_write(VusString* path, VusString* content) {
 }
 
 VusString* vus_plugin_file_append(VusString* path, VusString* content) {
+    /* APK：Java 平台层实现；桌面回退 stdio */
+    if (path && content) {
+        char *aj = vus_java_json_2("path", vus_string_cstr(path), "content", vus_string_cstr(content));
+        VusString *jr = aj ? vus_java_rpc("file.append", aj) : NULL;
+        free(aj);
+        if (jr) return jr;
+    }
     if (!path || !content) return vus_string_new("-1");
     const char* c_path = vus_string_cstr(path);
     const char* c_data = vus_string_cstr(content);
@@ -1568,6 +1685,13 @@ VusString* vus_plugin_file_append(VusString* path, VusString* content) {
 }
 
 VusString* vus_plugin_file_exists(VusString* path) {
+    /* APK：Java 平台层实现；桌面回退 stdio */
+    if (path) {
+        char *aj = vus_java_json_kv("path", vus_string_cstr(path));
+        VusString *jr = aj ? vus_java_rpc("file.exists", aj) : NULL;
+        free(aj);
+        if (jr) return jr;
+    }
     if (!path) return vus_string_new("0");
     const char* c_path = vus_string_cstr(path);
     struct stat st;
@@ -1575,12 +1699,26 @@ VusString* vus_plugin_file_exists(VusString* path) {
 }
 
 VusString* vus_plugin_file_delete(VusString* path) {
+    /* APK：Java 平台层实现；桌面回退 stdio */
+    if (path) {
+        char *aj = vus_java_json_kv("path", vus_string_cstr(path));
+        VusString *jr = aj ? vus_java_rpc("file.delete", aj) : NULL;
+        free(aj);
+        if (jr) return jr;
+    }
     if (!path) return vus_string_new("-1");
     const char* c_path = vus_string_cstr(path);
     return vus_string_new(remove(c_path) == 0 ? "0" : "-1");
 }
 
 VusString* vus_plugin_file_list(VusString* path) {
+    /* APK：Java 平台层实现；桌面回退 stdio */
+    if (path) {
+        char *aj = vus_java_json_kv("path", vus_string_cstr(path));
+        VusString *jr = aj ? vus_java_rpc("file.list", aj) : NULL;
+        free(aj);
+        if (jr) return jr;
+    }
     if (!path) return vus_string_new("");
     const char* c_path = vus_string_cstr(path);
     DIR* dir = opendir(c_path);
@@ -1615,6 +1753,13 @@ VusString* vus_plugin_file_list(VusString* path) {
 /* ---- 判断路径是否为目录（供"文件管理器"区分文件与目录） ---- */
 #include <sys/stat.h>
 VusString* vus_plugin_file_isdir(VusString* path) {
+    /* APK：Java 平台层实现；桌面回退 stat */
+    if (path) {
+        char *aj = vus_java_json_kv("path", vus_string_cstr(path));
+        VusString *jr = aj ? vus_java_rpc("file.isdir", aj) : NULL;
+        free(aj);
+        if (jr) return jr;
+    }
     struct stat st;
     if (path && vus_string_cstr(path) && stat(vus_string_cstr(path), &st) == 0 && S_ISDIR(st.st_mode))
         return vus_string_new("true");

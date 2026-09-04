@@ -18,12 +18,31 @@
  */
 package com.vus.android;
 
+import android.content.Context;
+import android.os.Looper;
+
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+
 public final class VuaBridge {
 
     static {
         // 与 vus_apk.c 生成的壳保持一致：native 库名 libvus_app.so
         System.loadLibrary("vus_app");
     }
+
+    /** 应用 Context：由 MainActivity.onCreate 注入，供 callJava 平台能力桥解析文件路径/目录。 */
+    public static Context appContext = null;
 
     /** native → Java 重绘回调：屏栈变化（界面_显示/返回/返回至）后由 native 调用。
      * MainActivity 在此注册一个 runnable 来重建当前屏的 View。
@@ -36,6 +55,154 @@ public final class VuaBridge {
     /** 被 native（jni_bridge.c）调用的入口；可能来自非 UI 线程，需自行切到主线程。 */
     public static void onNativeRerender() {
         if (onRerender != null) onRerender.run();
+    }
+
+    /* ==================== Java 平台能力桥（网络/文件由 Java 暴露、VUS 调用） ====================
+     * jni_bridge.c 把 VUS 内建（网络_GET/文件_读取 等）同步转发到这里。
+     * args：JSON 对象字符串（{"path":"..."} / {"url":"...","data":"..."}）；
+     * 返回：{"ok":1,"data":"..."} 或 {"ok":0,"err":"..."}（均为 JSON 字符串）。
+     * 文件路径按相对名（相对应用 filesDir）解析，与 native 的 cwd 一致。 */
+
+    /** 被 native 调用的 RPC 入口。保证本方法内不抛异常（错误转成 ok:0 返回）。 */
+    public static String callJava(String api, String argsJson) {
+        try {
+            JSONObject a = new JSONObject(argsJson == null ? "{}" : argsJson);
+            if ("file.read".equals(api)) {
+                File f = resolve(a.optString("path"));
+                if (!f.isFile()) return err("文件不存在");
+                return ok(readUtf8(f));
+            }
+            if ("file.write".equals(api) || "file.append".equals(api)) {
+                File f = resolve(a.optString("path"));
+                new File(f.getParent()).mkdirs();
+                byte[] b = a.optString("content").getBytes("UTF-8");
+                writeBytes(f, b, "file.append".equals(api));
+                return ok("0");
+            }
+            if ("file.exists".equals(api)) {
+                return ok(resolve(a.optString("path")).exists() ? "1" : "0");
+            }
+            if ("file.delete".equals(api)) {
+                return ok(resolve(a.optString("path")).delete() ? "0" : "-1");
+            }
+            if ("file.isdir".equals(api)) {
+                return ok(resolve(a.optString("path")).isDirectory() ? "true" : "false");
+            }
+            if ("file.list".equals(api)) {
+                String[] names = resolve(a.optString("path")).list();
+                if (names == null) return ok("");
+                StringBuilder sb = new StringBuilder();
+                for (String n : names) sb.append(n).append('\n');
+                return ok(sb.toString());
+            }
+            if ("http.get".equals(api)) {
+                byte[] b = httpGetBytes(a.optString("url"), null, 30000);
+                return ok(b == null ? "" : new String(b, "UTF-8"));
+            }
+            if ("http.post".equals(api)) {
+                byte[] b = httpGetBytes(a.optString("url"), a.optString("data"), 30000);
+                return ok(b == null ? "" : new String(b, "UTF-8"));
+            }
+            if ("http.download".equals(api)) {
+                byte[] b = httpGetBytes(a.optString("url"), null, 60000);
+                if (b == null) return ok("0");
+                File f = resolve(a.optString("path"));
+                new File(f.getParent()).mkdirs();
+                writeBytes(f, b, false);
+                return ok("1");
+            }
+            return err("未知能力: " + api);
+        } catch (Exception e) {
+            return err(String.valueOf(e));
+        }
+    }
+
+    private static String ok(String data) {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("ok", true);
+            o.put("data", data == null ? "" : data);
+            return o.toString();
+        } catch (Exception e) { return "{\"ok\":false,\"err\":\"encode\"}"; }
+    }
+
+    private static String err(String msg) {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("ok", false);
+            o.put("err", msg == null ? "" : msg);
+            return o.toString();
+        } catch (Exception e) { return "{\"ok\":false}"; }
+    }
+
+    /** 相对名 → 应用文件目录下的绝对文件；绝对路径则原样使用。 */
+    private static File resolve(String name) {
+        File f = new File(name == null ? "" : name);
+        if (f.isAbsolute() || appContext == null) return f;
+        return new File(appContext.getFilesDir(), name);
+    }
+
+    /* ---- 文件 IO ---- */
+    private static String readUtf8(File f) throws Exception {
+        byte[] b = new byte[(int) f.length()];
+        InputStream in = new java.io.FileInputStream(f);
+        int off = 0;
+        while (off < b.length) {
+            int r = in.read(b, off, b.length - off);
+            if (r < 0) break;
+            off += r;
+        }
+        in.close();
+        return new String(b, 0, off, "UTF-8");
+    }
+
+    private static void writeBytes(File f, byte[] b, boolean append) throws Exception {
+        FileOutputStream fo = new FileOutputStream(f, append);
+        fo.write(b);
+        fo.close();
+    }
+
+    /* ---- HTTP（主线程规避：Android 禁止主线程联网时转子线程同步等待） ---- */
+    private static boolean isMainThread() {
+        return Looper.myLooper() == Looper.getMainLooper();
+    }
+
+    private static byte[] httpGetBytes(final String url, final String data, final int timeout) throws Exception {
+        if (!isMainThread()) return doHttp(url, data, timeout);
+        final byte[][] holder = new byte[1][];
+        final Throwable[] terr = new Throwable[1];
+        final CountDownLatch latch = new CountDownLatch(1);
+        new Thread(() -> {
+            try { holder[0] = doHttp(url, data, timeout); }
+            catch (Throwable t) { terr[0] = t; }
+            finally { latch.countDown(); }
+        }).start();
+        latch.await(timeout + 10000L, TimeUnit.MILLISECONDS);
+        if (terr[0] != null) throw new Exception(terr[0]);
+        return holder[0];
+    }
+
+    private static byte[] doHttp(String url, String data, int timeout) throws Exception {
+        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+        conn.setConnectTimeout(timeout);
+        conn.setReadTimeout(timeout);
+        conn.setRequestProperty("User-Agent", "VUS-Android/1.0");
+        if (data != null) {
+            conn.setRequestMethod("POST");
+            conn.setDoOutput(true);
+            conn.getOutputStream().write(data.getBytes("UTF-8"));
+        } else {
+            conn.setRequestMethod("GET");
+        }
+        int code = conn.getResponseCode();
+        if (code != 200) return null;
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        InputStream in = conn.getInputStream();
+        byte[] buf = new byte[8192];
+        int r;
+        while ((r = in.read(buf)) > 0) bos.write(buf, 0, r);
+        in.close();
+        return bos.toByteArray();
     }
 
     /**

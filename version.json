@@ -1,6 +1,6 @@
 {
-  "versionCode": 6,
-  "versionName": "1.5",
+  "versionCode": 7,
+  "versionName": "1.6",
   "apkUrl": "https://gitee.com/rtccn_mc/vus/raw/master/testdata/VUS.apk",
-  "changelog": "引入 Google Material 原生 UI：主色按钮/圆角卡片/描边输入框/浅灰页面背景"
+  "changelog": "新增课表测试：Java 平台桥(网络/文件) + 界面_显示_JSON 动态渲染树"
 }
