@@ -54,12 +54,45 @@ VUX_CACHE_DIR = VUS_HOME / "cache"
 VUX_JSON_SCHEMA_VERSION = 1
 
 # 插件仓库注册表（可扩展）
+# 官方仓库 = official-vus.vux-package：目录结构 <repo>/<repo>.vux + packages.json 索引
 REGISTRIES = [
     {
         "name": "官方仓库",
-        "url": "https://gitee.com/rtccn_mc/vus-plugins/raw/main/registry.json",
+        "url": "https://gitee.com/rtccn_mc/official-vus.vux-package/raw/master",
     },
 ]
+
+
+def resolve_package_url(registry, source):
+    """按插件名解析官方仓库中的 .vux 下载 URL。
+
+    优先读取 packages.json 索引取得 repo 目录（新结构 <repo>/<name>.vux）；
+    失败时回退为仓库根下的平铺 <name>.vux（兼容旧结构）。
+    路径段做百分号编码：中文包名经 urllib 代理下载时必须为纯 ASCII URL。
+    索引下载失败会重试，避免 gitee 间歇限流（429）导致误回退。
+    """
+    import urllib.request
+    from urllib.parse import quote
+    base = registry["url"].rstrip("/")
+    idx = None
+    for attempt in range(2):
+        try:
+            req = urllib.request.Request(f"{base}/packages.json", headers={"User-Agent": "vus-vux-manager"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                idx = json.load(r)
+            break
+        except Exception as e:
+            print(f"  ⚠ 包索引下载失败(尝试{attempt + 1}/2): {e}")
+            if attempt == 0:
+                import time
+                time.sleep(1)
+            idx = None
+    if idx:
+        pkgs = idx.get("packages", {})
+        if source in pkgs:
+            repo = pkgs[source].get("repo") or source
+            return f"{base}/{quote(repo, safe='')}/{quote(source, safe='')}.vux"
+    return f"{base}/{quote(source, safe='')}.vux"
 
 
 # ============================
@@ -231,15 +264,24 @@ def install_plugin(source):
         else:
             print(f"插件 '{source}' 未找到本地文件，尝试从仓库下载...")
             for registry in REGISTRIES:
-                url = f"{registry['url'].rstrip('/')}/{source}.vux"
-                try:
-                    import urllib.request
-                    with tempfile.NamedTemporaryFile(suffix=".vux", delete=False) as tmp:
-                        urllib.request.urlretrieve(url, tmp.name)
-                        source = tmp.name
-                    break
-                except Exception:
+                url = resolve_package_url(registry, source)
+                for attempt in range(2):
+                    try:
+                        import urllib.request
+                        print(f"  从 {url} 下载...")
+                        with tempfile.NamedTemporaryFile(suffix=".vux", delete=False) as tmp:
+                            urllib.request.urlretrieve(url, tmp.name)
+                            source = tmp.name
+                        break
+                    except Exception as e:
+                        print(f"  ⚠ 下载失败(尝试{attempt + 1}/2): {e}")
+                        if attempt == 0:
+                            import time
+                            time.sleep(1)
+                        continue
+                else:
                     continue
+                break
             else:
                 print(f"错误: 无法找到插件 '{source}'", file=sys.stderr)
                 return False
