@@ -545,7 +545,35 @@ VusString* vus_add(VusString* a, VusString* b) {
     return vus_string_concat(a, b);
 }
 
+/* 兼容结构化值（JSON_查询/JSON_解析 返回的 VusObject）在比较/转数字场景的自动解包：
+ * 标量(字符串)直接返回内部文本；列表/字典序列化为 JSON 文本（owned=1，调用方 vus_unref）。
+ * 直接传 VusString* 时原样返回（owned=0），避免把 VusObject 当 VusString 解引用野指针。 */
+static VusString *vus_value_unwrap(void *v, int *owned) {
+    if (owned) *owned = 0;
+    if (!v || !vus_is_object(v)) return (VusString *)v;
+    VusObject *o = (VusObject *)v;
+    if (o->type == TYPE_LIST || o->type == TYPE_DICT) {
+        VusString *s = vus_json_generate(v);
+        if (s && owned) *owned = 1;
+        return s;
+    }
+    return o->u.str;
+}
+
 int64_t vus_to_int(VusString* s, int* err) {
+    if (!s) {
+        if (err) *err = 1;
+        return 0;
+    }
+    int owned = 0;
+    VusString *tmp = vus_value_unwrap(s, &owned);
+    if (owned) {
+        /* 容器（列表/字典）无法转数字 */
+        if (err) *err = 1;
+        vus_unref(tmp);
+        return 0;
+    }
+    s = tmp;
     if (!s || !s->data) {
         if (err) *err = 1;
         return 0;
@@ -568,15 +596,23 @@ VusString* vus_to_string(int64_t n) {
 // 否则按字典序（strcmp）比较。返回 -1 / 0 / 1，供 == != < > <= >= 使用。
 // 避免旧实现把非数字字符串都转成 0 导致 "abc" == "xyz" 被误判为真。
 int vus_compare(VusString* a, VusString* b) {
+    int oa = 0, ob = 0;
+    VusString *ta = vus_value_unwrap(a, &oa);
+    VusString *tb = vus_value_unwrap(b, &ob);
     int err_a = 0, err_b = 0;
-    int64_t na = vus_to_int(a, &err_a);
-    int64_t nb = vus_to_int(b, &err_b);
+    int64_t na = vus_to_int(ta, &err_a);
+    int64_t nb = vus_to_int(tb, &err_b);
+    int r;
     if (err_a == 0 && err_b == 0) {
-        return (na > nb) - (na < nb);
+        r = (na > nb) - (na < nb);
+    } else {
+        const char* ca = ta ? vus_string_cstr(ta) : "";
+        const char* cb = tb ? vus_string_cstr(tb) : "";
+        r = strcmp(ca, cb);
     }
-    const char* ca = a ? vus_string_cstr(a) : "";
-    const char* cb = b ? vus_string_cstr(b) : "";
-    return strcmp(ca, cb);
+    if (oa) vus_unref(ta);
+    if (ob) vus_unref(tb);
+    return r;
 }
 
 double vus_to_float(VusString* s, int* err) {
