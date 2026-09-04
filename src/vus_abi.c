@@ -13,6 +13,7 @@
 #include "config.h"
 #include "vus_lang.h"
 #include "vus_vusx.h"
+#include "vus_vaz.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -147,6 +148,19 @@ static void expand_rec(const char *content, const char *base_dir,
             char modname[256];
             size_t clen = mlen < sizeof(modname) - 1 ? mlen : sizeof(modname) - 1;
             memcpy(modname, mod, clen); modname[clen] = '\0';
+            /* 去引号：「导入 "包名" / 从 "包" 导入」 */
+            {
+                char q = modname[0];
+                size_t mn = strlen(modname);
+                if ((q == '"' || q == '\'') && mn >= 2 && modname[mn - 1] == q) {
+                    char tmp[256];
+                    size_t tl = mn - 2;
+                    if (tl >= sizeof(tmp)) tl = sizeof(tmp) - 1;
+                    memcpy(tmp, modname + 1, tl);
+                    tmp[tl] = '\0';
+                    strcpy(modname, tmp);
+                }
+            }
 
             char file[1024]; int found = 0;
             struct stat st;
@@ -162,6 +176,24 @@ static void expand_rec(const char *content, const char *base_dir,
             if (!found) {
                 snprintf(file, sizeof(file), "%s.vus", modname);
                 if (stat(file, &st) == 0 && S_ISREG(st.st_mode)) found = 1;
+            }
+
+            if (!found) {
+                /* .vaz 依赖包回退：「导入 "包名"」→ 解析并内联包逻辑库源码 */
+                char *vaz_src = NULL;
+                char vlibdir[1024];
+                if (vus_vaz_import(modname, base_dir, &vaz_src, NULL,
+                                   vlibdir, sizeof(vlibdir)) == 0 && vaz_src) {
+                    if (!set_has(set, vlibdir)) {
+                        set_add(set, vlibdir);
+                        expand_rec(vaz_src, vlibdir, set, out);
+                    }
+                    free(vaz_src);
+                    free(line);
+                    if (!nl) break;
+                    p = nl + 1;
+                    continue;
+                }
             }
 
             if (found && !set_has(set, file)) {

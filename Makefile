@@ -30,7 +30,7 @@ SRCS     = $(SRC_DIR)/main.c $(SRC_DIR)/token.c $(SRC_DIR)/lexer.c \
            $(SRC_DIR)/parser.c $(SRC_DIR)/generator.c $(SRC_DIR)/config.c \
            $(SRC_DIR)/ast.c $(SRC_DIR)/vus_abi.c $(SRC_DIR)/vus_plugin.c \
            $(SRC_DIR)/vus_lang.c $(SRC_DIR)/vus_vusx.c $(SRC_DIR)/vus_apk.c \
-           $(SRC_DIR)/vus_chart.c \
+           $(SRC_DIR)/vus_chart.c $(SRC_DIR)/vus_vaz.c \
            $(SRC_DIR)/gen_builtin_io.c $(SRC_DIR)/gen_builtin_gui.c \
            $(SRC_DIR)/gen_builtin_net.c $(SRC_DIR)/gen_builtin_plugin.c \
            $(SRC_DIR)/gen_builtin_date.c $(SRC_DIR)/gen_builtin_data.c \
@@ -171,6 +171,12 @@ VUSX_INT = $(SRC_DIR)/vus_vusx.h
 
 $(BUILD_DIR)/vus_vusx.o: $(SRC_DIR)/vus_vusx.c $(VUSX_H) $(VUSX_INT) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c -o $@ $<
+
+# vaz Android 扩展包
+VAZ_INT = $(SRC_DIR)/vus_vaz.h
+
+$(BUILD_DIR)/vus_vaz.o: $(SRC_DIR)/vus_vaz.c $(VAZ_INT) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(SRC_DIR) -I$(RT_DIR)/yyjson -c -o $@ $<
 
 # 谱面生成（体感音游）
 CHART_H = $(SRC_DIR)/vus_chart.h

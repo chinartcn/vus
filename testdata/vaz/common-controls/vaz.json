@@ -1,0 +1,7 @@
+{
+  "名称": "通用控件包",
+  "版本": "0.1.0",
+  "描述": "示例 .vaz 扩展包：搜索条复合控件 + 通用工具逻辑库",
+  "控件": ["controls/search_bar.json", "controls/rating_bar.json"],
+  "逻辑": ["logic/utils.vus"]
+}

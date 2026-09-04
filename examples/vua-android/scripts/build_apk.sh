@@ -21,6 +21,8 @@ MANIFEST="$ROOT/AndroidManifest.xml"
 
 VUS_C="${VUS_C:-$ROOT/build/vus_app.c}"            # 由 vua_test.vus 生成
 VUA_SRC="${VUA_SRC:-$ROOT/../../rt}"               # rt/ 目录(vua.c/libvus_rt.c/vus_coro.c/yyjson)
+# 可选 .vaz 扩展包（插件式：目录含 vaz.json 即启用；逻辑依赖已在 vua_test.vus 用 导入 "包名" 声明）
+VAZ="${VAZ:-$TESTDATA_SRC/vaz/common-controls}"
 
 # ---------- 工具 ----------
 BT="$SDK/bt/android-14"
@@ -36,17 +38,27 @@ printf '== VUS APK build ==\n'
 printf '  ABI=%s  NDK=%s  SDK=%s\n' "$ABI" "$NDK" "$SDK"
 mkdir -p "$WORK" "$STM" "$LS"
 
-# ---------- 0. 同步资产 + 生成 vus_app.c（保证页面与逻辑一致） ----------
+# ---------- 0. 同步资产（vua 页面 + 控件表以 testdata 为单一来源） ----------
+cp "$TESTDATA_SRC"/vua_home.vua "$TESTDATA_SRC"/vua_settings.vua \
+   "$TESTDATA_SRC"/vua_logic.vua "$TESTDATA_SRC"/vua_controls.json "$ASSETS/"
+cp "$TESTDATA_SRC"/*.jpg "$ASSETS"/ 2>/dev/null || true
+
+# ---------- 0b. 可选: .vaz 控件模板展开（无包则跳过，核心分层不变） ----------
+if [ -f "$VAZ/vaz.json" ]; then
+  VUS_BIN="${VUS_BIN:-$ROOT/../../vus}"
+  echo "[0b] 展开 .vaz 控件模板: $VAZ"
+  "$VUS_BIN" vaz expand "$ASSETS" -v "$VAZ"
+fi
+
+# ---------- 0c. 生成 vus_app.c（vua_test.vus 内 导入 "通用控件包" 由编译器自动展开） ----------
 VUS_BIN="${VUS_BIN:-$ROOT/../../vus}"
 if [ ! -f "$VUS_C" ] || [ "$TESTDATA_SRC/vua_test.vus" -nt "$VUS_C" ]; then
-  echo "[0/6] 由 $TESTDATA_SRC/vua_test.vus 生成 vus_app.c"
+  echo "[0c/6] 由 vua_test.vus 生成 vus_app.c"
+  rm -f "$TESTDATA_SRC/构建/vua_test.c"
   ( cd "$TESTDATA_SRC" && "$VUS_BIN" build --c-only vua_test.vus >/dev/null 2>&1 )
   cp "$TESTDATA_SRC"/构建/vua_test.c "$VUS_C"
   sed -i 's/^int main(void)/int vus_main(void)/' "$VUS_C"
 fi
-cp "$TESTDATA_SRC"/vua_home.vua "$TESTDATA_SRC"/vua_settings.vua \
-   "$TESTDATA_SRC"/vua_logic.vua "$TESTDATA_SRC"/vua_controls.json "$ASSETS/"
-cp "$TESTDATA_SRC"/*.jpg "$ASSETS"/ 2>/dev/null || true
 
 # ---------- 1. 编译 native .so ----------
 echo "[1/6] 编译 native ($ABI) -> libvus_app.so"
