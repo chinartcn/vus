@@ -111,20 +111,28 @@ VusString* vus_string_intern(const char* s) {
     return nv;
 }
 
+/* 分配指定长度、data 未初始化的新串（ref=1；调用方自行填充 data）。 */
+static VusString* vus_string_new_raw(int len) {
+    VusString* s = (VusString*)malloc(sizeof(VusString));
+    if (!s) return NULL;
+    s->ref = 1;
+    s->len = len;
+    s->data = (char*)malloc((size_t)len + 1);
+    if (!s->data) { free(s); return NULL; }
+    return s;
+}
+
 VusString* vus_string_concat(VusString* a, VusString* b) {
     if (!a && !b) return vus_string_new("");
-    if (!a) return vus_string_new_len(b->data, b->len);
-    if (!b) return vus_string_new_len(a->data, a->len);
+    if (!a || !a->data) return vus_string_new_len(b ? b->data : "", b ? b->len : 0);
+    if (!b || !b->data) return vus_string_new_len(a->data, a->len);
 
-    int new_len = a->len + b->len;
-    char* buf = (char*)malloc(new_len + 1);
-    if (!buf) return NULL;
-    memcpy(buf, a->data, a->len);
-    memcpy(buf + a->len, b->data, b->len);
-    buf[new_len] = '\0';
-
-    VusString* result = vus_string_new_len(buf, new_len);
-    free(buf);
+    /* 直接写入新串 data，免去中间缓冲 + 二次复制 */
+    VusString* result = vus_string_new_raw(a->len + b->len);
+    if (!result) return NULL;
+    memcpy(result->data, a->data, a->len);
+    memcpy(result->data + a->len, b->data, b->len);
+    result->data[a->len + b->len] = '\0';
     return result;
 }
 
@@ -156,6 +164,27 @@ VusList* vus_list_new(int type) {
     list->items = (void**)malloc(sizeof(void*) * list->cap);
     list->type = type;
     return list;
+}
+
+/* 列表图片段：字面量求值创建 VusObject(TYPE_LIST) 装箱（与生成器旧内联模板
+ * 完全等价：ref 初值 0 → 首次 vus_ref 后为 1，vus_unref 到 0 即释放）。
+ * 供生成器把多行内联简化为一行，减少生成 C 体积。 */
+VusObject* vus_object_list(void) {
+    VusObject* o = (VusObject*)calloc(1, sizeof(VusObject));
+    if (!o) return NULL;
+    o->magic = VUS_OBJECT_MAGIC;
+    o->type = TYPE_LIST;
+    o->u.list = vus_list_new(TYPE_MIXED);
+    return o;
+}
+
+VusObject* vus_object_dict(void) {
+    VusObject* o = (VusObject*)calloc(1, sizeof(VusObject));
+    if (!o) return NULL;
+    o->magic = VUS_OBJECT_MAGIC;
+    o->type = TYPE_DICT;
+    o->u.dict = vus_dict_new();
+    return o;
 }
 
 /* 从 VusObject 中解包列表/字典。字面量创建的列表/字典是 VusObject 包裹的。 */
@@ -689,8 +718,11 @@ int64_t vus_to_int(VusString* s, int* err) {
 
 VusString* vus_to_string(int64_t n) {
     char buf[64];
-    snprintf(buf, sizeof(buf), "%lld", (long long)n);
-    return vus_string_new(buf);
+    int len = snprintf(buf, sizeof(buf), "%lld", (long long)n);
+    if (len < 0) len = 0;
+    if (len >= (int)sizeof(buf)) len = (int)sizeof(buf) - 1;
+    /* 用 snprintf 返回值做长度，免 vus_string_new 内二次 strlen 扫描 */
+    return vus_string_new_len(buf, len);
 }
 
 // vus_compare：比较两个字符串。若两者都能解析为整数则按数值比较，

@@ -914,15 +914,13 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
     if (strcmp(call->func_name, "转文本") == 0) {
         if (call->args && call->args->count > 0) {
             char *arg = gen_expr(buf, call->args->items[0]);
-            size_t sz = strlen(arg) + 64;
-            char *result = (char *)malloc(sz);
-            /* VUS 标量统一为 VusString*；vus_to_string 只收 int64，不能直接传串，
-             * 否则指针会被当整数打印。这里做字符串副本，保证任意 VusString* 入参安全。 */
-            snprintf(result, sz, "vus_string_new(vus_string_cstr(%s))", arg);
-            free(arg);
-            return result;
+            /* VUS 标量统一为 VusString*：直接转发入参表达式。
+             * VusString 语义不可变（运行时无原地修改 API），共享实例与副本等价，
+             * 省去 vus_string_new(vus_string_cstr(arg)) 的整串复制。
+             * （对象/容器请用 对象文本 显式转换，与旧行为一致。） */
+            return arg;
         }
-        return strdup("vus_string_new(vus_string_cstr(vus_to_string(0)))");
+        return strdup("vus_to_string(0)");
     }
     if (strcmp(call->func_name, "睡眠") == 0) {
         if (call->args && call->args->count > 0) {
@@ -2551,10 +2549,9 @@ static char *gen_expr(GenBuf *buf, VusAstNode *node) {
         case VUS_AST_LIST_LITERAL: {
             VusAstListLiteral *ll = (VusAstListLiteral *)node;
             /* 用 GCC statement 表达式构造 VusObject（装箱）并逐项 append，
-             * 使列表字面量与 VUS 字符串值模型隔离，可被 vus_print/typeof 安全识别 */
-            char *tmp = strdup("({VusObject* _o=(VusObject*)calloc(1,sizeof(VusObject));"
-                "_o->magic=VUS_OBJECT_MAGIC;_o->type=TYPE_LIST;"
-                "_o->u.list=(VusList*)vus_list_new(TYPE_MIXED);");
+             * 使列表字面量与 VUS 字符串值模型隔离，可被 vus_print/typeof 安全识别。
+             * 装箱由 vus_object_list() 一行完成（与旧多行内联等价）。 */
+            char *tmp = strdup("({VusObject* _o = vus_object_list();");
             if (ll->items) {
                 for (size_t i = 0; i < ll->items->count; i++) {
                     char *e = gen_expr(buf, ll->items->items[i]);
@@ -2572,9 +2569,7 @@ static char *gen_expr(GenBuf *buf, VusAstNode *node) {
         }
         case VUS_AST_DICT_LITERAL: {
             VusAstDictLiteral *dl = (VusAstDictLiteral *)node;
-            char *tmp = strdup("({VusObject* _o=(VusObject*)calloc(1,sizeof(VusObject));"
-                "_o->magic=VUS_OBJECT_MAGIC;_o->type=TYPE_DICT;"
-                "_o->u.dict=(VusDict*)vus_dict_new();");
+            char *tmp = strdup("({VusObject* _o = vus_object_dict();");
             if (dl->keys && dl->values) {
                 for (size_t i = 0; i < dl->keys->count; i++) {
                     char *k = gen_expr(buf, dl->keys->items[i]);
