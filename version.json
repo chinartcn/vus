@@ -1,6 +1,6 @@
 {
-  "versionCode": 11,
-  "versionName": "2.0",
+  "versionCode": 12,
+  "versionName": "2.1",
   "apkUrl": "https://gitee.com/rtccn_mc/vus/raw/master/testdata/VUS.apk",
-  "changelog": "VUA 运行时加速：渲染请求合并消除一次点击两次全量重建；比较/转数字高频路径短路 strtoll/strtod"
+  "changelog": "渲染树缓存：state 未变时 native 复用序列化结果、Java 内容相同跳过 View 重建（无变化渲染零开销）"
 }
