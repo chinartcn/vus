@@ -1,6 +1,6 @@
 {
-  "versionCode": 3,
-  "versionName": "1.2",
+  "versionCode": 4,
+  "versionName": "1.3",
   "apkUrl": "https://gitee.com/rtccn_mc/vus/raw/master/testdata/VUS.apk",
-  "changelog": "新增 .vaz 扩展包：搜索条/星级评分控件与通用逻辑库\n支持 armeabi-v7a (arm32) 设备"
+  "changelog": "修复星级评分点击崩溃；事件参数支持键=值字面量传递"
 }
