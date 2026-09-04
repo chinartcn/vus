@@ -3406,8 +3406,9 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config) {
         }
     }
 
-    /* 主函数 */
-    gen_main_function(buf, program, config->debug);
+    /* 主函数（vusx 插件等库式编译时跳过，避免与宿主程序 main 冲突） */
+    if (!config->omit_main)
+        gen_main_function(buf, program, config->debug);
 
     char *result = strdup(buf->data);
 
@@ -3744,7 +3745,7 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
     }
 
     /* 读取错误输出 */
-    char err_buf[4096] = {0};
+    char err_buf[16384] = {0};
     size_t total_read = 0;
     char line[256];
     while (fgets(line, sizeof(line), fp)) {

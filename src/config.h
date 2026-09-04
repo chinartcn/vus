@@ -36,6 +36,9 @@ typedef struct {
     /* 编译选项 */
     char  optimization[16];    /* "速度" / "体积" / "调试" */
     char  arm_version[16];     /* "ARM64" / "ARM32" */
+
+    /* 不生成 main 入口（vusx 插件等库式编译用，链接进主程序避免符号冲突）*/
+    int   omit_main;           /* 0 或 1 */
 } VusConfig;
 
 /* ============ 配置操作 ============ */
