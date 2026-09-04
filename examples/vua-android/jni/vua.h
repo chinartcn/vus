@@ -118,14 +118,19 @@ const char *vua_screen_name(VuaScreen *screen);
 /* ============ 规范化渲染树（native → Java） ============ */
 
 /*
- * 把解析好的组件树序列化为"规范化渲染树"JSON 字符串，返回 malloc 分配的缓冲区，
- * 调用方用 free() 释放。字段已用词典翻译、事件索引(eventIndex)已随树顶层下发。
- * 格式见 docs/VUA_RENDER_TREE.md。解析/校验失败时返回 NULL。
+ * 把解析好的组件树序列化为"规范化渲染树"JSON 字符串（screen 侧缓存所有，
+ * 调用方不得 free；见 dump 实现内的 render_cache）。状态变化后自动重建。
  */
 const char *vua_screen_dump_rendertree(VuaScreen *screen);
 
 /* 取渲染树 JSON 的稳定字节长度（供 JNI NewStringUTF 使用前走长度）。 */
 int vua_screen_dump_rendertree_len(const char *rendertree_json);
+
+/*
+ * 渲染树内容指纹（64 位 FNV-1a）：供版本号协议用——Java 只凭指纹决定要不要
+ * 重建/取 JSON。指纹在 dump 重建缓存时顺带计算；无缓存时先触发 dump。无屏返回 0。
+ */
+uint64_t vua_screen_rendertree_hash(VuaScreen *screen);
 
 /* ============ 变量状态（复用 VusDict） ============ */
 

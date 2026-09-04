@@ -110,8 +110,8 @@ public class MainActivity extends Activity {
 
     private void renderCurrent() {
         try {
-            String tree = VuaBridge.vuaRenderTree();
-            renderer.render(tree, "(空界面)");
+            // 版本号协议：只把内容指纹交给 renderer，命中缓存时连渲染树 JSON 都不用取
+            renderer.render(VuaBridge.vuaRenderHash());
         } finally {
             VuaBridge.renderHandled();
         }

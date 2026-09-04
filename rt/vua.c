@@ -82,6 +82,7 @@ struct VuaScreen {
     VusDict    *state;        /* 屏内 变量→值 */
     VusDict    *events;       /* 事件名 → VusClosure* */
     char       *render_cache; /* 渲染树缓存：state 未变时复用（vua_screen_dump_rendertree 所有者） */
+    uint64_t    render_hash;  /* 缓存内容的 64 位指纹（FNV-1a），版本号协议用 */
 };
 
 struct VuaSession {
@@ -495,6 +496,15 @@ const char *vua_screen_name(VuaScreen *screen) { return screen ? screen->name : 
 
 /* ============ 规范化渲染树（native → Java） ============ */
 
+/* —— 渲染树内容指纹（版本号协议）：FNV-1a 64，稳定、低碰撞 —— */
+static uint64_t vus_renderhash_fnv1a64(const char *s) {
+    uint64_t h = 1469598103934665603ULL;   /* FNV offset basis */
+    if (s) {
+        while (*s) { h ^= (unsigned char)*s++; h *= 1099511628211ULL; }
+    }
+    return h;
+}
+
 const char *vua_screen_dump_rendertree(VuaScreen *screen) {
     if (!screen || !screen->tree) return NULL;
 
@@ -518,7 +528,17 @@ const char *vua_screen_dump_rendertree(VuaScreen *screen) {
     yyjson_mut_doc_free(md);
     if (!out) return NULL;
     screen->render_cache = out;   /* 所有权归 screen，调用方不得 free */
+    screen->render_hash = vus_renderhash_fnv1a64(out);
     return out;
+}
+
+/* 取当前屏渲染树指纹：缓存缺失时先触发 dump 构建再取；无屏返回 0。 */
+uint64_t vua_screen_rendertree_hash(VuaScreen *screen) {
+    if (!screen || !screen->tree) return 0;
+    if (!screen->render_cache) {
+        if (!vua_screen_dump_rendertree(screen)) return 0;
+    }
+    return screen->render_hash;
 }
 
 int vua_screen_dump_rendertree_len(const char *rendertree_json) {
@@ -531,9 +551,10 @@ VusDict *vua_state(VuaScreen *screen) { return screen ? screen->state : NULL; }
 void vua_state_set(VuaScreen *screen, VusString *var, void *val) {
     if (screen && var && val) {
         vus_dict_set(screen->state, var, val);
-        /* state 变化 → 渲染树文本必然变化，作废缓存 */
+        /* state 变化 → 渲染树文本必然变化，作废缓存与指纹 */
         free(screen->render_cache);
         screen->render_cache = NULL;
+        screen->render_hash = 0;
     }
 }
 void *vua_state_get(VuaScreen *screen, VusString *var) {

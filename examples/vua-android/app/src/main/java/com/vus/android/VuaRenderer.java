@@ -63,8 +63,8 @@ public final class VuaRenderer {
     private final Map<String, View> inputs;    // id -> 输入控件（供手机回填/取值）
     private final Map<String, String> savedVals; // variable/id -> 上次输入值（重建时恢复控件状态）
     private boolean darkTheme = false;
-    private String lastTree = null;            // 上次成功渲染的渲染树（内容相同则跳过重建）
-    private final LinkedHashMap<String, PageCache> pageCache; // 渲染树 JSON -> 已构建 View（LRU）
+    private long lastFp = -2L;                 // 当前显示内容的指纹（-2 初始占位，强制首帧）
+    private final LinkedHashMap<Long, PageCache> pageCache; // 渲染树指纹 -> 已构建 View（LRU）
 
     public VuaRenderer(Context ctx, ViewGroup root) {
         this.ctx = ctx;
@@ -74,54 +74,54 @@ public final class VuaRenderer {
         this.pageCache = new LinkedHashMap<>(16, 0.75f, true);   // accessOrder=true → LRU
     }
 
-    /** 重建：清空根容器，把整棵树渲染进去。参数为 native 的渲染树 JSON 字符串。
-     *  三级快路径：
-     *  1) 渲染树与当前屏相同 → 不动作；
-     *  2) 页面 View 缓存命中（重新进入同一页面、内容未变）→ 直接把缓存子树挂回，
-     *     跳过 JSON 解析 / 整树 View 重建（本类的核心页面缓存）；
-     *  3) 未命中 → 正常解析并构建，构建结果入 LRU 缓存。 */
-    public void render(String renderTreeJson, String fallbackError) {
-        if (renderTreeJson != null) {
-            if (renderTreeJson.equals(lastTree)) return;            // 当前屏未变
-            PageCache hit = pageCache.get(renderTreeJson);          // 页面缓存命中（get 会 LRU 置新）
+    /** 版本号协议：native 只传内容指纹，据此决定动作，命中时连渲染树 JSON 都不取。
+     *  1) 指纹与当前显示相同 → 零工作量；
+     *  2) 页面 View 缓存命中（重新进入同页且内容未变，可跨屏实例）→ 直接显缓存；
+     *  3) 未命中 → 取整树 JSON 解析构建，构建结果按指纹入 LRU 缓存。
+     *  无屏指纹 < 0 → 显示空界面占位。 */
+    public void render(long fp) {
+        if (fp == lastFp) return;                           // 当前内容未变
+        if (fp >= 0) {
+            PageCache hit = pageCache.get(fp);              // 命中（get 自动 LRU 置新）
             if (hit != null) {
                 root.removeAllViews();
                 root.addView(hit.view, matchWrap());
                 inputs.clear();
-                inputs.putAll(hit.inputs);                          // 输入控件引用随缓存恢复
-                lastTree = renderTreeJson;
+                inputs.putAll(hit.inputs);                  // 输入控件引用随缓存恢复
+                lastFp = fp;
                 return;
             }
         }
-        saveInputs();   // 重建前先保存现有输入控件状态（下拉/滑块/输入框等）
+        saveInputs();
         root.removeAllViews();
-        if (renderTreeJson == null) {
-            lastTree = null;
-            root.addView(TextView(ctx, fallbackError != null ? fallbackError : "(无渲染树)"));
+        lastFp = fp;
+        if (fp < 0) {
+            root.addView(TextView(ctx, "(空界面)"));
             return;
         }
+        String tree = VuaBridge.vuaRenderTree();
         try {
-            JSONObject tree = new JSONObject(renderTreeJson);
-            lastTree = renderTreeJson;
-            darkTheme = "dark".equalsIgnoreCase(tree.optString("主题", tree.optString("theme", "light")));
+            if (tree == null || tree.isEmpty()) throw new Exception("空渲染树");
+            JSONObject parsed = new JSONObject(tree);
+            darkTheme = "dark".equalsIgnoreCase(parsed.optString("主题", parsed.optString("theme", "light")));
             root.setBackgroundColor(darkTheme ? 0xFF121212 : BG_LIGHT);
             /* 先构建到透明包装容器，整棵子树才能脱离 root 缓存复用 */
             LinearLayout wrapper = new LinearLayout(ctx);
             wrapper.setOrientation(LinearLayout.VERTICAL);
-            buildInto(tree, wrapper);
+            buildInto(parsed, wrapper);
             root.addView(wrapper, matchWrap());
-            cachePage(renderTreeJson, wrapper);
+            cachePage(fp, wrapper);
         } catch (Exception e) {
             String msg = "渲染失败: " + e.getMessage();
             root.addView(TextView(ctx, msg));
         }
     }
 
-    /** 页面 View 入缓存（LRU，超出上限逐出最久未用的页）。 */
-    private void cachePage(String key, View view) {
-        pageCache.put(key, new PageCache(view, new HashMap<>(inputs)));
+    /** 页面 View 入缓存（以指纹为 key，LRU，超出上限逐出最久未用的页）。 */
+    private void cachePage(long fp, View view) {
+        pageCache.put(fp, new PageCache(view, new HashMap<>(inputs)));
         while (pageCache.size() > PAGE_CACHE_MAX) {
-            String eldest = pageCache.keySet().iterator().next();
+            long eldest = pageCache.keySet().iterator().next();
             pageCache.remove(eldest);
         }
     }

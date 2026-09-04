@@ -1,6 +1,6 @@
 {
-  "versionCode": 13,
-  "versionName": "2.2",
+  "versionCode": 14,
+  "versionName": "2.3",
   "apkUrl": "https://gitee.com/rtccn_mc/vus/raw/master/testdata/VUS.apk",
-  "changelog": "页面 View 缓存（LRU）：再次进入同一页面且内容未变时直接复用已构建 View，跳过 JSON 解析与整树重建"
+  "changelog": "版本号协议：native 返回渲染树内容指纹，Java 只凭指纹决定动作——内容未变/页面缓存命中时连 JSON 都不传"
 }

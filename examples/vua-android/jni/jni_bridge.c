@@ -152,6 +152,19 @@ Java_com_vus_android_VuaBridge_vuaRenderTree(JNIEnv *env, jclass clazz) {
     return (*env)->NewStringUTF(env, tree);
 }
 
+/* ---- vuaRenderHash ------------------------------------------------------ */
+/* 渲染树内容指纹（版本号协议）：Java 只凭指纹决定是否重建/取 JSON。
+ * 指纹未变 = 内容未变，可跳过整树传输；配合页面 View 缓存直接显缓存。
+ * 无屏返回 -1。 */
+JNIEXPORT jlong JNICALL
+Java_com_vus_android_VuaBridge_vuaRenderHash(JNIEnv *env, jclass clazz) {
+    (void)env; (void)clazz;
+    VuaSession *s = vua_global_session(NULL);
+    VuaScreen *cur = s ? vua_session_current(s) : NULL;
+    if (!cur) return -1;
+    return (jlong)vua_screen_rendertree_hash(cur);
+}
+
 /* ---- vuaTrigger / vuaTriggerById ----------------------------------------- */
 /* 把变量 JSON 转成 VusDict，派发到当前屏的事件。 */
 static int do_trigger(JNIEnv *env, jstring event_or_id, jstring vars_json, int by_id) {
