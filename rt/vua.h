@@ -68,6 +68,13 @@ VuaScreen *vua_session_current(VuaSession *session);
  */
 VuaScreen *vua_session_show(VuaSession *session, const char *vua_path, VuaError *err);
 
+/*
+ * 多屏导航：把 .vua 格式的 JSON 字符串直接解析为一屏并压栈（动态渲染树）。
+ * 供 .vus 运行时根据数据动态生成界面（如从网络/文件拉取数据后拼接渲染树）。
+ * 成功返回 0；失败返回 -1（错误挂 *err，可为 NULL）。
+ */
+int vua_show_json(VuaSession *session, const char *vua_json, VuaError *err);
+
 /* 多屏导航：弹栈回上一屏并返回它；已在最底屏时不弹，返回当前屏。 */
 VuaScreen *vua_session_back(VuaSession *session);
 

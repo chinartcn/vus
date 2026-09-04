@@ -55,6 +55,9 @@ public class MainActivity extends Activity {
             StrictMode.setVmPolicy(new StrictMode.VmPolicy.Builder().build());
         }
 
+        // 平台能力桥（callJava）解析相对路径/文件目录需要应用 Context
+        VuaBridge.appContext = getApplicationContext();
+
         content = new FrameLayout(this);
         content.setLayoutParams(new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));

@@ -219,6 +219,14 @@ void vus_cli_init(int argc, char** argv);           /* main 开头调用，注�
 VusString* vus_cli_argc(void);                       /* 返回参数个数（含程序名） */
 VusString* vus_cli_argv(VusString* index);           /* 返回第 index 个参数 */
 
+// ============ Java 平台能力桥（网络/文件由 Java 暴露、VUS 调用） ============
+// JNI 宿主（APK）通过本函数注册回调：VUS 的 网络_* / 文件_* 内建在 APK 内优先走
+// Java 实现（用户架构约定：平台能力放 Java 平台层）；桌面/纯 native 环境未注册时
+// 各内建自动回退到 native 内建实现（stdio/curl）。未注册时本函数无副作用。
+// 回调契约：api=能力名（如 "file.read"/"http.get"），args=JSON 参数串，
+// out 指向 malloc 缓冲（Java 返回 JSON：{"ok":1,"data":"..."} / {"ok":0,"err":"..."}）。
+void vus_set_java_callback(void (*fn)(const char *api, const char *args, char **out));
+
 /* 线程/协程句柄接口（返回 VusString* 句柄，避免指针类型转换问题） */
 #define VUS_MAX_HANDLES 64
 VusString* vus_thread_create_handle(void* (*func)(void*), void* arg);

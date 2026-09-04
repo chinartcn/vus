@@ -158,6 +158,32 @@ VuaScreen *vua_session_show(VuaSession *s, const char *vua_path, VuaError *err) 
     return screen;
 }
 
+/* 界面_显示_JSON：把 .vua 格式的 JSON 字符串直接解析为一屏并压栈（动态渲染树）。
+ * 供 .vus 运行时根据数据动态生成界面（如从网络/文件拉取数据后拼接渲染树）。 */
+int vua_show_json(VuaSession *s, const char *vua_json, VuaError *err) {
+    if (!s || !vua_json || !vua_json[0]) {
+        vua_error_set(err, -99, "界面_显示_JSON: 参数无效");
+        return -1;
+    }
+    VuaError le = {0};
+    if (!err) err = &le;
+    VuaScreen *screen = vua_screen_load(vua_json, err);
+    if (!screen) {
+        fprintf(stderr, "[vua] 界面_显示_JSON 加载失败: %s\n", err->msg[0] ? err->msg : "(无错误)");
+        return -1;
+    }
+    char nm[64];
+    snprintf(nm, sizeof(nm), "dyn_%d", (int)s->stack_len);
+    screen->name = strdup(nm);
+    if (vua_session_push(s, screen) != 0) {
+        vua_screen_free(screen);
+        vua_error_set(err, -99, "界面_显示_JSON: 屏栈溢出");
+        return -1;
+    }
+    vua_notify_rerender(s);
+    return 0;
+}
+
 VuaScreen *vua_session_back(VuaSession *s) {
     if (!s || s->stack_len <= 1) return vua_session_current(s);
     vua_screen_free(s->stack[s->stack_len - 1]);
@@ -506,33 +532,49 @@ VusString *vua_state_get_or_empty(VuaScreen *screen, VusString *var) {
     return vus_string_new("");
 }
 
-/* ============ 事件绑定 ============ */
+/* ============ 事件绑定（会话级全局事件表，多屏共享） ============
+ * 事件表挂模块级单例（APK 单会话）：界面_绑定 在首页登记后，切到新屏（界面_显示/
+ * 界面_显示_JSON）仍能派发，动态页/静态页按钮事件统一可命中。 */
+
+static VusDict *g_events = NULL;   /* 事件名 → VusClosure* */
+
+static VusDict *vua_events_table(void) {
+    if (!g_events) g_events = vus_dict_new();
+    return g_events;
+}
 
 int vua_on(VuaScreen *screen, const char *event_name, VusClosure *handler) {
-    if (!screen || !event_name) return -1;
+    (void)screen;
+    if (!event_name) return -1;
     if (!handler) { vua_off(screen, event_name); return 0; }
+    VusDict *ev = vua_events_table();
+    if (!ev) return -1;
     VusString *key = vus_string_new(event_name);
     if (!key) return -1;
-    vus_dict_set(screen->events, key, handler);
+    vus_dict_set(ev, key, handler);
     vus_unref(key);
     return 0;
 }
 
 void vua_off(VuaScreen *screen, const char *event_name) {
-    if (!screen || !event_name) return;
+    (void)screen;
+    if (!event_name || !g_events) return;
     VusString *key = vus_string_new(event_name);
     if (!key) return;
-    vus_dict_remove(screen->events, key);
+    vus_dict_remove(g_events, key);
     vus_unref(key);
 }
 
 /* ============ 事件派发 ============ */
 
 void vua_trigger_event(VuaScreen *screen, const char *event_name, VusDict *vars) {
-    if (!screen || !event_name) return;
+    (void)screen;
+    if (!event_name) return;
+    VusDict *ev = g_events ? g_events : vua_events_table();
+    if (!ev) return;
     VusString *key = vus_string_new(event_name);
     if (!key) return;
-    VusClosure *handler = (VusClosure *)vus_dict_get(screen->events, key);
+    VusClosure *handler = (VusClosure *)vus_dict_get(ev, key);
     vus_unref(key);
     if (!handler) { fprintf(stderr, "[vua] 事件未绑定：%s\n", event_name); return; }
     vus_closure_call(handler, vars);
@@ -707,6 +749,7 @@ void vua_rt_shutdown(void) {
     }
     free(g_ctrls); g_ctrls = NULL; g_ctrl_count = 0;
     if (g_dict) { vus_unref(g_dict); g_dict = NULL; }
+    if (g_events) { vus_unref(g_events); g_events = NULL; }
     if (g_vua_session) { vua_session_free(g_vua_session); g_vua_session = NULL; }
 }
 

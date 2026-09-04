@@ -540,6 +540,19 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
         }
         return strdup("(void)vua_session_back_to(vua_global_session(NULL), \"\")");
     }
+    if (strcmp(call->func_name, "界面_显示_JSON") == 0) {
+        g_uses_vua = 1;
+        /* 动态渲染树：把 .vua 格式 JSON 字符串直接上屏（vua_show_json 压栈并通知重绘） */
+        if (call->args && call->args->count >= 1) {
+            char *js = gen_expr(buf, call->args->items[0]);
+            size_t sz = strlen(js) + 96;
+            char *r = (char *)malloc(sz);
+            snprintf(r, sz, "(void)vua_show_json(vua_global_session(NULL), vus_string_cstr(%s), NULL)", js);
+            free(js);
+            return r;
+        }
+        return strdup("(void)-1; /* 界面_显示_JSON: 参数不足 */");
+    }
     if (strcmp(call->func_name, "界面_绑定") == 0) {
         g_uses_vua = 1;
         /* 参数：args[0]=事件名字符串，args[1]=处理函数标识符 */

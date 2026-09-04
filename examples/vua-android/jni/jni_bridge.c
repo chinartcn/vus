@@ -26,6 +26,10 @@ static JavaVM *g_vm = NULL;
 /* VuaBridge 类的全局引用 + onNativeRerender 静态方法，避免每次回调都 FindClass。 */
 static jclass     g_VuaBridge = NULL;
 static jmethodID  g_onNativeRerender = NULL;
+static jmethodID  g_callJava = NULL;
+
+/* 平台能力桥分发（定义见下）：VUS 内建 → VuaBridge.callJava（Java 暴露网络/文件能力）。 */
+static void java_rpc_dispatch(const char *api, const char *args, char **out);
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     (void)reserved;
@@ -38,8 +42,40 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     (*env)->DeleteLocalRef(env, local);
     if (g_VuaBridge) {
         g_onNativeRerender = (*env)->GetStaticMethodID(env, g_VuaBridge, "onNativeRerender", "()V");
+        g_callJava = (*env)->GetStaticMethodID(env, g_VuaBridge, "callJava",
+                                               "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
+        /* 平台能力桥：网络/文件由 Java 暴露、VUS 调用（桌面/纯 native 未注册时内建回退） */
+        vus_set_java_callback(java_rpc_dispatch);
     }
     return JNI_VERSION_1_6;
+}
+
+/* ---- 平台能力桥分发（native → Java 同步 RPC） --------------------------------
+ * VUS 内建（网络_GET/文件_读取 等）→ vus_java_rpc → 本函数 → VuaBridge.callJava →
+ * JSON 结果原样回传。Java 侧保证不抛异常（错误转 ok:0）。 */
+static void java_rpc_dispatch(const char *api, const char *args, char **out) {
+    *out = NULL;
+    if (!g_vm || !g_VuaBridge || !g_callJava || !api || !args) return;
+    JNIEnv *env = NULL;
+    jint st = (*g_vm)->GetEnv(g_vm, (void **)&env, JNI_VERSION_1_6);
+    int attached = 0;
+    if (st != JNI_OK) {
+        if ((*g_vm)->AttachCurrentThread(g_vm, &env, NULL) != JNI_OK) return;
+        attached = 1;
+    }
+    jstring jap = (*env)->NewStringUTF(env, api);
+    jstring jars = (*env)->NewStringUTF(env, args);
+    jstring jres = (jstring)(*env)->CallStaticObjectMethod(env, g_VuaBridge, g_callJava, jap, jars);
+    (*env)->DeleteLocalRef(env, jap);
+    (*env)->DeleteLocalRef(env, jars);
+    if (jres) {
+        const char *c = (*env)->GetStringUTFChars(env, jres, 0);
+        if (c) { *out = strdup(c); (*env)->ReleaseStringUTFChars(env, jres, c); }
+        (*env)->DeleteLocalRef(env, jres);
+    }
+    /* Java 异常（理论上 callJava 内部已捕获）：清空避免污染后续 JNI 调用 */
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    if (attached) (*g_vm)->DetachCurrentThread(g_vm);
 }
 
 /* ---- 重绘回调（native → Java） ----------------------------------------- */

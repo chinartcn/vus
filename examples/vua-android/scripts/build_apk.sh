@@ -40,7 +40,8 @@ mkdir -p "$WORK" "$STM" "$LS"
 
 # ---------- 0. 同步资产（vua 页面 + 控件表以 testdata 为单一来源） ----------
 cp "$TESTDATA_SRC"/vua_home.vua "$TESTDATA_SRC"/vua_settings.vua \
-   "$TESTDATA_SRC"/vua_logic.vua "$TESTDATA_SRC"/vua_controls.json "$ASSETS/"
+   "$TESTDATA_SRC"/vua_logic.vua "$TESTDATA_SRC"/vua_class.vua \
+   "$TESTDATA_SRC"/vua_controls.json "$ASSETS/"
 cp "$TESTDATA_SRC"/*.jpg "$ASSETS"/ 2>/dev/null || true
 
 # ---------- 0b. 可选: .vaz 控件模板展开（无包则跳过，核心分层不变） ----------
@@ -62,6 +63,9 @@ if [ ! -f "$VUS_C" ] || [ "$TESTDATA_SRC/vua_test.vus" -nt "$VUS_C" ]; then
   sed -i -e 's/^int main(.*)/int vus_main(void)/' \
          -e 's/vus_cli_init(argc, argv)/vus_cli_init(0, NULL)/' "$VUS_C"
 fi
+
+# ---------- 0d. 同步 rt/vua.* + libvus_rt 到 jni（编译 native 前，保证声明/实现最新） ----------
+cp "$VUA_SRC/vua.c" "$VUA_SRC/vua.h" "$VUA_SRC/libvus_rt.c" "$VUA_SRC/libvus_rt.h" "$ROOT/jni/"
 
 # ---------- 1. 编译 native .so ----------
 echo "[1/6] 编译 native ($ABI) -> libvus_app.so"
@@ -101,7 +105,8 @@ rm -rf "$STM"; mkdir -p "$STM" "$STM/lib" "$STM/assets"
 # classes.dex 必须放在 APK 根目录，否则安装时报 "code is missing"
 cp "$WORK/dex/classes.dex" "$STM/classes.dex"
 mkdir -p "$STM/lib/$ABI"; cp "$LS/libvus_app.so" "$STM/lib/$ABI/"
-cp "$ASSETS"/vua_home.vua "$ASSETS"/vua_settings.vua "$ASSETS"/vua_logic.vua "$ASSETS"/vua_controls.json "$STM/assets/"
+cp "$ASSETS"/vua_home.vua "$ASSETS"/vua_settings.vua "$ASSETS"/vua_logic.vua \
+   "$ASSETS"/vua_class.vua "$ASSETS"/vua_controls.json "$STM/assets/"
 cp "$ASSETS"/*.jpg "$ASSETS"/*.png "$STM/assets/" 2>/dev/null || true
 
 # 用 aapt 编译 manifest + resources 生成资源表
