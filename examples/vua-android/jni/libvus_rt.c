@@ -50,6 +50,41 @@ VusString* vus_string_new_len(const char* s, int len) {
     return str;
 }
 
+/* ============ 字符串驻留（进程级小缓存） ============
+ * 用于高频重复的键名/常量（如 界面_设置("计数", v) 的变量名），避免每次调用
+ * 都 malloc+复制。语义：与 vus_string_new 同，返回 ref+1 的借用（调用方 vus_unref
+ * 归还）；内容相同时返回缓存实例，缓存本身持有一份引用保证驻留存活，换出时释放。
+ * 注：单线程（VUA 主线程）使用，不做锁。 */
+#define VUS_INTERN_SLOTS 64
+static VusString *g_intern_keys[VUS_INTERN_SLOTS];
+
+static unsigned vus_intern_hash(const char *s, int len) {
+    unsigned h = 5381;
+    for (int i = 0; i < len; i++) h = h * 33 + (unsigned char)s[i];
+    return h;
+}
+
+VusString* vus_string_intern(const char* s) {
+    if (!s || !s[0]) return vus_string_new("");
+    int len = (int)strlen(s);
+    int slot = (int)(vus_intern_hash(s, len) % VUS_INTERN_SLOTS);
+    VusString* v = g_intern_keys[slot];
+    if (v && v->len == len && memcmp(v->data, s, (size_t)len) == 0) {
+        vus_ref(v);                      /* 本次借用 */
+        return v;
+    }
+    VusString* nv = vus_string_new_len(s, len);   /* ref=1 归缓存持有 */
+    if (!nv) return vus_string_new("");
+    if (g_intern_keys[slot]) {           /* 换出旧驻留，归还其缓存引用 */
+        VusString* old = g_intern_keys[slot];
+        g_intern_keys[slot] = NULL;
+        vus_unref(old);
+    }
+    g_intern_keys[slot] = nv;
+    vus_ref(nv);                         /* 本次借用（调用方归还） */
+    return nv;
+}
+
 VusString* vus_string_concat(VusString* a, VusString* b) {
     if (!a && !b) return vus_string_new("");
     if (!a) return vus_string_new_len(b->data, b->len);
@@ -603,20 +638,22 @@ VusString* vus_to_string(int64_t n) {
 // vus_compare：比较两个字符串。若两者都能解析为整数则按数值比较，
 // 否则按字典序（strcmp）比较。返回 -1 / 0 / 1，供 == != < > <= >= 使用。
 // 避免旧实现把非数字字符串都转成 0 导致 "abc" == "xyz" 被误判为真。
+// 相等短路：strcmp==0 即字面相同（数值也必等），跳过两次 strtoll 数字解析。
 int vus_compare(VusString* a, VusString* b) {
     int oa = 0, ob = 0;
     VusString *ta = vus_value_unwrap(a, &oa);
     VusString *tb = vus_value_unwrap(b, &ob);
-    int err_a = 0, err_b = 0;
-    int64_t na = vus_to_int(ta, &err_a);
-    int64_t nb = vus_to_int(tb, &err_b);
-    int r;
-    if (err_a == 0 && err_b == 0) {
-        r = (na > nb) - (na < nb);
-    } else {
-        const char* ca = ta ? vus_string_cstr(ta) : "";
-        const char* cb = tb ? vus_string_cstr(tb) : "";
-        r = strcmp(ca, cb);
+    const char* ca = ta ? vus_string_cstr(ta) : "";
+    const char* cb = tb ? vus_string_cstr(tb) : "";
+    int r = strcmp(ca, cb);
+    if (r != 0) {
+        /* 字面不等但数值可能相等（如 "5" vs "05"）才需数字解析 */
+        int err_a = 0, err_b = 0;
+        int64_t na = vus_to_int(ta, &err_a);
+        int64_t nb = vus_to_int(tb, &err_b);
+        if (err_a == 0 && err_b == 0) {
+            r = (na > nb) - (na < nb);
+        }
     }
     if (oa) vus_unref(ta);
     if (ob) vus_unref(tb);

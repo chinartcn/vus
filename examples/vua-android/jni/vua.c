@@ -83,12 +83,14 @@ struct VuaScreen {
     VusDict    *events;       /* 事件名 → VusClosure* */
     char       *render_cache; /* 渲染树缓存：state 未变时复用（vua_screen_dump_rendertree 所有者） */
     uint64_t    render_hash;  /* 缓存内容的 64 位指纹（FNV-1a），版本号协议用 */
+    uint64_t    seq;          /* 屏序号（push 时递增分配），供 View diff 识别"是否同一屏" */
 };
 
 struct VuaSession {
     VuaScreen  **stack;       /* 屏栈，栈顶 = 最后一个 */
     int          stack_len;
     int          stack_cap;
+    uint64_t     screen_seq;  /* 屏序号发号器 */
     VusDict     *globals;     /* session 级 变量→值 */
     VuaRerenderHook rerender_hook;  /* 屏栈变化 → 重建 View 的钩子（可空） */
     void            *rerender_ud;   /* 钩子 userdata */
@@ -118,6 +120,8 @@ VuaScreen *vua_session_current(VuaSession *s) {
 }
 
 static int vua_session_push(VuaSession *s, VuaScreen *screen) {
+    if (!s || !screen) return -1;
+    screen->seq = ++s->screen_seq;   /* 新屏分配唯一序号（View diff 用它区分换页） */
     if (s->stack_len >= s->stack_cap) {
         int ncap = s->stack_cap ? s->stack_cap * 2 : 8;
         VuaScreen **ns = (VuaScreen **)realloc(s->stack, ncap * sizeof(VuaScreen *));
@@ -421,7 +425,18 @@ static int vua_validate_node(const yyjson_val *obj, VuaError *err) {
         int found = 0;
         for (int i = 0; i < g_ctrl_count; i++)
             if (streq(g_ctrls[i].type, type)) { found = 1; break; }
-        if (!found) { vua_error_set(err, VUA_ERR_UNKNOWN_TYPE, "未知控件类型"); return 0; }
+        if (!found) {
+            /* 未知控件类型（如 .vaz 模板漏展开）：降级为"透传 + 递归子节点"，
+             * Java 端渲染为占位控件。绝不因单个未知节点阻断整屏导致白屏。 */
+            yyjson_val *ch = yyjson_obj_get((yyjson_val *)obj, "children");
+            if (!ch) ch = yyjson_obj_get((yyjson_val *)obj, "子组件");
+            if (ch && yyjson_is_arr(ch)) {
+                yyjson_arr_iter ai; yyjson_arr_iter_init(ch, &ai); yyjson_val *e;
+                while ((e = yyjson_arr_iter_next(&ai)))
+                    if (!vua_validate_node(e, err)) return 0;
+            }
+            return 1;
+        }
     }
 
     yyjson_obj_iter it; yyjson_obj_iter_init((yyjson_val *)obj, &it);
@@ -439,11 +454,11 @@ static int vua_validate_node(const yyjson_val *obj, VuaError *err) {
             continue;
         }
 
-        /* 属性键 ∈ 控件字段词典 ∪ 全局词典 */
+        /* 属性键 ∈ 控件字段词典 ∪ 全局词典。不在时降级跳过（透传给 Java），
+         * 避免未知扩展属性把整屏校验失败 → 白屏。 */
         if (ctrl_has_field(type, ks)) continue;
         if (dict_has_key(ks)) continue;
-        vua_error_set(err, VUA_ERR_UNKNOWN_FIELD, "未知字段（不在控件表字段，也不在全局词典）");
-        return 0;
+        continue;
     }
     return 1;
 }
@@ -493,6 +508,8 @@ void vua_screen_free(VuaScreen *screen) {
 }
 
 const char *vua_screen_name(VuaScreen *screen) { return screen ? screen->name : NULL; }
+
+uint64_t vua_screen_seq(VuaScreen *screen) { return screen ? screen->seq : 0; }
 
 /* ============ 规范化渲染树（native → Java） ============ */
 
@@ -557,6 +574,15 @@ void vua_state_set(VuaScreen *screen, VusString *var, void *val) {
         screen->render_hash = 0;
     }
 }
+/* 高频路径（界面_设置 字面量变量名）：key 走字符串驻留，避免每次 malloc 复制 */
+void vua_state_set_cstr(VuaScreen *screen, const char *var, void *val) {
+    if (!screen || !var || !val) return;
+    VusString *k = vus_string_intern(var);
+    if (k) {
+        vua_state_set(screen, k, val);
+        vus_unref(k);
+    }
+}
 void *vua_state_get(VuaScreen *screen, VusString *var) {
     return (screen && var) ? vus_dict_get(screen->state, var) : NULL;
 }
@@ -565,6 +591,15 @@ VusString *vua_state_get_or_empty(VuaScreen *screen, VusString *var) {
     void *v = vua_state_get(screen, var);
     if (v) return vus_string_new(vus_string_cstr((VusString *)v));
     return vus_string_new("");
+}
+
+/* 高频路径（界面_取 字面量变量名）：key 走字符串驻留 */
+VusString *vua_state_get_or_empty_cstr(VuaScreen *screen, const char *var) {
+    if (!screen || !var) return vus_string_new("");
+    VusString *k = vus_string_intern(var);
+    VusString *r = k ? vua_state_get_or_empty(screen, k) : vus_string_new("");
+    if (k) vus_unref(k);
+    return r;
 }
 
 /* ============ 事件绑定（会话级全局事件表，多屏共享） ============

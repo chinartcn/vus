@@ -634,32 +634,56 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
     if (strcmp(call->func_name, "界面_设置") == 0) {
         g_uses_vua = 1;
         /* 界面_设置(变量名, 值)：写当前屏状态，供渲染树变量回填（逻辑页核心）。
-         * VUS 字符串字面量经 gen_expr 已是 VusString*（vus_string_new(...)），
-         * vua_state_set 恰需 VusString*，直接透传，勿再包 vus_string_new。 */
+         * 变量名为字符串字面量时走 cstr 驻留路径（vua_state_set_cstr），
+         * 避免高频循环里每次重建 VusString 键；否则按原样透传。 */
         if (call->args && call->args->count >= 2) {
-            char *name = gen_expr(buf, call->args->items[0]);
             char *val = gen_expr(buf, call->args->items[1]);
-            size_t sz = strlen(name) + strlen(val) + 192;
-            char *r = (char *)malloc(sz);
-            snprintf(r, sz,
-                "(void)vua_state_set(vua_session_current(vua_global_session(NULL)), %s, %s)",
-                name, val);
-            free(name); free(val);
+            char *r;
+            if (call->args->items[0]->type == VUS_AST_STRING_LITERAL) {
+                char escaped[4096];
+                gen_string_escape(((VusAstString *)call->args->items[0])->value, escaped, sizeof(escaped));
+                size_t sz = strlen(escaped) + strlen(val) + 192;
+                r = (char *)malloc(sz);
+                snprintf(r, sz,
+                    "(void)vua_state_set_cstr(vua_session_current(vua_global_session(NULL)), \"%s\", %s)",
+                    escaped, val);
+            } else {
+                char *name = gen_expr(buf, call->args->items[0]);
+                size_t sz = strlen(name) + strlen(val) + 192;
+                r = (char *)malloc(sz);
+                snprintf(r, sz,
+                    "(void)vua_state_set(vua_session_current(vua_global_session(NULL)), %s, %s)",
+                    name, val);
+                free(name);
+            }
+            free(val);
             return r;
         }
         return strdup("(void)0; /* 界面_设置: 参数不足 */");
     }
     if (strcmp(call->func_name, "界面_取") == 0) {
         g_uses_vua = 1;
-        /* 界面_取(变量名)：读当前屏状态，返回新 VusString*（缺失给空串，可安全 unref） */
+        /* 界面_取(变量名)：读当前屏状态，返回新 VusString*（缺失给空串，可安全 unref）。
+         * 字面量变量名走 cstr 驻留路径。 */
         if (call->args && call->args->count >= 1) {
-            char *name = gen_expr(buf, call->args->items[0]);
-            size_t sz = strlen(name) + 192;
-            char *r = (char *)malloc(sz);
-            snprintf(r, sz,
-                "vua_state_get_or_empty(vua_session_current(vua_global_session(NULL)), %s)",
-                name);
-            free(name);
+            char *r;
+            if (call->args->items[0]->type == VUS_AST_STRING_LITERAL) {
+                char escaped[4096];
+                gen_string_escape(((VusAstString *)call->args->items[0])->value, escaped, sizeof(escaped));
+                size_t sz = strlen(escaped) + 192;
+                r = (char *)malloc(sz);
+                snprintf(r, sz,
+                    "vua_state_get_or_empty_cstr(vua_session_current(vua_global_session(NULL)), \"%s\")",
+                    escaped);
+            } else {
+                char *name = gen_expr(buf, call->args->items[0]);
+                size_t sz = strlen(name) + 192;
+                r = (char *)malloc(sz);
+                snprintf(r, sz,
+                    "vua_state_get_or_empty(vua_session_current(vua_global_session(NULL)), %s)",
+                    name);
+                free(name);
+            }
             return r;
         }
         return strdup("vua_state_get_or_empty(vua_session_current(vua_global_session(NULL)), vus_string_new(\"\"))");

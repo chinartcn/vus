@@ -138,18 +138,24 @@ Java_com_vus_android_VuaBridge_vuaSetRootDir(JNIEnv *env, jclass clazz, jstring 
     if (d) { chdir(d); (*env)->ReleaseStringUTFChars(env, dir, d); }
 }
 
-/* ---- vuaRenderTree ------------------------------------------------------ */
-/* 返回当前屏（栈顶）的规范化渲染树 JSON；无屏返回 NULL。
+/* ---- vuaRenderTreeBytes ------------------------------------------------- */
+/* 返回当前屏（栈顶）的规范化渲染树 JSON 字节；无屏返回 NULL。
+ * 以 byte[] 传输（替代 NewStringUTF）：省去 JNI 侧全量 UTF-8 校验/UTF-16 转换，
+ * 由 Java new String(bytes, UTF-8) 用 JDK 快速解码器完成。
  * 返回值由 screen 侧缓存所有（不得 free，见 vua_screen_dump_rendertree）。 */
-JNIEXPORT jstring JNICALL
-Java_com_vus_android_VuaBridge_vuaRenderTree(JNIEnv *env, jclass clazz) {
+JNIEXPORT jbyteArray JNICALL
+Java_com_vus_android_VuaBridge_vuaRenderTreeBytes(JNIEnv *env, jclass clazz) {
     (void)clazz;
     VuaSession *s = vua_global_session(NULL);
     VuaScreen *cur = s ? vua_session_current(s) : NULL;
     if (!cur) return NULL;
     const char *tree = vua_screen_dump_rendertree(cur);
     if (!tree) return NULL;
-    return (*env)->NewStringUTF(env, tree);
+    jsize len = (jsize)strlen(tree);
+    jbyteArray arr = (*env)->NewByteArray(env, len);
+    if (!arr) return NULL;
+    (*env)->SetByteArrayRegion(env, arr, 0, len, (const jbyte *)tree);
+    return arr;
 }
 
 /* ---- vuaRenderHash ------------------------------------------------------ */
@@ -165,6 +171,18 @@ Java_com_vus_android_VuaBridge_vuaRenderHash(JNIEnv *env, jclass clazz) {
     VuaScreen *cur = s ? vua_session_current(s) : NULL;
     if (!cur) return -1;
     return (jlong)(vua_screen_rendertree_hash(cur) & 0x7FFFFFFFFFFFFFFFULL);
+}
+
+/* ---- vuaScreenId -------------------------------------------------------- */
+/* 当前屏序号（View diff）：序号不变 = 还是同一屏（仅 state 变化，可增量更新控件）；
+ * 变化 = 换页（走页面 View 缓存或全量重建）。无屏返回 -1。 */
+JNIEXPORT jlong JNICALL
+Java_com_vus_android_VuaBridge_vuaScreenId(JNIEnv *env, jclass clazz) {
+    (void)env; (void)clazz;
+    VuaSession *s = vua_global_session(NULL);
+    VuaScreen *cur = s ? vua_session_current(s) : NULL;
+    if (!cur) return -1;
+    return (jlong)vua_screen_seq(cur);
 }
 
 /* ---- vuaTrigger / vuaTriggerById ----------------------------------------- */
