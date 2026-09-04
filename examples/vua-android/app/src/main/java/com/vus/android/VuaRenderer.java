@@ -27,6 +27,8 @@ import android.widget.SeekBar;
 import android.widget.Spinner;
 import android.widget.ArrayAdapter;
 import android.widget.Switch;
+import android.widget.TableLayout;
+import android.widget.TableRow;
 import android.widget.TextView;
 
 import org.json.JSONArray;
@@ -92,6 +94,7 @@ public final class VuaRenderer {
             case "滑块": case "slider":      { sliderView(node, parent); return; }
             case "下拉": case "spinner":     { spinnerView(node, parent); return; }
             case "图片": case "image":       { imageView(node, parent); return; }
+            case "课表": case "table": case "grid": { classTable(node, parent); return; }
             default: {
                 // 未知/扩展 type：降级为一个文本框占位（严格原则下应报错，这里保证不崩）。
                 TextView t = TextView(ctx);
@@ -341,6 +344,76 @@ public final class VuaRenderer {
         tv.setPadding(dp(8), dp(16), dp(8), dp(16));
         parent.addView(tv);
         rememberInput(node, tv);
+    }
+
+    /* ---------- 新控件：课表（TableLayout 表格） ---------- */
+
+    private void classTable(JSONObject node, ViewGroup parent) throws Exception {
+        TableLayout tl = new TableLayout(ctx);
+        tl.setStretchAllColumns(true);
+        tl.setBackgroundColor(darkTheme ? 0xFF1E1E1E : 0xFFFFFFFF);
+        tl.setPadding(dp(8), dp(8), dp(8), dp(8));
+
+        String title = node.optString("标题", "课程表");
+        TextView titleTv = TextView(ctx);
+        titleTv.setText(title);
+        titleTv.setTextSize(18);
+        titleTv.setTypeface(Typeface.DEFAULT_BOLD);
+        titleTv.setTextColor(darkTheme ? 0xFF8FB4FF : COLOR_PRIMARY);
+        titleTv.setPadding(0, 0, 0, dp(12));
+        tl.addView(titleTv);
+
+        JSONArray weekdays = node.optJSONArray("星期");
+        JSONArray periods = node.optJSONArray("节次");
+        JSONArray classes = node.optJSONArray("课程");
+        if (weekdays == null || periods == null || classes == null) return;
+
+        int hdrBg = darkTheme ? 0xFF333333 : 0xFFE0E0E0;
+        int cellText = darkTheme ? 0xFFE0E0E0 : 0xFF1A1F2E;
+
+        TableRow headerRow = new TableRow(ctx);
+        TextView corner = TextView(ctx);
+        corner.setText(" ");
+        headerRow.addView(corner);
+        for (int j = 0; j < weekdays.length(); j++) {
+            TextView tv = TextView(ctx);
+            tv.setText(weekdays.optString(j));
+            tv.setTypeface(Typeface.DEFAULT_BOLD);
+            tv.setGravity(Gravity.CENTER);
+            tv.setTextColor(darkTheme ? 0xFF8FB4FF : COLOR_PRIMARY);
+            tv.setBackgroundColor(hdrBg);
+            tv.setPadding(dp(4), dp(8), dp(4), dp(8));
+            headerRow.addView(tv);
+        }
+        tl.addView(headerRow);
+
+        for (int i = 0; i < periods.length(); i++) {
+            TableRow row = new TableRow(ctx);
+            TextView periodTv = TextView(ctx);
+            periodTv.setText(periods.optString(i));
+            periodTv.setTypeface(Typeface.DEFAULT_BOLD);
+            periodTv.setGravity(Gravity.CENTER);
+            periodTv.setTextColor(cellText);
+            periodTv.setBackgroundColor(hdrBg);
+            periodTv.setPadding(dp(4), dp(8), dp(4), dp(8));
+            row.addView(periodTv);
+
+            JSONArray dayClasses = classes.optJSONArray(i);
+            if (dayClasses == null) continue;
+            for (int j = 0; j < dayClasses.length(); j++) {
+                TextView classTv = TextView(ctx);
+                classTv.setText(dayClasses.optString(j));
+                classTv.setGravity(Gravity.CENTER);
+                classTv.setTextColor(cellText);
+                classTv.setBackgroundColor((i + j) % 2 == 0
+                        ? (darkTheme ? 0xFF2A2A2A : 0xFFF5F5F5)
+                        : (darkTheme ? 0xFF242424 : 0xFFEEEEEE));
+                classTv.setPadding(dp(4), dp(12), dp(4), dp(12));
+                row.addView(classTv);
+            }
+            tl.addView(row);
+        }
+        parent.addView(tl);
     }
 
     /* ---------- 事件 / 变量工具 ---------- */
