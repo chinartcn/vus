@@ -1,19 +1,23 @@
+> 文档版本：v1.0_apk（APK 功能时代）
+> 最后更新时间：2026-09-04
+
+
 # VUA 渲染树格式（native → Java）
 
-> **当前状态：草案 v0.1**
-> 本文档定义 native 侧 `.vua` 运行时（`rt/vua`）解析 `.vua` 后，输出给 Java 侧（APK shell）去重建 Android View 的那份**规范化 JSON 渲染树**。
-> 对应源码契约：native `vua_screen_dump_rendertree()` 的返回值。`.vua` 源语言本身见 `VUA_REFERENCE.md`。
+> **当前状态：已实现（v3.0.20260904150204（正式版））**
+> 本文档定义 native 侧 `.vua` 运行时（`rt/vua.c`）解析 `.vua` 后，输出给 Java 侧（APK shell 的 `VuaRenderer.java`）去重建 Android View 的那份**规范化 JSON 渲染树**。
+> 对应源码契约：native `vua_screen_dump_rendertree()` 的返回值（另有 64 位指纹 `vua_screen_rendertree_hash()` 供 Java 做"是否重建"判定）。`.vua` 源语言本身见 `VUA_REFERENCE.md`。
 
 ## 一、为什么需要这份格式
 
 - `.vua` 是**中文、需词典翻译、需严格校验**的源文件。
-- Java 侧不应碰词典、不碰校验。所以 native 先做完「解析 + 校验 + 中文 type 归一 + 属性经词典翻译」，再输出一份**已翻译、可直接渲染**的 JSON。
+- Java 侧不应碰词典、不碰校验。所以 native 先做完「解析 + 校验 + 原语键归一」，再输出一份**可直接渲染**的 JSON。
 - Java 的唯一职责：**按 `type` 建 View → 套属性 → 记录事件/变量 → 收触摸回传 native**。
 
 ## 二、核心原则
 
-1. **属性键已翻译成控件内部名**（`text` / `label` / `value` / `variable` …），Java 不碰中文词典。
-2. **`type` 保留中文**（`界面` / `表单` / `按钮` / `迷你图` …），Java 用它定位控件实现。
+1. **原语键统一定为英文**：`type` / `id` / `children` / `variable` / `event`（native 归一：`变量`→`variable`、`子组件`→`children`、`事件`/`点击`/`变化`→`event`）；**控件属性键原样透传**（`.vua` 写中文键，渲染树里仍是中文键，如 `内容`/`文字`/`标签`），由该 `type` 的控件实现自行读取。
+2. **`type` 保留中文**（`界面` / `按钮` / `文本` / `迷你图` …），Java 用它定位控件实现。
 3. **布局节点带 `children`** 数组；无子节点的控件不带。
 4. **每个节点都尽量带 `id`**（可空）；`id` 既是渲染/调试标识，也是"按 id 取事件"的键。
 5. **事件统一为 `event` 对象**，支持按 `name` 或按 `id` 触发。

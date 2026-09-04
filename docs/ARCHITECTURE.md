@@ -1,6 +1,10 @@
+> 文档版本：v1.0_apk（APK 功能时代）
+> 最后更新时间：2026-09-04
+
+
 # VUS 架构与实现文档
 
-> 版本：v1.0-beta
+> 版本：v3.0.20260904150204（正式版）
 > 撰写依据：基于 `/workspace/vus` 项目真实源码
 > 说明：本文档描述 VUS 编译器的整体架构与各模块的实现机制。
 
@@ -19,8 +23,10 @@
 9. [插件系统实现](#九插件系统实现)
 10. [C ABI 与嵌入式](#十c-abi-与嵌入式)
 11. [APK 打包实现](#十一apk-打包实现)
-12. [构建系统](#十二构建系统)
-13. [开发指南要点](#十三开发指南要点)
+12. [GUI 双机制实现（GuiLite + VUA）](#十二gui-双机制实现guilite--vua)
+13. [性能优化](#十三性能优化)
+14. [构建系统](#十四构建系统)
+15. [开发指南要点](#十五开发指南要点)
 
 ---
 
@@ -52,9 +58,14 @@ VUS 是一门编译到 C 的中文编程语言，其编译器采用经典的多�
 ┌──────────────────────────────────────────────────────────────┐
 │                      运行时支撑层（rt/）                        │
 │  libvus_rt（引用计数/字符串/列表/字典/闭包/错误处理/协程/线程）   │
-│  EasyLogger（分级日志）│ libcurl（可选）│ POSIX 线程             │
+│  EasyLogger（分级日志）│ yyjson（JSON）│ POSIX 线程             │
+│  GuiLite 桥接（图形_* 画布流）│ vua.c（界面_* 组件流）          │
+│  vus_xyz（体感音游：mpv + termux-sensor）                      │
+│  libcurl（可选）│ libpython（可选）                             │
 └──────────────────────────────────────────────────────────────┘
 ```
+
+> 编译与运行时性能经过专项优化：生成代码体积（含字面量池化/helper 收敛/循环模板收敛）与大文件编译、热循环运行均有显著提升，见第 13 章。
 
 职责分层：
 
@@ -573,11 +584,106 @@ C 源码 → vus_compile_c（追加 .vusx 编译期插件的 .o 到 GCC 命令�
 
 ---
 
-## 十二、构建系统
+## 十二、GUI 双机制实现（GuiLite + VUA）
+
+### 12.1 总览：两套独立 UI 机制
+
+| 机制 | 平台 | 驱动 | 文件 | 渲染 |
+|------|------|------|------|------|
+| **画布交互流** | Termux / Linux X11 | `图形_*` 内置函数 | `rt/guilite_bridge.c/h`、`guilite_wrapper.cpp`、`guilite_platform.c`、`guilite_gles.c`、`rt/guilite/` | GuiLite 软件画布上屏（X11 / headless / GLES） |
+| **组件解析流（VUA）** | Android APK | `界面_*` 内置函数 + `.vua` 界面定义 | `rt/vua.c/h` + APK 壳 `examples/vua-android`（`VuaRenderer.java`） | native 产规范化渲染树 → Java 建 Android View |
+
+两套机制互不借用、边界清晰（详见 [VUA_REFERENCE.md](VUA_REFERENCE.md)）。
+
+### 12.2 GuiLite 画布流（`图形_*`）
+
+调用链：
+
+```
+.vus 脚本 图形_*(...)
+   → generator.c  gen_expr_call 映射为 vus_gui_*(...)
+   → rt/guilite_bridge.c  桥接层（静态状态、颜色转换 0xRRGGBB→ARGB8888、dlsym 反查回调）
+   → rt/guilite_wrapper.cpp  C++ 包装（surface 驱动、绘制原语、控件命中）
+   → rt/guilite_platform.c  平台层（X11 窗口 / headless 内存画布，可选 GLES 加速）
+```
+
+关键机制：
+
+- **布局无平台控件树**：画布流全部控件为"自绘（GuiLite 原语）+ 命中矩形登记"，点击检测走 `图形_取事件()` 轮询后按登记矩形命中。
+- **约定式回调**：VUS 无一等函数，事件处理函数按命名约定（如 `页_<名>()` 页面函数）在 C 层 `dlsym`（`-rdynamic`）反查编译后符号调用（见 `guilite_bridge.c` 回调反查）。
+- **控件体系**：按钮/标签/文本框/复选框/进度/圆环/卡片/面板/表单行/列表/画布/滑块/开关/微调/单选/面板等，全部自绘 + 命中检测。
+- **图片/动画**：`图形_图片` 按扩展名分发（`.png`→libpng、`.svg`→nanosvg、`.gif`→gifdec），最近邻拉伸绘制；`图形_动画_*` 管理 GIF 帧槽表。
+- **字体**：`图形_字体_加载` 用 FreeType 栅格化外部 TTF/OTF 为点阵位图缓存。
+- **Markdown/滚动**：`图形_MD` 实现最小 Markdown 子集按宽度折行；`图形_滚动容器*` 维护内容偏移与裁剪平移。
+- **页面栈**：`图形_页面_打开/返回/当前/绘制` 维护页面栈，每页对应约定函数 `页_<名>()`。
+- **测试**：headless 平台层 + `图形_模拟点击(x,y)` 注入点击，使 GUI 用例（`tests/test_gui_*.vus`）可在无显示器环境验证命中路径。
+
+### 12.3 VUA 组件解析流（`界面_*` + `.vua`）
+
+调用链：
+
+```
+.vus 界面_显示(路径) / 界面_绑定(事件名, 函数) ...
+   → generator.c 映射 → rt/vua.c（VuaSession 屏栈）
+   → vua_screen_load：yyjson 解析 .vua → 严格校验（type 在控件表 vua_controls.json、字段在词典）→ 组件树
+   → vua_screen_dump_rendertree：规范化渲染树 JSON + 64 位 FNV-1a 指纹（重建缓存）
+   → JNI → VuaRenderer.java：按 type 用 Android SDK 标准 View 建树（LRU 页面缓存，按指纹跳过重建）
+   → 触摸回传：vua_trigger_event(name, dict) / vua_trigger_by_id(id) → 事件表（界面_绑定 登记的 VusClosure）
+```
+
+关键机制：
+
+- **多屏导航**：`界面_显示`（读文件）/ `界面_显示_JSON`（动态 JSON 字符串）/ `界面_返回` / `界面_返回至` 操作 `VuaSession` 屏栈；屏栈变化触发重绘钩子（native → Java 重建 View）。
+- **严格校验**：`vua_screen_load` 对未知 `type`（`VUA_ERR_UNKNOWN_TYPE`）与未知字段（`VUA_ERR_UNKNOWN_FIELD`）直接报错挂错误链（`VuaError`），不静默降级。
+- **渲染树指纹**：Java 仅凭 `vua_screen_rendertree_hash()` 决定是否重建 View，避免状态未变时整树重建；输入控件真实状态随 View 保留（LRU 页面缓存逐出时快照变量）。
+- **事件索引**：`id → 事件` 索引在 native 侧随树下发（渲染树顶层 `eventIndex`），Java 只消费；`triggerId` 先解析 id 再取 `name+collect`。
+- **状态回填**：`界面_设置(变量, 值)` 写入屏状态；带 `变量` 的文本控件在重渲染时以状态值回填 `内容`（渲染树里该键为"仅此一处写"）。
+- **[/.vaz 扩展包]**：`vus vaz expand` 在构建期把 `.vua` 里的复合控件（如搜索条/星级评分）展开为组合组件 + 逻辑片段，再走正常渲染。
+
+---
+
+## 十三、性能优化
+
+专项优化覆盖**生成代码**、**编译器**与**运行时**三个层次；基准见 `.bench/`（`big.vus` 大文件、`hot.vus`/`hot2.vus` 热循环）。
+
+### 13.1 生成代码优化（`generator.c`）
+
+| 优化 | 机制 | 效果 |
+|------|------|------|
+| 函数体特征扫描 | 编译前扫描函数体是否含 `返回`/`尝试`，按需生成 `_vus_result`/`_vus_err` 变量与对应模板 | 消除无返回/无异常函数中的冗余变量与模板 |
+| `vus_var_set` 赋值热路径 | 新增统一的赋值运行时函数，ref/unref 一次完成，循环变量赋值免重复构造/转换 | 循环内赋值开销大幅下降 |
+| 列表/字典字面量 helper | `vus_object_list` / `vus_object_dict` 收敛原来逐元素生成的冗长装箱代码 | 字面量生成体积显著缩小 |
+| 整数字面量池化 | 整数常量经 `vus_literal("7")` 走字符串常量池，多次同值字面量共享实例 | 避免重复 malloc + 复制 |
+| 转文本转发 | `转文本(入参)` 直接转发入参引用，不做中间 `to_string` 再驻留 | 省一次字符串构造 |
+| 循环模板收敛 | `for_range`/`for_each` 循环体单行化（防缩进爆炸），循环值只构造一次 | 消除大循环下 C 代码体积膨胀与编译变慢 |
+| `omit_main` 库式编译 | `config.omit_main` 为 1 时不生成 `main`（vusx 插件等） | 避免宿主程序多重 main 冲突 |
+
+**基准结果**：210KB `.vus` 源生成的 C 代码从约 2.10MB 降至 1.15MB（**−45%**）；生成 `--exe` 整链编译耗时从约 14.3s 降至 10.2s（**−29%**）。
+
+### 13.2 运行时优化（`rt/libvus_rt.c`）
+
+| 优化 | 机制 |
+|------|------|
+| 字符串常量池 `vus_literal` | 哈希槽缓存字面量字符串，命中直接返回共享实例（高频重复键名/常量） |
+| 拼接免二重复制 `vus_string_concat` | 直接分配目标串一次性写两段数据，去掉中间缓冲与二次 memcpy |
+| `VusString` 头+负载单块 malloc | 结构体头与 `data` 负载一次 `malloc` 分配，减少分配次数与访问跳跃 |
+| `vus_to_string` 整数值驻留缓存 | 高频小整数（如循环计数）缓存转换结果，热循环避免反复格式化 |
+| 变量赋值热路径 `vus_var_set` | 统一赋值 ref/unref，生成代码体积与运行路径双收敛 |
+
+**基准结果**：热循环（`hot2.vus` 类 10⁷ 次整数累加/赋值）执行时间由约 1.67s 降至 0.88s（**+47%**）。
+
+### 13.3 编译器速度
+
+- 生成代码体积与模板收敛直接降低 GCC 前端解析/优化负担（大文件编译 **−29%**）。
+- 运行时不再每轮重新链接（`文件读取` 差异编译策略、`libvus_rt.a` 预归档 + GUI 语义化 Makefile 目标）。
+
+---
+
+## 十四、构建系统
 
 文件：`Makefile`（GNU Make）。
 
-### 12.1 主要目标
+### 14.1 主要目标
 
 | 目标 | 作用 |
 |------|------|
@@ -589,7 +695,7 @@ C 源码 → vus_compile_c（追加 .vusx 编译期插件的 .o 到 GCC 命令�
 | `install` / `uninstall` | 安装到 `/usr/local/bin/vus` + 共享脚本/头文件 |
 | `format` | 用 `clang-format` 格式化 `src/rt` 下的 C/H |
 
-### 12.2 编译宏
+### 14.2 编译宏
 
 - `CFLAGS = -Wall -Wextra -g -O2 -std=c11 -Wno-format-truncation`（GCC 语句表达式等扩展在实际编译中以 GNU C11 级别可用）。
 - **libpython 检测**：`python3-config` 可用时定义 `-DVUS_USE_PY`（启用嵌入式解释器），并注入 `-DVUS_PY_SONAME="libpythonX.Y.so"` 匹配 soname；不可用则仅编译子进程方案。
@@ -597,22 +703,22 @@ C 源码 → vus_compile_c（追加 .vusx 编译期插件的 .o 到 GCC 命令�
 
 ---
 
-## 十三、开发指南要点
+## 十五、开发指南要点
 
-### 13.1 代码规范
+### 15.1 代码规范
 
 - 纯 C（`.c/.h`）实现，`-std=c11`，遵循 `-Wall -Wextra` 严格告警；跨平台兼容（Linux / Android Termux / 嵌入式 ARM）。
 - 命名：编译器内部函数前缀 `vus_`；生成的 C 符号统一 `vus_` 前缀；运行时对象首字段约定为 `int ref`。
 - 头文件以 `VUS_*_H` 宏防重复包含；对外接口放 `include/vus/*.h`，内部接口放 `src/*.h`。
 - 编译目标在 Makefile 中集中管理依赖头文件，新增源文件需同步 SRCS。
 
-### 13.2 测试体系
+### 15.2 测试体系
 
 - `tests/` 下以 `.vus` 用例覆盖语言特性（算术、位运算、控制流、函数、递归、泛型、结构体、异常、线程/协程、日志等）。
 - `error_tests/` + `run_error_tests.sh` 覆盖错误路径（缺冒号、未闭合字符串/列表、泛型未闭合、结构体无名、括号不匹配等）。
 - 运行方式：`make test`（调用 `./vus test`）或 `make run-tests`（直接跑 `run_tests.sh`）。
 
-### 13.3 提交与协作风格
+### 15.3 提交与协作风格
 
 - 提交信息聚焦"为何"；文档与设计先落 `docs/designs/`、`docs/plans/` 再实现（见 multi-AI 协作与消息转发规范文档）。
 - 保持仅 read-only 的审查类任务不触碰源码；变更类任务严格按既有结构与命名模式扩展。
@@ -627,10 +733,12 @@ C 源码 → vus_compile_c（追加 .vusx 编译期插件的 .o 到 GCC 命令�
 2. **引用计数实现简化**：`vus_unref` 归零后仅 `free(obj)`，不递归释放容器内部成员；`VusDict`、`VusList` 嵌套结构需调用方正确管理，注释明确"由调用方确保正确释放"。存在潜在内存泄漏风险（尤其结构化容器组合使用场景）。
 3. **布尔表示的注意点**：布尔值是运行时字符串 `"true"/"false"`，条件判断依赖 `strcmp` / `vus_to_int`。逻辑运算与非布尔上下文混用、以及把字符串直接当布尔用时，语义可能偏离类型系统预期。
 4. **`vus_eval` 开销**：每次求值都启动一个子进程，且输出截断为 4096 字节，不适合高频/大数据量求值。
-5. **字典遍历缺失**：v0.1 未提供字典遍历接口（`VusDict` 无迭代 API），相应地 JSON 生成对字典仅返回占位 `{}`。
+5. **字典遍历缺失**：`VusDict` 无迭代 API（语言层无 `遍历字典` 语法）；语言层可经 `字典_键` 取键列表再逐个 `字典_取值`。JSON 生成已能正确序列化字典（yyjson）。
 6. **句柄表上限**：线程/协程句柄注册表各 64 槽，溢出返回 `"-1"` 并回收；长时间大量创建线程/协程可能触发上限。
 7. **网络依赖可选**：HTTP/TUI 中网络功能依赖 `VUS_HAVE_CURL`；未启用时相应内建返回空串/`-1`。
-8. **嵌入式 Python 降级**：未定义 `VUS_USE_PY`（无 `python3-config` 或无 libpython）时，`vus_plugin_run_vux_inproc` 回退子进程，`vus_json_parse/generate/vus_plugin_run_vux_json` 返回空/`NULL`。
+8. **嵌入式 Python 降级**：未定义 `VUS_USE_PY`（无 `python3-config` 或无 libpython）时，`vus_plugin_run_vux_inproc` 回退子进程、`vus_typeof` 恒返回 `"空"`；`JSON_*` 不依赖 Python（基于 yyjson，始终可用）。
+9. **GUI 画布流为自绘软件渲染**：`图形_*` 的画布流控件为软件绘制 + 命中矩形，不接入平台原生控件树；Linux 桌面需 X11 环境，Termux 需 `Termux_启动X11()`。
+10. **VUA 仅限 Android APK**：`.vua`/`界面_*` 组件解析流依赖 APK 壳的 Java 渲染器（`examples/vua-android`），桌面构建不包含该链路。
 
 ---
 

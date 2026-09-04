@@ -1,3 +1,7 @@
+> 文档版本：v1.0_apk（APK 功能时代）
+> 最后更新时间：2026-09-04
+
+
 ---
 intent: 为 VUS GUI 增加三块单页绘制能力：图形_MD 最小集渲染、图形_画线增强（线宽/虚线/箭头）、滚动容器（内容平移+裁剪）
 success_criteria: 三个新内建函数实现并在 headless 用例通过；旧 GUI 测试全部通过（tests/run_tests.sh 全绿）

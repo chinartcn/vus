@@ -1,3 +1,7 @@
+> 文档版本：v1.0_apk（APK 功能时代）
+> 最后更新时间：2026-09-04
+
+
 ---
 intent: 将 VUS 对 .vux Python 插件的调用从「子进程 + CLI」升级为「嵌入 Python 解释器、进程内直接调用」，并为插件返回值建立结构化数据（JSON/列表/字典）到 VUS 变量的传递机制。
 success_criteria:
