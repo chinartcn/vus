@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Material Design（平台内置，无需第三方库）：
+         继承 Theme.Material.Light，按钮强制为 Colored 样式（主色填充 + 白字 + 水波纹），
+         编辑框/下拉/滑块在 Material 主题下自动获得下划线/着色样式。 -->
+    <style name="Theme.VUS" parent="android:Theme.Material.Light">
+        <item name="android:colorPrimary">#1565C0</item>
+        <item name="android:colorPrimaryDark">#0D47A1</item>
+        <item name="android:colorAccent">#2962FF</item>
+        <item name="android:windowBackground">#F5F6FA</item>
+        <item name="android:statusBarColor">#0D47A1</item>
+        <item name="android:buttonStyle">@android:style/Widget.Material.Button.Colored</item>
+        <item name="android:spinnerStyle">@android:style/Widget.Material.Spinner</item>
+    </style>
+</resources>
