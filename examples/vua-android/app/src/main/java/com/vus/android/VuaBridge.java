@@ -234,9 +234,16 @@ public final class VuaBridge {
 
     /**
      * native：返回当前屏（栈顶）的规范化渲染树 JSON；无屏/失败返回 null。
-     * 返回的字符串在 native 侧 malloc，Java 无需释放（native 在跨 JNI 时已拷贝）。
+     * 返回的字符串在 native 侧缓存所有（不得释放），Java 无需处理。
      */
     public static native String vuaRenderTree();
+
+    /**
+     * native：返回当前屏渲染树的内容指纹（版本号协议）。
+     * 指纹不变 = 内容不变，可跳过 vuaRenderTree 整树传输，直接命中页面 View 缓存。
+     * 无屏返回 -1。
+     */
+    public static native long vuaRenderHash();
 
     /**
      * native：设置 VUS/VUA 运行时的工作目录（应传 Context.getFilesDir()）。
