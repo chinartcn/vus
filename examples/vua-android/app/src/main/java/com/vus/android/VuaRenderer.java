@@ -157,7 +157,7 @@ public final class VuaRenderer {
                 if (VuaBridge.onCheckUpdate != null) VuaBridge.onCheckUpdate.run();
                 return;
             }
-            String vars = collectVars(collect);
+            String vars = collectVars(node);
             if (evName != null) {
                 VuaBridge.vuaTrigger(evName, vars);
             } else {
@@ -318,19 +318,39 @@ public final class VuaRenderer {
         return null;
     }
 
-    /** 从 collect 变量表收集当前输入值，输出 JSON 对象字符串（如 {"金额":"1280"}）。 */
-    private String collectVars(JSONArray collect) {
-        if (collect == null) return "{}";
+    /** 收集按钮事件的变量参数，输出 JSON 对象字符串（如 {"星级":"1","金额":"1280"}）。
+     *  收集变量：读输入控件当前值；回调变量：键=值 字面量参数（星级 1..5 等）。 */
+    private String collectVars(JSONObject node) {
         StringBuilder sb = new StringBuilder("{");
         boolean first = true;
-        for (int i = 0; i < collect.length(); i++) {
-            String name = collect.optString(i);
-            View v = inputs.get(name);
-            if (v == null) continue;
-            String val = inputVal(v);
-            if (!first) sb.append(',');
-            first = false;
-            sb.append('"').append(escapeJs(name)).append("\":\"").append(escapeJs(val)).append('"');
+        JSONArray collect = eventCollect(node);
+        if (collect != null) {
+            for (int i = 0; i < collect.length(); i++) {
+                String name = collect.optString(i);
+                View v = inputs.get(name);
+                if (v == null) continue;
+                String val = inputVal(v);
+                if (!first) sb.append(',');
+                first = false;
+                sb.append('"').append(escapeJs(name)).append("\":\"").append(escapeJs(val)).append('"');
+            }
+        }
+        JSONObject e = node.optJSONObject("事件");
+        if (e == null) e = node.optJSONObject("event");
+        JSONArray cb = e != null ? e.optJSONArray("回调变量") : null;
+        if (cb == null && e != null) cb = e.optJSONArray("callback");
+        if (cb != null) {
+            for (int i = 0; i < cb.length(); i++) {
+                String s = cb.optString(i);
+                int eq = s.indexOf('=');
+                if (eq <= 0) continue;
+                String k = s.substring(0, eq).trim();
+                String v = s.substring(eq + 1).trim();
+                if (k.isEmpty()) continue;
+                if (!first) sb.append(',');
+                first = false;
+                sb.append('"').append(escapeJs(k)).append("\":\"").append(escapeJs(v)).append('"');
+            }
         }
         return sb.append('}').toString();
     }

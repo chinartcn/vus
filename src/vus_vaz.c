@@ -183,6 +183,39 @@ static const char *vaz_str_key(const char *s) {
     return s ? s : "";
 }
 
+/* 把 s 中所有 {name}（name 长 name_len）替换为 repl；返回 malloc 字符串 */
+static char *vaz_subst(const char *s, const char *name, size_t name_len,
+                       const char *repl) {
+    StrB b; strb_init(&b);
+    const char *cursor = s;
+    while (*cursor) {
+        const char *lb = strchr(cursor, '{');
+        if (!lb) {
+            strb_puts(&b, cursor);
+            break;
+        }
+        const char *rb = strchr(lb, '}');
+        if (!rb) {
+            strb_puts(&b, cursor);
+            break;
+        }
+        if ((size_t)(rb - lb - 1) == name_len && memcmp(lb + 1, name, name_len) == 0) {
+            size_t pre = (size_t)(lb - cursor);
+            if (pre > 0) {
+                char *tmp = (char *)malloc(pre + 1);
+                if (tmp) { memcpy(tmp, cursor, pre); tmp[pre] = '\0'; strb_puts(&b, tmp); free(tmp); }
+            }
+            strb_puts(&b, repl);
+            cursor = rb + 1;
+        } else {
+            strb_putc(&b, *cursor);
+            cursor++;
+        }
+    }
+    if (!b.len) { strb_free(&b); return strdup(""); }
+    return b.buf;
+}
+
 /* 递归替换 node 内所有字符串字段的 {参数} 占位。
  * params：页面节点（自定义控件的调用点），字段名 → 参数值。 */
 static void vaz_fill_params(yyjson_mut_doc *doc, yyjson_mut_val *node,
@@ -251,14 +284,23 @@ static void vaz_fill_params(yyjson_mut_doc *doc, yyjson_mut_val *node,
             if (yyjson_mut_is_str(child)) {
                 const char *s = yyjson_mut_get_str(child);
                 const char *vstart; size_t vlen; int whole;
-                if (find_placeholder(s, &vstart, &vlen, &whole) && whole) {
+                if (find_placeholder(s, &vstart, &vlen, &whole)) {
                     char pname[128];
                     if (vlen < sizeof(pname)) {
                         memcpy(pname, vstart, vlen);
                         pname[vlen] = '\0';
                         yyjson_mut_val *pval = yyjson_mut_obj_get(params, pname);
                         if (pval) {
-                            yyjson_mut_arr_replace(node, idx, yyjson_mut_val_mut_copy(doc, pval));
+                            if (whole) {
+                                yyjson_mut_arr_replace(node, idx, yyjson_mut_val_mut_copy(doc, pval));
+                            } else if (yyjson_mut_is_str(pval)) {
+                                /* 部分占位：拼接替换（{"变量"}=1 → 星级=1） */
+                                char *joined = vaz_subst(s, pname, vlen, yyjson_mut_get_str(pval));
+                                if (joined) {
+                                    yyjson_mut_arr_replace(node, idx, yyjson_mut_strcpy(doc, joined));
+                                    free(joined);
+                                }
+                            }
                         }
                     }
                 }
