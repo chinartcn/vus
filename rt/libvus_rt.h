@@ -67,6 +67,10 @@ VusString* vus_string_new(const char* s);
 VusString* vus_string_new_len(const char* s, int len);
 /* 字符串驻留：高频重复键名/常量返回缓存实例（借用语义，调用方 vus_unref 归还） */
 VusString* vus_string_intern(const char* s);
+/* 字符串常量字面量池：同内容的不可变字面量返回同一常驻实例（借用，调用方不
+ * 释放、不修改内容）。用于生成器把源码字符串字面量替换成驻留引用，避免高频
+ * 路径每次 malloc+复制；池持有保底引用，借出不增加引用计数。 */
+VusString* vus_literal(const char* s);
 VusString* vus_string_concat(VusString* a, VusString* b);
 VusString* vus_string_slice(VusString* s, int start, int len);
 int vus_string_len(VusString* s);
