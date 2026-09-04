@@ -24,18 +24,30 @@ public class MainActivity extends Activity {
     private FrameLayout content;
     private VuaRenderer renderer;
 
-    /** 从 assets 释放 .vua/.json/.jpg/.png 到文件目录，供 native / 图片加载器使用。
-     *  动态枚举全部资源文件，避免新增页面漏拷。 */
+    /** 从 assets 释放 .vua/.json/.jpg/.png/.dex 到文件目录（递归保留目录结构），
+     *  供 native / 图片加载器 / DEX 插件加载器使用。动态枚举全部资源，避免新增页面漏拷。 */
     private void extractAssets() {
         try {
             AssetManager am = getAssets();
             File dir = getFilesDir();
-            String[] names = am.list("");
-            if (names == null) return;
-            for (String n : names) {
-                if (!n.endsWith(".vua") && !n.endsWith(".json") && !n.endsWith(".jpg") && !n.endsWith(".png")) continue;
-                InputStream in = am.open(n);
-                File out = new File(dir, n);
+            copyTree(am, "", dir);
+        } catch (Exception ignored) { }
+    }
+
+    private static void copyTree(AssetManager am, String path, File outDir) throws Exception {
+        String[] names = am.list(path);
+        if (names == null) return;
+        String prefix = path.isEmpty() ? "" : path + "/";
+        for (String n : names) {
+            String child = prefix + n;
+            if (isAssetDir(am, child)) {
+                File sub = new File(outDir, n);
+                if (!sub.isDirectory() && !sub.mkdirs()) continue;
+                copyTree(am, child, sub);
+            } else if (n.endsWith(".vua") || n.endsWith(".json") || n.endsWith(".jpg")
+                    || n.endsWith(".png") || n.endsWith(".dex")) {
+                InputStream in = am.open(child);
+                File out = new File(outDir, n);
                 FileOutputStream fos = new FileOutputStream(out);
                 byte[] b = new byte[8192];
                 int r;
@@ -43,7 +55,16 @@ public class MainActivity extends Activity {
                 fos.close();
                 in.close();
             }
-        } catch (Exception ignored) { }
+        }
+    }
+
+    private static boolean isAssetDir(AssetManager am, String path) {
+        try {
+            String[] sub = am.list(path);
+            return sub != null && sub.length > 0;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     @Override

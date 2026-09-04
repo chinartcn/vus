@@ -111,6 +111,11 @@ public final class VuaBridge {
                 writeBytes(f, b, false);
                 return ok("1");
             }
+            // DEX 逻辑拓展：api 形如 "ext.<插件名>.<操作>"，交给 ExtensionLoader 动态加载调用。
+            // 插件 dex 位于 filesDir/plugins/<插件名>.dex，支持运行期热更新（配合 http.download）。
+            if (api.startsWith("ext.")) {
+                return ExtensionLoader.dispatch(api.substring(4), a);
+            }
             return err("未知能力: " + api);
         } catch (Exception e) {
             return err(String.valueOf(e));

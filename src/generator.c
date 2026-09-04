@@ -1764,6 +1764,23 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
         }
     }
 
+    /* ============= DEX 逻辑拓展（仅 APK） ============= */
+    if (strcmp(call->func_name, "拓展_调用") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *op = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            if (call->args->count >= 2) {
+                char *args = gen_expr(buf, call->args->items[1]);
+                snprintf(result, sizeof(result), "vus_plugin_ext_call(%s, %s)", op, args);
+                free(args);
+            } else {
+                snprintf(result, sizeof(result), "vus_plugin_ext_call(%s, NULL)", op);
+            }
+            free(op);
+            return strdup(result);
+        }
+    }
+
     /* ============= 文件操作内置函数 ============= */
     if (strcmp(call->func_name, "文件_读取") == 0) {
         if (call->args && call->args->count >= 1) {

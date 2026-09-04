@@ -257,6 +257,9 @@ VusString* vus_plugin_http_get(VusString* url);
 VusString* vus_plugin_http_post(VusString* url, VusString* data);
 VusString* vus_plugin_http_download(VusString* url, VusString* filepath);
 
+/* DEX 逻辑拓展（仅 APK）：转 Java 平台桥 ext.* 命名空间，原样返回响应 JSON 串 */
+VusString* vus_plugin_ext_call(VusString* plugin_op, VusString* args);
+
 /* 插件调用（调用 .vux Python 插件） */
 VusString* vus_plugin_run_vux(VusString* plugin, VusString* cmd);
 

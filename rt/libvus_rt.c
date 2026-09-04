@@ -1014,6 +1014,25 @@ VusString* vus_plugin_http_download(VusString* url, VusString* filepath) {
 #endif
 }
 
+/* 拓展_调用（DEX 逻辑拓展，仅 APK）：把调用转给 Java 平台桥 ext.* 命名空间，
+ * 原样返回 Java 响应 JSON 串（VUS 用 JSON_查询 取 ok/data/err）。
+ * 桌面/纯 native 未注册 Java 回调时返回空串（DEX 拓展为 APK 独有能力，不回退）。 */
+VusString* vus_plugin_ext_call(VusString* plugin_op, VusString* args) {
+    if (!plugin_op || !g_java_cb) return vus_string_new("");
+    const char *op = vus_string_cstr(plugin_op);
+    if (!op || !op[0]) return vus_string_new("");
+    char api[512];
+    int n = snprintf(api, sizeof(api), "ext.%s", op);
+    if (n <= 0 || n >= (int)sizeof(api)) return vus_string_new("");
+    const char *astr = (args && vus_string_len(args) > 0) ? vus_string_cstr(args) : "{}";
+    char *out = NULL;
+    g_java_cb(api, astr, &out);
+    if (!out) return vus_string_new("");
+    VusString *resp = vus_string_new(out);
+    free(out);
+    return resp ? resp : vus_string_new("");
+}
+
 /* ---- 插件调用（.vux Python 插件） ---- */
 
 /*

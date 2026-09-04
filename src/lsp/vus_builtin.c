@@ -587,6 +587,13 @@ static const VusBuiltin g_builtins[] = {
       "网络_下载(\"https://example.com/file.zip\", \"/sdcard/file.zip\")",
       VUS_BUILTIN_NET },
 
+    /* ==================== DEX 逻辑拓展（仅 APK） ==================== */
+    { "拓展_调用",
+      "拓展_调用(插件.操作[, 参数JSON串])",
+      "调用 DEX 逻辑拓展插件（动态加载，仅 APK 可用）。`插件.操作` 如 \"sample.sum\"；`参数JSON串` 可省略。返回 JSON 字符串，用 JSON_查询 取 ok / data / err。桌面环境返回空串。",
+      "响应 = 拓展_调用(\"sample.sum\", \"{\\\"a\\\":11,\\\"b\\\":22}\")",
+      VUS_BUILTIN_NET },
+
     /* ==================== 文件_* 文件操作 ==================== */
     { "文件_读取",
       "文件_读取(路径)",

@@ -43,6 +43,11 @@ cp "$TESTDATA_SRC"/vua_home.vua "$TESTDATA_SRC"/vua_settings.vua \
    "$TESTDATA_SRC"/vua_logic.vua "$TESTDATA_SRC"/vua_class.vua \
    "$TESTDATA_SRC"/vua_controls.json "$ASSETS/"
 cp "$TESTDATA_SRC"/*.jpg "$ASSETS"/ 2>/dev/null || true
+# 示例 DEX 逻辑拓展插件（ExtensionLoader 加载，检出 .sha256 即强制校验）
+if [ -d "$ROOT/plugins/dist" ]; then
+  mkdir -p "$ASSETS/plugins"
+  cp "$ROOT/plugins/dist"/sample.dex "$ROOT/plugins/dist"/sample.dex.sha256 "$ASSETS/plugins/" 2>/dev/null || true
+fi
 
 # ---------- 0b. 可选: .vaz 控件模板展开（无包则跳过，核心分层不变） ----------
 if [ -f "$VAZ/vaz.json" ]; then
@@ -108,6 +113,7 @@ mkdir -p "$STM/lib/$ABI"; cp "$LS/libvus_app.so" "$STM/lib/$ABI/"
 cp "$ASSETS"/vua_home.vua "$ASSETS"/vua_settings.vua "$ASSETS"/vua_logic.vua \
    "$ASSETS"/vua_class.vua "$ASSETS"/vua_controls.json "$STM/assets/"
 cp "$ASSETS"/*.jpg "$ASSETS"/*.png "$STM/assets/" 2>/dev/null || true
+cp -r "$ASSETS/plugins" "$STM/assets/" 2>/dev/null || true
 
 # 用 aapt 编译 manifest + resources 生成资源表
 if [ -d "$ROOT/app/src/main/res" ]; then RES_SW=" -S $ROOT/app/src/main/res"; else RES_SW=""; fi

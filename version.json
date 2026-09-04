@@ -1,6 +1,6 @@
 {
-  "versionCode": 8,
-  "versionName": "1.7",
+  "versionCode": 9,
+  "versionName": "1.8",
   "apkUrl": "https://gitee.com/rtccn_mc/vus/raw/master/testdata/VUS.apk",
-  "changelog": "新增「课表」控件：TableLayout 表格渲染（表头/节次/课程格，深浅色）；课表页改为课表控件动态上屏"
+  "changelog": "新增 DEX 逻辑拓展：拓展_调用 内建 + ExtensionLoader 热加载插件（仅逻辑，含示例 sample 插件：求和/阶乘）"
 }
