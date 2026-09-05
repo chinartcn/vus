@@ -10,6 +10,9 @@
  * 无论哪种模式，每次 redraw 都会导出 PPM，便于统一验证像素。
  */
 
+/* 启用 strdup 等 POSIX/GNU 声明（X11 文字入队用；须在含 string.h 前定义） */
+#define _GNU_SOURCE
+
 #include "guilite_bridge.h"
 
 #include <stdio.h>
@@ -32,6 +35,11 @@ static GC       s_gc = 0;
 static XImage*  s_img = 0;
 static Atom     s_wm_delete = 0;
 static int      s_running = 0;
+
+/* G3：32bpp 快速路径标记。XImage 与帧缓冲同为 32bpp 且各通道掩码/字节序与本机
+ * 一致时（ARGB8888 直配），redraw 由逐像素 XPutPixel 位掩码换算优化为按行
+ * memcpy（支持垂直翻转的行序重排；水平镜像需逐像素交换，禁用快路径）。 */
+static int      s_fast32 = 0;
 
 /* X11 文字叠加：优先用 Xft（FontConfig + FreeType）按 UTF-8 叠加文本，支持
  * 中英文混合与系统中文字体自动回退；Xft 不可用时回退 XDrawString（X 核心
@@ -254,6 +262,18 @@ int vus_gui_platform_init(int width, int height, const char* title)
         s_img = 0;
         return 0;
     }
+    /* G3：32bpp 直配检测（掩码/字节序/水平翻转），命中后 redraw 走按行 memcpy */
+    s_fast32 = 0;
+    if (s_img && s_img->bits_per_pixel == 32 &&
+        s_img->red_mask == 0x00FF0000u && s_img->green_mask == 0x0000FF00u &&
+        s_img->blue_mask == 0x000000FFu && !s_flip_h)
+    {
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+        if (s_img->byte_order == LSBFirst) s_fast32 = 1;
+#else
+        if (s_img->byte_order == MSBFirst) s_fast32 = 1;
+#endif
+    }
     s_running = 1;
 #endif /* VUS_GUI_X11 */
     return 0;
@@ -290,16 +310,24 @@ int vus_gui_platform_draw_text(int x, int y, const char* text, unsigned int colo
 #endif
 }
 
-void vus_gui_platform_redraw(int width, int height, const unsigned int* fb)
+void vus_gui_platform_redraw(int width, int height, const unsigned int* fb,
+                             int rx1, int ry1, int rx2, int ry2)
 {
     if (!fb) { return; }
+
+    /* G8：脏矩形规范化（半开区间，越界裁剪）；空/非法回退整帧（保底正确） */
+    if (rx1 < 0) rx1 = 0;
+    if (ry1 < 0) ry1 = 0;
+    if (rx2 > width) rx2 = width;
+    if (ry2 > height) ry2 = height;
+    if (rx2 <= rx1 || ry2 <= ry1) { rx1 = 0; ry1 = 0; rx2 = width; ry2 = height; }
 
     /* 调试模式才导出 PPM 并打印每帧帧缓冲概要，默认关闭（避免高频写盘/日志耗电） */
     if (s_dbg)
     {
         export_ppm("gui_out.ppm", width, height, fb);
-        fprintf(stderr, "[redraw] w=%d h=%d fb[0]=0x%08X fb[%d]=0x%08X fb[mid]=0x%08X\n",
-                width, height, fb[0], width * height - 1,
+        fprintf(stderr, "[redraw] w=%d h=%d dirty=(%d,%d)-(%d,%d) fb[0]=0x%08X fb[%d]=0x%08X\n",
+                width, height, rx1, ry1, rx2, ry2, fb[0], width * height - 1,
                 fb[(size_t)(width / 2) * (size_t)width + (size_t)(height / 2)]);
     }
 
@@ -307,10 +335,9 @@ void vus_gui_platform_redraw(int width, int height, const unsigned int* fb)
 #ifdef VUS_GUI_GLES
     if (s_gles)
     {
-        /* 底层 GPU 上屏：帧缓冲以纹理形式交给 GL，GPU 完成颜色序与翻转。
-         * 文字随后仍在 X11 上层用 Xft 叠加（EGL 双缓冲下可能被交换，
-         * 属已知限制；后续可把文字合成进纹理彻底解决）。 */
-        vus_gles_redraw(width, height, fb);
+        /* 底层 GPU 上屏：G8 增量 —— 帧缓冲脏矩形以 glTexSubImage2D 只上传
+         * 子区域，取代整帧纹理上传；文字随后仍在 X11 上层用 Xft 叠加。 */
+        vus_gles_redraw(width, height, fb, rx1, ry1, rx2, ry2);
         for (int i = 0; i < s_text_cnt; i++)
         {
             XRenderColor rc;
@@ -335,31 +362,53 @@ void vus_gui_platform_redraw(int width, int height, const unsigned int* fb)
         goto gles_done; /* 跳过下方 XImage 软路径与文字重放 */
     }
 #endif
-    if (!s_dpy || !s_img || !fb) { return; }
-    /* 用 XPutPixel 逐像素写入 s_img->data：Xlib 会根据 XImage 的
-     * byte_order / bit_order / 各颜色掩码自动换算像素值，从而适配
-     * 任意 visual / 深度 / 字节序（Termux Xwayland、PC X11、Xvfb）。
-     * 相比直接 memcpy 假设内存布局与服务器一致，可避免错位与方向颠倒。 */
-    for (int y = 0; y < height; y++)
+    if (!s_dpy || !s_img) { return; }
+
+    int dw = rx2 - rx1;
+    int dh = ry2 - ry1;
+    if (s_fast32)
     {
-        for (int x = 0; x < width; x++)
+        /* G3 快路径：32bpp 且掩码/字节序与本机帧缓冲一致 → 按行 memcpy。
+         * 垂直翻转（VUS_X11_FLIP=v）时行序反转，逐行重排后写入 s_img。 */
+        for (int y = ry1; y < ry2; y++)
         {
-            unsigned int px = fb[(size_t)y * (size_t)width + (size_t)x];
-            unsigned long val = 0;
-            if (s_img->red_mask)
-                val |= ((unsigned long)((px >> 16) & 0xFF) << ffs_pos(s_img->red_mask)) & s_img->red_mask;
-            if (s_img->green_mask)
-                val |= ((unsigned long)((px >> 8) & 0xFF) << ffs_pos(s_img->green_mask)) & s_img->green_mask;
-            if (s_img->blue_mask)
-                val |= ((unsigned long)(px & 0xFF) << ffs_pos(s_img->blue_mask)) & s_img->blue_mask;
-            /* 翻转补偿：按 VUS_X11_FLIP 映射目标像素坐标 */
-            int tx = s_flip_h ? (width - 1 - x) : x;
             int ty = s_flip_v ? (height - 1 - y) : y;
-            XPutPixel(s_img, tx, ty, val);
+            memcpy(s_img->data + (size_t)ty * (size_t)s_img->bytes_per_line
+                                 + (size_t)rx1 * 4u,
+                   fb + (size_t)y * (size_t)width + (size_t)rx1,
+                   (size_t)dw * 4u);
         }
     }
-    XPutImage(s_dpy, s_win, s_gc, s_img, 0, 0, 0, 0,
-              (unsigned int)width, (unsigned int)height);
+    else
+    {
+        /* 通用逐像素路径：Xlib 按 s_img 的 byte_order/bit_order/掩码自动换算
+         * 像素值，适配任意 visual/深度/字节序；仅走脏区，支持双向翻转。 */
+        for (int y = ry1; y < ry2; y++)
+        {
+            for (int x = rx1; x < rx2; x++)
+            {
+                unsigned int px = fb[(size_t)y * (size_t)width + (size_t)x];
+                unsigned long val = 0;
+                if (s_img->red_mask)
+                    val |= ((unsigned long)((px >> 16) & 0xFF) << ffs_pos(s_img->red_mask)) & s_img->red_mask;
+                if (s_img->green_mask)
+                    val |= ((unsigned long)((px >> 8) & 0xFF) << ffs_pos(s_img->green_mask)) & s_img->green_mask;
+                if (s_img->blue_mask)
+                    val |= ((unsigned long)(px & 0xFF) << ffs_pos(s_img->blue_mask)) & s_img->blue_mask;
+                int tx = s_flip_h ? (width - 1 - x) : x;
+                int ty = s_flip_v ? (height - 1 - y) : y;
+                XPutPixel(s_img, tx, ty, val);
+            }
+        }
+    }
+    /* G8：只把脏矩形对应的 XImage 子区域送窗（src 与 dst 同区域；
+     * 翻转补偿在写 s_img 时已按行/像素完成，区域随之映射） */
+    {
+        int sx = s_flip_h ? (width - rx2) : rx1;
+        int sy = s_flip_v ? (height - ry2) : ry1;
+        XPutImage(s_dpy, s_win, s_gc, s_img, sx, sy, sx, sy,
+                  (unsigned int)dw, (unsigned int)dh);
+    }
     /* 在帧缓冲之上重放文字，避免被 XPutImage 覆盖：
      * 优先 Xft 按 UTF-8 绘制（支持中文，XftDrawStringUtf8 内部做字形回退）；
      * Xft 不可用时回退 XDrawString（X 核心字体，仅 ASCII）。 */
@@ -424,7 +473,7 @@ static void vus_gui_platform_handle_event(XEvent *ev, int width, int height, con
     switch (ev->type)
     {
     case Expose:
-        vus_gui_platform_redraw(width, height, fb);
+        vus_gui_platform_redraw(width, height, fb, 0, 0, width, height);
         break;
     case ClientMessage:
         if ((Atom)ev->xclient.data.l[0] == s_wm_delete)

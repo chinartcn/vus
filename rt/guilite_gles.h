@@ -27,8 +27,10 @@ int vus_gles_init(Display* dpy, Window win, int width, int height);
 /* 当前是否处于 GL 上屏模式（需 init 成功）。 */
 int vus_gles_active(void);
 
-/* 把 ARGB8888 帧缓冲以纹理方式经 GL 上屏。init 未成功时为 no-op。 */
-void vus_gles_redraw(int width, int height, const unsigned int* fb);
+/* 把 ARGB8888 帧缓冲以纹理方式经 GL 上屏；G8 增量：仅上传脏矩形
+ * [rx1,rx2)×[ry1,ry2) 到对应纹理子区域（半开区间）。init 未成功时为 no-op。 */
+void vus_gles_redraw(int width, int height, const unsigned int* fb,
+                     int rx1, int ry1, int rx2, int ry2);
 
 #endif /* VUS_GUI_GLES */
 #endif /* VUS_GUILITE_GLES_H */

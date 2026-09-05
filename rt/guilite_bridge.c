@@ -9,6 +9,9 @@
  * 颜色约定：VUS 传入 0xRRGGBB，转换成 GuiLite 的 ARGB8888 后交给包装层。
  */
 
+/* 启用 strdup 等 POSIX/GNU 声明（须在含 string.h 前定义） */
+#define _GNU_SOURCE
+
 #include "guilite_bridge.h"
 
 /* dlsym 需要 <dlfcn.h> 与链接期 -rdynamic/-ldl（见 src/generator.c GUI 链接参数） */
@@ -224,9 +227,202 @@ static int point_in(int x, int y, int rx, int ry, int rw, int rh)
 /* ============ 阶段6：脏标记（按需刷新 / 省电） ============
  * 任何绘制/控件写入帧缓冲或文字队列后置位，redraw 仅在置位时真正上屏并
  * 清零；否则短路返回。避免主循环每帧“无条件刷新”（即使画面未变化）导致
- * CPU 持续工作、无法休眠，进而被 Android 判定异常耗电而杀进程。 */
-static int s_dirty = 1; /* 初始为 1，保证首帧必刷 */
-static void vus_gui_mark_dirty(void) { s_dirty = 1; }
+ * CPU 持续工作、无法休眠，进而被 Android 判定异常耗电而杀进程。
+ * G8：脏区升级为矩形 —— 绘制写入的像素包围盒（半开区间 [x1,x2)×[y1,y2)），
+ * redraw 只增量提交/上屏这块区域，不再整帧 memcpy。像素型绘制
+ * （write_scrolled_pixel）自动归并；矩形型绘制在调用点 mark_dirty_area。
+ */
+static int  s_dirty = 1; /* 初始为 1，保证首帧必刷 */
+static int  s_dirty_x1 = 0, s_dirty_y1 = 0, s_dirty_x2 = 0, s_dirty_y2 = 0;
+static void vus_gui_mark_dirty_area(int x, int y, int w, int h)
+{
+    if (w <= 0 || h <= 0) return;
+    int x2 = x + w, y2 = y + h;
+    if (!s_dirty)
+    {
+        s_dirty = 1;
+        s_dirty_x1 = x; s_dirty_y1 = y; s_dirty_x2 = x2; s_dirty_y2 = y2;
+    }
+    else
+    {
+        if (x < s_dirty_x1) s_dirty_x1 = x;
+        if (y < s_dirty_y1) s_dirty_y1 = y;
+        if (x2 > s_dirty_x2) s_dirty_x2 = x2;
+        if (y2 > s_dirty_y2) s_dirty_y2 = y2;
+    }
+}
+static void vus_gui_mark_dirty(void)
+{
+    /* 全屏脏：以当前帧缓冲尺寸归并 */
+    vus_gui_mark_dirty_area(0, 0, vus_gui_surface_width(), vus_gui_surface_height());
+}
+
+/* ============ 阶段F：外部字体（FreeType） ============
+ * 图形_字体_加载("路径", 字号)：用 FreeType 加载外部 TTF/OTF 字体到全局活动字体，
+ * 后续 draw_text/图形_MD 的文字栅格化为字形写进 ARGB 帧缓冲。 */
+static FT_Library   s_ftlib = 0;
+static FT_Face      s_ftface = 0;
+static int          s_ft_size = 16;   /* 当前字号（像素） */
+static int          s_ft_loaded = 0;
+
+/* ============ G1：FreeType 字形缓存（(码点,字号) → 渲染位图 + 度量） ============
+ * 原实现每帧每字符都 FT_Load_Char(FT_LOAD_RENDER) 重栅格化；这里把栅格化
+ * 结果按 (字号, 码点) 键缓存为拷贝（glyph slot 缓冲会被后续 load 覆盖），
+ * 下次同字型直接复用位图与 advance。命中更新 last_used，满员淘汰最久未用。 */
+#define VUS_GLYPH_CACHE_MAX 512
+typedef struct {
+    uint32_t       key;        /* (s_ft_size << 21) | (cp & 0x1FFFFF) */
+    unsigned char* buf;        /* 位图像素拷贝（宽*rows, pitch 行距） */
+    int            width, rows, pitch;
+    int            left, top;  /* bitmap_left / bitmap_top */
+    int            advance;    /* advance.x >> 6 */
+    int            last_used;
+} VusGlyphSlot;
+static VusGlyphSlot s_glyphs[VUS_GLYPH_CACHE_MAX];
+static int s_glyph_count = 0;
+static int s_glyph_clock = 0;
+
+static void vus_glyph_cache_clear(void)
+{
+    for (int i = 0; i < s_glyph_count; i++) { free(s_glyphs[i].buf); s_glyphs[i].buf = 0; }
+    s_glyph_count = 0;
+}
+
+/* 取字形缓存条目：命中直接返回；未命中用当前活动字体栅格化（拷贝位图）。 */
+static VusGlyphSlot* vus_glyph_get(unsigned int cp)
+{
+    if (!s_ftface || !s_ftlib) return 0;
+    uint32_t key = ((uint32_t)s_ft_size << 21) | (cp & 0x1FFFFFu);
+    VusGlyphSlot* evict = 0;
+    int min_use = 0x7FFFFFFF;
+    for (int i = 0; i < s_glyph_count; i++)
+    {
+        if (s_glyphs[i].key == key)
+        {
+            s_glyphs[i].last_used = ++s_glyph_clock;
+            return &s_glyphs[i];
+        }
+        if (s_glyphs[i].last_used < min_use) { min_use = s_glyphs[i].last_used; evict = &s_glyphs[i]; }
+    }
+    if (s_glyph_count >= VUS_GLYPH_CACHE_MAX)
+    {
+        /* 满员：淘汰最久未用 */
+        free(evict->buf); evict->buf = 0;
+        *evict = s_glyphs[s_glyph_count - 1];
+        s_glyph_count--;
+    }
+    if (FT_Load_Char(s_ftface, cp, FT_LOAD_RENDER) != 0) return 0;
+    FT_GlyphSlot g = s_ftface->glyph;
+    FT_Bitmap* bmp = &g->bitmap;
+    VusGlyphSlot* sl = &s_glyphs[s_glyph_count];
+    size_t total = (size_t)bmp->rows * (size_t)(bmp->pitch > 0 ? bmp->pitch : bmp->width);
+    unsigned char* copy = (unsigned char*)malloc(total ? total : 1);
+    if (!copy) return 0;
+    if (total) memcpy(copy, bmp->buffer, total);
+    sl->key = key;
+    sl->buf = copy;
+    sl->width = bmp->width;
+    sl->rows = bmp->rows;
+    sl->pitch = bmp->pitch > 0 ? bmp->pitch : bmp->width;
+    sl->left = g->bitmap_left;
+    sl->top = g->bitmap_top;
+    sl->advance = (int)(g->advance.x >> 6);
+    sl->last_used = ++s_glyph_clock;
+    s_glyph_count++;
+    return sl;
+}
+
+/* ============ G2：图片解码缓存（路径 → RGBA 像素 LRU） ============
+ * PNG/SVG 每次绘制都整文件重解码；这里把解码结果按路径缓存
+ * （LRU，上限 VUS_IMG_CACHE_MAX 条），重复绘制/滚动复用时直接复用像素，
+ * 只保留一次解码成本。GIF/动画帧不走此缓存（由播放器槽表管理）。 */
+#define VUS_IMG_CACHE_MAX 16
+typedef struct {
+    char*         path;
+    unsigned char* rgba;
+    int           w, h;
+    int           last_used;
+} VusImgSlot;
+static VusImgSlot s_imgs[VUS_IMG_CACHE_MAX];
+static int s_img_count = 0;
+
+static const unsigned char* vus_img_cache_get(const char* path, int* w, int* h)
+{
+    if (!path) return 0;
+    for (int i = 0; i < s_img_count; i++)
+    {
+        if (strcmp(s_imgs[i].path, path) == 0)
+        {
+            s_imgs[i].last_used = ++s_glyph_clock;
+            if (w) *w = s_imgs[i].w;
+            if (h) *h = s_imgs[i].h;
+            return s_imgs[i].rgba;
+        }
+    }
+    return 0;
+}
+
+/* 接管解码产出的 rgba（所有权归缓存）；满员淘汰最久未用条目。 */
+static void vus_img_cache_put(const char* path, unsigned char* rgba, int w, int h)
+{
+    if (!path || !rgba || w <= 0 || h <= 0) return;
+    if (s_img_count >= VUS_IMG_CACHE_MAX)
+    {
+        int min_use = 0x7FFFFFFF, ev = 0;
+        for (int i = 0; i < s_img_count; i++)
+            if (s_imgs[i].last_used < min_use) { min_use = s_imgs[i].last_used; ev = i; }
+        free(s_imgs[ev].path); free(s_imgs[ev].rgba);
+        s_imgs[ev] = s_imgs[--s_img_count];
+    }
+    s_imgs[s_img_count].path = strdup(path);
+    if (!s_imgs[s_img_count].path) { free(rgba); return; }
+    s_imgs[s_img_count].rgba = rgba;
+    s_imgs[s_img_count].w = w;
+    s_imgs[s_img_count].h = h;
+    s_imgs[s_img_count].last_used = ++s_glyph_clock;
+    s_img_count++;
+}
+
+/* PNG/SVG 解码实现定义在后方（阶段C/G），此处供带缓存辅助前置引用。 */
+static int png_load_rgba(const char* path, int* pw, int* ph, unsigned char** data);
+static int svg_load_rgba(const char* path, int* pw, int* ph, unsigned char** data);
+
+/* PNG 解码 + LRU 缓存：命中直接返回缓存指针（调用方不得 free）；
+ * 未命中解码一次并接管入缓存。失败返回 NULL。 */
+static const unsigned char* png_cached_rgba(const char* path, int* w, int* h)
+{
+    const unsigned char* hit = vus_img_cache_get(path, w, h);
+    if (hit) return hit;
+    int sw = 0, sh = 0;
+    const unsigned char* rgba = NULL;
+    if (!png_load_rgba(path, &sw, &sh, (unsigned char**)&rgba) || !rgba || sw <= 0 || sh <= 0)
+    {
+        free((void*)rgba);
+        return 0;
+    }
+    vus_img_cache_put(path, (unsigned char*)rgba, sw, sh);
+    if (w) *w = sw;
+    if (h) *h = sh;
+    return rgba;   /* 所有权已移交缓存 */
+}
+
+/* SVG 解码 + LRU 缓存（同上约定）。 */
+static const unsigned char* svg_cached_rgba(const char* path, int* w, int* h)
+{
+    const unsigned char* hit = vus_img_cache_get(path, w, h);
+    if (hit) return hit;
+    int sw = 0, sh = 0;
+    const unsigned char* rgba = NULL;
+    if (!svg_load_rgba(path, &sw, &sh, (unsigned char**)&rgba) || !rgba || sw <= 0 || sh <= 0)
+    {
+        free((void*)rgba);
+        return 0;
+    }
+    vus_img_cache_put(path, (unsigned char*)rgba, sw, sh);
+    if (w) *w = sw;
+    if (h) *h = sh;
+    return rgba;   /* 所有权已移交缓存 */
+}
 
 /* ===== 阶段D前置：滚动容器表（画线/MD 平移裁剪用到） ===== */
 #define VUS_SCROLL_MAX 16
@@ -239,16 +435,6 @@ static VusScroll  s_scrolls[VUS_SCROLL_MAX];
 static int        s_scroll_cnt = 0;
 static VusScroll* s_act_scroll = NULL;   /* 当前开启平移/裁剪的活动容器 */
 static VusScroll* find_scroll(const char* name);
-
-/* ============ 阶段F：外部字体（FreeType） ============ */
-/* 图形_字体_加载("路径", 字号)：用 FreeType 加载外部 TTF/OTF 字体到全局活动字体，
- * 后续 draw_text/图形_MD 的文字栅格化为字形写进 ARGB 帧缓冲（替代默认 8x8 位图与
- * X11 核心字体），支持中英文与任意字号。返回 "1" 成功 / "0" 失败（缺 FreeType/打不开/加载错）。
- * 未加载外部字体时，文字绘制回退到既有 8x8 / X11 通道，保证旧脚本行为不变。 */
-static FT_Library   s_ftlib = 0;
-static FT_Face      s_ftface = 0;
-static int          s_ft_size = 16;   /* 当前字号（像素） */
-static int          s_ft_loaded = 0;
 
 /* 帧缓冲像素写入（应用滚动平移 + 裁剪），定义在阶段D，此处供字体渲染前置引用。 */
 static void write_scrolled_pixel(int x, int y, unsigned int argb);
@@ -287,7 +473,8 @@ static unsigned int ft_utf8_next(const char* s, int* adv)
 }
 
 /* 用当前外部字体栅格化文本到帧缓冲；逐字形取位图灰度，经 write_scrolled_pixel
- * 写像素（自动滚动平移/裁剪），颜色用给定 ARGB。返回 1（已绘制）或 0（无字体）。 */
+ * 写像素（自动滚动平移/裁剪），颜色用给定 ARGB。返回 1（已绘制）或 0（无字体）。
+ * G1：字形从 LRU 缓存取（命中复用位图与度量，不再反复 FT_Load_Char 重栅格化）。 */
 static void vus_ft_draw_text(int x, int y, const char* text, unsigned int argb)
 {
     if (!text || !s_ftface || !s_ftlib) return;
@@ -306,16 +493,15 @@ static void vus_ft_draw_text(int x, int y, const char* text, unsigned int argb)
         int adv;
         unsigned int cp = ft_utf8_next(p, &adv);
         p += adv;
-        if (FT_Load_Char(s_ftface, cp, FT_LOAD_RENDER) != 0) { pen_x += s_ft_size; continue; }
-        FT_GlyphSlot g = s_ftface->glyph;
-        FT_Bitmap* bmp = &g->bitmap;
-        int gx = pen_x + g->bitmap_left;
-        int gy = line_y + s_ft_size - g->bitmap_top;
-        for (int row = 0; row < (int)bmp->rows; row++)
+        VusGlyphSlot* g = vus_glyph_get(cp);
+        if (!g) { pen_x += s_ft_size; continue; }
+        int gx = pen_x + g->left;
+        int gy = line_y + s_ft_size - g->top;
+        for (int row = 0; row < g->rows; row++)
         {
-            for (int col = 0; col < (int)bmp->width; col++)
+            for (int col = 0; col < g->width; col++)
             {
-                unsigned char a = bmp->buffer[row * bmp->pitch + col];
+                unsigned char a = g->buf[row * g->pitch + col];
                 if (a == 0) continue;
                 unsigned int out;
                 if (a >= 255)
@@ -326,7 +512,7 @@ static void vus_ft_draw_text(int x, int y, const char* text, unsigned int argb)
                 write_scrolled_pixel(gx + col, gy + row, out);
             }
         }
-        pen_x += (int)(g->advance.x >> 6);
+        pen_x += g->advance;
     }
 }
 
@@ -348,6 +534,8 @@ VusString* vus_gui_font(const char* path, int size_px)
         return vus_string_new("0");
     }
     FT_Set_Pixel_Sizes(s_ftface, 0, (unsigned)size_px);
+    /* 换字体（或同字体重建）：字形度量/位图随 face 变化，缓存全部作废 */
+    vus_glyph_cache_clear();
     s_ft_size = size_px;
     s_ft_loaded = 1;
     return vus_string_new("1");
@@ -492,6 +680,8 @@ static void write_scrolled_pixel(int x, int y, unsigned int argb)
     int H = vus_gui_surface_height();
     if (x < 0 || y < 0 || x >= W || y >= H) return;
     fb[y * W + x] = argb;
+    /* G8：像素型绘制的脏区在最终写像素处归并（滚动平移/裁剪后即为实际落点） */
+    vus_gui_mark_dirty_area(x, y, 1, 1);
 }
 
 /* 读取 ARGB 像素（同上平移/裁剪语义）：供 PNG alpha 合成读当前底色。
@@ -768,10 +958,10 @@ VusString* vus_gui_draw_png(int x, int y, int w, int h, const char* path)
         return vus_string_new("0");
     }
     int sw = 0, sh = 0;
-    unsigned char* rgba = NULL;
-    if (!png_load_rgba(path, &sw, &sh, &rgba) || !rgba || sw <= 0 || sh <= 0)
+    /* G2：解码结果按路径 LRU 缓存，重复绘制复用像素，不再整文件重解码 */
+    const unsigned char* rgba = png_cached_rgba(path, &sw, &sh);
+    if (!rgba || sw <= 0 || sh <= 0)
     {
-        if (rgba) free(rgba);
         return vus_string_new("0");
     }
     for (int ty = y; ty < y + h; ty++)
@@ -798,8 +988,7 @@ VusString* vus_gui_draw_png(int x, int y, int w, int h, const char* path)
             }
         }
     }
-    free(rgba);
-    vus_gui_mark_dirty();
+    /* 脏区已由 write_scrolled_pixel 逐像素归并 */
     return vus_string_new("1");
 }
 
@@ -824,10 +1013,10 @@ static void md_next_char(const char* p, int* bytes, int* px)
         int adv;
         unsigned int cp = ft_utf8_next(p, &adv);
         (void)adv;
-        if (FT_Load_Char(s_ftface, cp, FT_LOAD_RENDER) == 0)
-            *px = (int)(s_ftface->glyph->advance.x >> 6);
-        else
-            *px = s_ft_size;
+        /* G1：度量走字形缓存（命中不再 FT_Load_Char 栅格化） */
+        VusGlyphSlot* g = vus_glyph_get(cp);
+        if (g) *px = g->advance;
+        else   *px = s_ft_size;
         return;
     }
     if (c < 0x80) *px = 6;
@@ -1618,7 +1807,7 @@ VusString* vus_gui_draw_pixel(int x, int y, unsigned int color)
 {
     if (!s_initialized) { return vus_string_new("0"); }
     vus_gui_surface_draw_pixel(x, y, argb_from_rgb(color));
-    vus_gui_mark_dirty();
+    vus_gui_mark_dirty_area(x, y, 1, 1);
     return vus_string_new("1");
 }
 
@@ -1626,7 +1815,11 @@ VusString* vus_gui_draw_line(int x1, int y1, int x2, int y2, unsigned int color)
 {
     if (!s_initialized) { return vus_string_new("0"); }
     vus_gui_surface_draw_line(x1, y1, x2, y2, argb_from_rgb(color));
-    vus_gui_mark_dirty();
+    int ax = x1 < x2 ? x1 : x2;
+    int ay = y1 < y2 ? y1 : y2;
+    int bw = (x1 < x2 ? x2 - x1 : x1 - x2) + 1;
+    int bh = (y1 < y2 ? y2 - y1 : y1 - y2) + 1;
+    vus_gui_mark_dirty_area(ax, ay, bw, bh);
     return vus_string_new("1");
 }
 
@@ -1634,7 +1827,7 @@ VusString* vus_gui_draw_rect(int x, int y, int width, int height, unsigned int c
 {
     if (!s_initialized) { return vus_string_new("0"); }
     vus_gui_surface_draw_rect(x, y, width, height, argb_from_rgb(color));
-    vus_gui_mark_dirty();
+    vus_gui_mark_dirty_area(x, y, width, height);
     return vus_string_new("1");
 }
 
@@ -1642,7 +1835,7 @@ VusString* vus_gui_fill_rect(int x, int y, int width, int height, unsigned int c
 {
     if (!s_initialized) { return vus_string_new("0"); }
     vus_gui_surface_fill_rect(x, y, width, height, argb_from_rgb(color));
-    vus_gui_mark_dirty();
+    vus_gui_mark_dirty_area(x, y, width, height);
     return vus_string_new("1");
 }
 
@@ -1672,11 +1865,25 @@ VusString* vus_gui_redraw(void)
     {
         return vus_string_new("1");
     }
+    int W = vus_gui_surface_width();
+    int H = vus_gui_surface_height();
+    int rx1 = s_dirty_x1, ry1 = s_dirty_y1, rx2 = s_dirty_x2, ry2 = s_dirty_y2;
+    if (rx1 < 0) rx1 = 0; if (ry1 < 0) ry1 = 0;
+    if (rx2 > W) rx2 = W; if (ry2 > H) ry2 = H;
     s_dirty = 0;
-    /* 双缓冲：先把后台绘制缓冲一次性提交到前台，再把前台送到显示后端。 */
-    vus_gui_surface_present();
-    vus_gui_platform_redraw(vus_gui_surface_width(), vus_gui_surface_height(),
-                            vus_gui_surface_framebuffer());
+    /* G8：双缓冲增量提交 + 脏矩形上屏：仅拷贝/上屏本帧实际写过的区域，
+     * 取代整帧 memcpy 与整帧上传；全屏脏（如大文本/首帧）时区域自动=全屏。 */
+    if (rx2 > rx1 && ry2 > ry1)
+    {
+        vus_gui_surface_present_area(rx1, ry1, rx2, ry2);
+        vus_gui_platform_redraw(W, H, vus_gui_surface_framebuffer(), rx1, ry1, rx2, ry2);
+    }
+    else
+    {
+        /* 脏区为空（理论不达）：保底整帧提交，保证语义正确 */
+        vus_gui_surface_present();
+        vus_gui_platform_redraw(W, H, vus_gui_surface_framebuffer(), 0, 0, W, H);
+    }
     return vus_string_new("1");
 }
 
@@ -1793,15 +2000,13 @@ VusString* vus_gui_draw_image(int x, int y, int w, int h, const char* path)
     if (strcmp(ext, "svg") == 0)
     {
         int sw = 0, sh = 0;
-        unsigned char* rgba = NULL;
-        if (!svg_load_rgba(path, &sw, &sh, &rgba) || !rgba || sw <= 0 || sh <= 0)
+        /* G2：解码结果 LRU 缓存，动画循环重复绘制同一 SVG 不再反复解析栅格化 */
+        const unsigned char* rgba = svg_cached_rgba(path, &sw, &sh);
+        if (!rgba || sw <= 0 || sh <= 0)
         {
-            if (rgba) free(rgba);
             return vus_string_new("0");
         }
         blit_rgba_stretch(x, y, w, h, rgba, sw, sh);
-        free(rgba);
-        vus_gui_mark_dirty();
         return vus_string_new("1");
     }
     if (strcmp(ext, "gif") == 0)
@@ -1822,15 +2027,14 @@ VusString* vus_gui_draw_image(int x, int y, int w, int h, const char* path)
     /* 默认按 PNG 处理 */
     {
         int sw2 = 0, sh2 = 0;
-        unsigned char* rgba2 = NULL;
-        if (!png_load_rgba(path, &sw2, &sh2, &rgba2) || !rgba2 || sw2 <= 0 || sh2 <= 0)
+        /* G2：解码结果 LRU 缓存 */
+        const unsigned char* rgba2 = png_cached_rgba(path, &sw2, &sh2);
+        if (!rgba2 || sw2 <= 0 || sh2 <= 0)
         {
-            if (rgba2) free(rgba2);
             return vus_string_new("0");
         }
         blit_rgba_stretch(x, y, w, h, rgba2, sw2, sh2);
-        free(rgba2);
-        vus_gui_mark_dirty();
+        /* 脏区由 write_scrolled_pixel 逐像素归并 */
         return vus_string_new("1");
     }
 }

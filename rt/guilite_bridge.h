@@ -66,12 +66,15 @@ void vus_gui_surface_draw_text(int x, int y, const char* text, unsigned int argb
 unsigned int* vus_gui_surface_framebuffer(void);           /* 返回前台 ARGB8888 帧缓冲指针（显示目标） */
 unsigned int* vus_gui_surface_backbuffer(void);            /* 返回后台 ARGB8888 帧缓冲指针（绘制目标） */
 void vus_gui_surface_present(void);                        /* 双缓冲提交：后台整块拷贝到前台 */
+void vus_gui_surface_present_area(int x1, int y1, int x2, int y2); /* G8：仅提交后台 [x1,x2)×[y1,y2) 区域到前台 */
 int vus_gui_surface_width(void);
 int vus_gui_surface_height(void);
 
 /* 平台层接口（guilite_platform.c 实现） */
 int  vus_gui_platform_init(int width, int height, const char* title);
-void vus_gui_platform_redraw(int width, int height, const unsigned int* fb);
+/* G8：只重绘脏矩形 [rx1,rx2)×[ry1,ry2)（半开区间；矩形空/非法时全帧）。 */
+void vus_gui_platform_redraw(int width, int height, const unsigned int* fb,
+                             int rx1, int ry1, int rx2, int ry2);
 void vus_gui_platform_run(int width, int height, const unsigned int* fb);
 /* 平台层文字绘制：X11 可用且加载了 X 字体时用 XDrawString 叠加入队，返回 1；
  * 否则返回 0，由桥接层回退到 GuiLite 帧缓冲绘制。 */

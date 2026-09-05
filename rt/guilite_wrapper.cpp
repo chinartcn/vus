@@ -204,6 +204,25 @@ void vus_gui_surface_present(void)
     }
 }
 
+/* G8：双缓冲增量提交——仅把后台半开区间 [x1,x2)×[y1,y2) 逐行拷贝到前台。
+ * 越界按实际帧缓冲裁剪；空矩形为 no-op。 */
+void vus_gui_surface_present_area(int x1, int y1, int x2, int y2)
+{
+    if (!s_fb || !s_back || s_width <= 0 || s_height <= 0) return;
+    if (x1 < 0) x1 = 0;
+    if (y1 < 0) y1 = 0;
+    if (x2 > s_width) x2 = s_width;
+    if (y2 > s_height) y2 = s_height;
+    if (x2 <= x1 || y2 <= y1) return;
+    size_t bpp = sizeof(unsigned int);
+    size_t row = (size_t)(x2 - x1) * bpp;
+    for (int y = y1; y < y2; y++)
+    {
+        memcpy(s_fb + (size_t)y * (size_t)s_width + (size_t)x1,
+               s_back + (size_t)y * (size_t)s_width + (size_t)x1, row);
+    }
+}
+
 int vus_gui_surface_width(void)
 {
     return s_width;

@@ -265,7 +265,8 @@ int vus_gles_active(void)
     return g_active;
 }
 
-void vus_gles_redraw(int width, int height, const unsigned int* fb)
+void vus_gles_redraw(int width, int height, const unsigned int* fb,
+                     int rx1, int ry1, int rx2, int ry2)
 {
     if (!g_active || !fb) return;
     if (width != g_w || height != g_h)
@@ -278,13 +279,23 @@ void vus_gles_redraw(int width, int height, const unsigned int* fb)
                      0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
         glBindTexture(GL_TEXTURE_2D, 0);
         glViewport(0, 0, (GLsizei)width, (GLsizei)height);
+        rx1 = 0; ry1 = 0; rx2 = width; ry2 = height;   /* 重建后全量上传 */
     }
+    if (rx1 < 0) rx1 = 0;
+    if (ry1 < 0) ry1 = 0;
+    if (rx2 > width) rx2 = width;
+    if (ry2 > height) ry2 = height;
+    if (rx2 <= rx1 || ry2 <= ry1) { rx1 = 0; ry1 = 0; rx2 = width; ry2 = height; }
 
-    /* 帧缓冲即 ARGB8888 小端，内存字节 = [B,G,R,A] —— 直接按 GL_RGBA 上传，
-     * 片元着色器会把 R/B 交换还原成正确颜色。 */
+    /* G8：帧缓冲即 ARGB8888 小端，内存字节 = [B,G,R,A] —— 按 GL_RGBA 上传
+     * 脏矩形子区域（glTexSubImage2D），片元着色器把 R/B 交换还原颜色。
+     * 纹理行 0 即帧缓冲首行，子区域上传与屏幕区域一一对应。源数据是整帧
+     * 缓冲，须以 GL_UNPACK_ROW_LENGTH 声明整行宽，GL 才能按行取子区域。 */
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, (GLint)width);
     glBindTexture(GL_TEXTURE_2D, g_tex);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (GLsizei)width, (GLsizei)height,
+    glTexSubImage2D(GL_TEXTURE_2D, 0, rx1, ry1, (GLsizei)(rx2 - rx1), (GLsizei)(ry2 - ry1),
                     GL_RGBA, GL_UNSIGNED_BYTE, fb);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
 
     glUseProgram(g_prog);
     glUniform1i(glGetUniformLocation(g_prog, "uTex"), 0);
