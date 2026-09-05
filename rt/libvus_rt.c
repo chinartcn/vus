@@ -101,7 +101,10 @@ VusString* vus_literal(const char* s) {
     if (v && v->len == len && memcmp(v->data, s, (size_t)len) == 0) return v;
     VusString* nv = vus_string_new_len(s, len);   /* ref=1 由池持有 */
     if (!nv) return NULL;
-    if (g_lit_pool[slot]) vus_unref(g_lit_pool[slot]);
+    /* 换出时不 unref 旧项：借出的指针可能已被 static 缓存/容器持久化，
+     * 池换出若递减其引用会叠加到提前 free，导致悬垂（GUI 测试段错误）。
+     * 改为永驻：旧项失链交给进程退出回收，借用恒有效。VUS 短生命周期
+     * 程序里本文件字面量数量有限，代价可忽略。 */
     g_lit_pool[slot] = nv;
     return nv;
 }

@@ -305,6 +305,65 @@ VusResult vus_compile_to_c(const char *vus_file_path, VusConfig *config) {
 
 VusResult vus_compile_to_exe(const char *vus_file_path, VusConfig *config) {
     VusResult result;
+    memset(&result, 0, sizeof(result));
+
+    /* A2：增量缓存判断前移——命中时直接返回，跳过整个前端（lex/parse/生成）
+     * 与 GCC 链接，避免不改源码也全量跑前端编译。条件：可执行文件至少与
+     * 源脚本同时新，且运行时静态库未更新（旧 exe 绑定旧 libvus_rt.a，须重链）。 */
+    #define _VUS_MTIM_NS(p_) \
+        ((long long)(p_).st_mtim.tv_sec * 1000000000LL + (long long)(p_).st_mtim.tv_nsec)
+    {
+        const char *cbns = strrchr(vus_file_path, '/');
+        cbns = cbns ? cbns + 1 : vus_file_path;
+        char cname[512];
+        strncpy(cname, cbns, sizeof(cname) - 1);
+        cname[sizeof(cname) - 1] = '\0';
+        char *cdot = strrchr(cname, '.');
+        if (cdot) *cdot = '\0';
+        char cbd[1024];
+        config->build_dir[0] ? snprintf(cbd, sizeof(cbd), "%s", config->build_dir)
+                             : snprintf(cbd, sizeof(cbd), "%s/构建", config->project_dir);
+        char cexe[1024];
+        snprintf(cexe, sizeof(cexe), "%s/%s", cbd, cname);
+        struct stat cex_st, csrc_st;
+        if (stat(cexe, &cex_st) == 0 && stat(vus_file_path, &csrc_st) == 0 &&
+            _VUS_MTIM_NS(cex_st) >= _VUS_MTIM_NS(csrc_st)) {
+            struct stat clib_st;
+            char crt[1024];
+            snprintf(crt, sizeof(crt), "%s/build/libvus_rt.a", config->project_dir);
+            if (stat(crt, &clib_st) != 0 || _VUS_MTIM_NS(clib_st) <= _VUS_MTIM_NS(cex_st)) {
+                /* C1：被导入模块（递归）更新同样触发重编，避免复用过期产物；
+                   仅主文件未变时才扫描依赖，保持快速路径开销最小。 */
+                int c1_ok = 1;
+                size_t c1_len = 0;
+                char *c1_data = read_file(vus_file_path, &c1_len);
+                if (c1_data) {
+                    char c1deps[64][512];
+                    int c1ndep = vus_source_import_deps(c1_data, vus_file_path, c1deps, 64);
+                    free(c1_data);
+                    long long c1ex_ns = _VUS_MTIM_NS(cex_st);
+                    for (int i = 0; i < c1ndep; i++) {
+                        struct stat c1d_st;
+                        if (stat(c1deps[i], &c1d_st) == 0 && _VUS_MTIM_NS(c1d_st) > c1ex_ns) {
+                            c1_ok = 0;
+                            break;
+                        }
+                    }
+                }
+                if (c1_ok) {
+                    result.success = 1;
+                    strncpy(result.exe_output_path, cexe, sizeof(result.exe_output_path) - 1);
+                    result.exe_output_path[sizeof(result.exe_output_path) - 1] = '\0';
+                    #undef _VUS_MTIM_NS
+                    /* C4：缓存命中提示（stderr，不干扰程序 stdout 输出） */
+                    fprintf(stderr, "缓存命中：%s 及其依赖均未变化，复用 %s（强制重编请执行 vus clean）\n",
+                            vus_file_path, cexe);
+                    return result;
+                }
+            }
+        }
+    }
+    #undef _VUS_MTIM_NS
 
     /* 先编译到 C */
     result = vus_compile_to_c(vus_file_path, config);
@@ -360,64 +419,16 @@ VusResult vus_compile_to_exe(const char *vus_file_path, VusConfig *config) {
         }
     }
 
-    /* 调用 GCC 编译（带产物缓存：源脚本、import 依赖与运行时静态库均未变化时，
-       复用已编译的可执行，跳过编译+链接阶段，显著加快 Termux 等低性能设备上的
-       反复运行。强制重编可 touch 脚本或执行 vus clean。） */
+/* 调用 GCC 编译（缓存命中已在函数入口提前返回，此处必为未命中） */
     char error_msg[512];
     int compile_result = 0;
-    int cached = 0;
-    /* 纳秒级时间戳比较（_GNU_SOURCE 下 st_mtim 可用），同秒内修改源文件也能触发重编 */
-    #define _VUS_MTIM_NS(p_) \
-        ((long long)(p_).st_mtim.tv_sec * 1000000000LL + (long long)(p_).st_mtim.tv_nsec)
     {
-        struct stat ex_st, src_st;
-        if (stat(exe_output_path, &ex_st) == 0 &&
-            stat(vus_file_path, &src_st) == 0 &&
-            _VUS_MTIM_NS(ex_st) >= _VUS_MTIM_NS(src_st)) {
-            cached = 1;
-        }
-        /* 运行时静态库更新时同样触发重链，避免复用旧运行时 */
-        if (cached) {
-            struct stat lib_st;
-            char rt_lib[1024];
-            snprintf(rt_lib, sizeof(rt_lib), "%s/build/libvus_rt.a", config->project_dir);
-            if (stat(rt_lib, &lib_st) == 0 && _VUS_MTIM_NS(lib_st) > _VUS_MTIM_NS(ex_st)) {
-                cached = 0;
-            }
-        }
-        /* C1：被导入模块（递归）更新同样触发重编，避免复用过期产物；
-           只有主文件未变时才扫描依赖，保持快速路径开销最小。 */
-        if (cached) {
-            size_t src_len = 0;
-            char *src_data = read_file(vus_file_path, &src_len);
-            if (src_data) {
-                char deps[64][512];
-                int ndep = vus_source_import_deps(src_data, vus_file_path, deps, 64);
-                free(src_data);
-                long long ex_ns = _VUS_MTIM_NS(ex_st);
-                for (int i = 0; i < ndep; i++) {
-                    struct stat d_st;
-                    if (stat(deps[i], &d_st) == 0 && _VUS_MTIM_NS(d_st) > ex_ns) {
-                        cached = 0;
-                        break;
-                    }
-                }
-            }
-        }
-        if (!cached) {
-            compile_result = vus_compile_c(result.c_output_path, exe_output_path,
-                                           config, error_msg, sizeof(error_msg),
-                                           extra_objects[0] ? extra_objects : NULL);
-        }
-    }
-    #undef _VUS_MTIM_NS
-
-    /* C4：缓存命中提示（stderr，不干扰程序 stdout 输出） */
-    if (cached && compile_result == 0) {
-        fprintf(stderr, "缓存命中：%s 及其依赖均未变化，复用 %s（强制重编请执行 vus clean）\n",
-                vus_file_path, exe_output_path);
+        compile_result = vus_compile_c(result.c_output_path, exe_output_path,
+                                       config, error_msg, sizeof(error_msg),
+                                       extra_objects[0] ? extra_objects : NULL);
     }
 
+    /* C4：缓存命中提示已并入函数入口的提前缓存判断（命中即返回） */
     if (vusx_count > 0) vus_vusx_cleanup_all(vusx_plugins, vusx_count);
 
     if (compile_result != 0) {

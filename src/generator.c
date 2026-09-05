@@ -294,12 +294,31 @@ static VusAstProgram *g_vua_prog = NULL; /* 当前生成中的 AST 根（界面_
  * 顶部生成同名局部声明（VusString* vus_x = NULL;），遮蔽文件级全局，
  * 导致函数内（含 界面_绑定 事件函数）读写全局变量静默失效。
  * 收集这些名字后，gen_collect_locals 对全局名跳过 → 函数内直接引用文件级符号。 */
-static char *s_global_names[512];
+/* A5：名称表容量（超限显式报错，不再静默丢弃声明） */
+#define VUS_MAX_GLOBALS 8192
+#define VUS_MAX_NAMEREG 4096
+#define VUS_MAX_HOISTED 4096
+
+static char *s_global_names[VUS_MAX_GLOBALS];
 static int    s_global_count = 0;
+
+/* A1：名称哈希桶（256 槽链式）。用于全局名/局部名分类/作用域符号三张表的
+ * O(1)-ish 查找，消除巨型函数下多趟线性扫描叠加的 O(n²)。 */
+#define VUS_NAME_BKTS 256
+static unsigned gen_name_hash(const char *s) {
+    unsigned h = 5381;
+    if (!s) return 0;
+    for (; *s; s++) h = h * 33 + (unsigned char)*s;
+    return h;
+}
+
+static int s_global_bkt[VUS_NAME_BKTS]; /* 全局名桶头（-1 空） */
+static int s_global_nxt[VUS_MAX_GLOBALS];  /* 桶内 next */
 
 static int gen_is_global_name(const char *name) {
     if (!name) return 0;
-    for (int i = 0; i < s_global_count; i++)
+    unsigned h = gen_name_hash(name) % VUS_NAME_BKTS;
+    for (int i = s_global_bkt[h]; i >= 0; i = s_global_nxt[i])
         if (s_global_names[i] && strcmp(s_global_names[i], name) == 0) return 1;
     return 0;
 }
@@ -314,14 +333,19 @@ static int gen_is_global_name(const char *name) {
 #define VUS_MAX_SCOPE_SYMS 1024
 #define VUS_MAX_SCOPE_DEPTH 64
 
+static void gen_error(const char *fmt, ...); /* 前向声明（定义在生成错误区） */
+
 typedef struct {
     const char *name;          /* 源名字（借用 AST 字符串，生成期有效） */
     char        cname[300];    /* 生成的 C 符号（含 vus_ 前缀） */
+    unsigned    hash;          /* A1：name 哈希（插入时算一次） */
 } GenScopeSym;
 
 typedef struct {
     GenScopeSym syms[VUS_MAX_SCOPE_SYMS];
     int         count;
+    int         bkt[VUS_NAME_BKTS];              /* A1：本层名字桶头（-1 空） */
+    int         nb[VUS_MAX_SCOPE_SYMS];          /* A1：syms[i] 桶内 next */
 } GenScope;
 
 static GenScope s_scope_stk[VUS_MAX_SCOPE_DEPTH];
@@ -337,38 +361,64 @@ typedef struct {
     int  assigned;       /* 是否被赋值（被赋值才允许声明；纯读取不提升 → 保持 undefined 错误） */
 } GenNameReg;
 
-static const char *s_hoisted[512];
+static const char *s_hoisted[VUS_MAX_HOISTED];
 static int         s_hoisted_count = 0;
-static GenNameReg  s_namereg[1024];
+static GenNameReg  s_namereg[VUS_MAX_NAMEREG];
 static int         s_namereg_count = 0;
+static int         s_nr_bkt[VUS_NAME_BKTS];   /* A1：局部名分类哈希桶（-1 空） */
+static int         s_nr_nxt[VUS_MAX_NAMEREG]; /* A1：桶内 next */
 static int         s_region_seq = 1;  /* 块编号生成器（0=函数体） */
 static int         s_lit_seq = 1;  /* R2：字面量 static 缓存唯一序号 */
 static long long   s_call_seq = 1; /* R1：调用点临时变量唯一序号 */
 
 static int gen_is_param_name(VusAstFunctionDef *func, const char *name); /* 前向声明 */
 
-static void scope_reset(void) { s_scope_depth = 0; s_shadow_seq = 1; g_cur_func = NULL;
-                                s_hoisted_count = 0; s_namereg_count = 0; s_region_seq = 1; }
+static void scope_reset(void) {
+    s_scope_depth = 0; s_shadow_seq = 1; g_cur_func = NULL;
+    s_hoisted_count = 0; s_namereg_count = 0; s_region_seq = 1;
+    /* A1：清空所有作用域层哈希桶头为 -1（静态数组初始 0 会被当作桶下标 0）。
+     * count 必须一并归零：否则跨函数残留符号计数叠加，巨型文件会误触上限。 */
+    for (int i = 0; i < VUS_NAME_BKTS; i++) {
+        s_nr_bkt[i] = -1;
+        for (int d = 0; d < VUS_MAX_SCOPE_DEPTH; d++) s_scope_stk[d].bkt[i] = -1;
+    }
+    for (int d = 0; d < VUS_MAX_SCOPE_DEPTH; d++) s_scope_stk[d].count = 0;
+}
 static void scope_push(void) { if (s_scope_depth < VUS_MAX_SCOPE_DEPTH) s_scope_depth++; }
 static void scope_pop(void)  { if (s_scope_depth > 0) s_scope_depth--; }
 
-/* 自内向外查找名字；返回其符号项或 NULL */
+/* 自内向外查找名字；返回其符号项或 NULL（A1：每层按桶链查找） */
 static GenScopeSym *scope_find(const char *name) {
-    for (int d = s_scope_depth - 1; d >= 0; d--)
-        for (int i = s_scope_stk[d].count - 1; i >= 0; i--)
-            if (s_scope_stk[d].syms[i].name && strcmp(s_scope_stk[d].syms[i].name, name) == 0)
-                return &s_scope_stk[d].syms[i];
+    if (!name) return NULL;
+    unsigned h = gen_name_hash(name) % VUS_NAME_BKTS;
+    for (int d = s_scope_depth - 1; d >= 0; d--) {
+        for (int i = s_scope_stk[d].bkt[h]; i >= 0; i = s_scope_stk[d].nb[i]) {
+            GenScopeSym *sym = &s_scope_stk[d].syms[i];
+            if (sym->hash == h && sym->name && strcmp(sym->name, name) == 0)
+                return sym;
+        }
+    }
     return NULL;
 }
 
 /* 只查找最内层作用域 */
 static GenScopeSym *scope_find_current(const char *name) {
-    if (s_scope_depth <= 0) return NULL;
+    if (s_scope_depth <= 0 || !name) return NULL;
+    unsigned h = gen_name_hash(name) % VUS_NAME_BKTS;
     GenScope *sc = &s_scope_stk[s_scope_depth - 1];
-    for (int i = sc->count - 1; i >= 0; i--)
-        if (sc->syms[i].name && strcmp(sc->syms[i].name, name) == 0)
-            return &sc->syms[i];
+    for (int i = sc->bkt[h]; i >= 0; i = sc->nb[i]) {
+        GenScopeSym *sym = &sc->syms[i];
+        if (sym->hash == h && sym->name && strcmp(sym->name, name) == 0)
+            return sym;
+    }
     return NULL;
+}
+
+/* A1：把 sym 登记进所在作用域的哈希桶链头 */
+static void scope_bucket_insert(GenScope *sc, int idx) {
+    unsigned h = sc->syms[idx].hash % VUS_NAME_BKTS;
+    sc->nb[idx] = sc->bkt[h];
+    sc->bkt[h] = idx;
 }
 
 /* 在当前作用域登记名字；emit_decl=1 时同步生成 `VusString* <cname> = NULL;`。
@@ -379,9 +429,13 @@ static const char *scope_declare(GenBuf *buf, const char *name, int emit_decl) {
     if (cur) return cur->cname;
     if (s_scope_depth <= 0) return NULL;
     GenScope *sc = &s_scope_stk[s_scope_depth - 1];
-    if (sc->count >= VUS_MAX_SCOPE_SYMS) return NULL;
+    if (sc->count >= VUS_MAX_SCOPE_SYMS) {
+        gen_error("单个 C 块内符号超过 %d 上限（块过大）", VUS_MAX_SCOPE_SYMS);
+        return NULL;
+    }
     GenScopeSym *sym = &sc->syms[sc->count];
     sym->name = name;
+    sym->hash = gen_name_hash(name) % VUS_NAME_BKTS;   /* 存取模值，与 scope_find 比对一致 */
     char san[256];
     gen_sanitize_name(name, san, sizeof(san));
     if (s_scope_depth == 1) {
@@ -389,6 +443,7 @@ static const char *scope_declare(GenBuf *buf, const char *name, int emit_decl) {
     } else {
         snprintf(sym->cname, sizeof(sym->cname), "vus_%s_s%lld", san, s_shadow_seq++);
     }
+    scope_bucket_insert(sc, sc->count);
     sc->count++;
     if (emit_decl) {
         char decl[360];
@@ -406,10 +461,15 @@ static const char *scope_register(GenBuf *buf, const char *name, const char *cna
     if (cur) return cur->cname;
     if (s_scope_depth <= 0) return NULL;
     GenScope *sc = &s_scope_stk[s_scope_depth - 1];
-    if (sc->count >= VUS_MAX_SCOPE_SYMS) return NULL;
+    if (sc->count >= VUS_MAX_SCOPE_SYMS) {
+        gen_error("单个 C 块内符号超过 %d 上限（块过大）", VUS_MAX_SCOPE_SYMS);
+        return NULL;
+    }
     GenScopeSym *sym = &sc->syms[sc->count];
     sym->name = name;
+    sym->hash = gen_name_hash(name) % VUS_NAME_BKTS;   /* 存取模值，与 scope_find 比对一致 */
     snprintf(sym->cname, sizeof(sym->cname), "%s", cname);
+    scope_bucket_insert(sc, sc->count);
     sc->count++;
     return sym->cname;
 }
@@ -483,6 +543,19 @@ static void gen_error(const char *fmt, ...) {
     va_end(ap);
     s_gen_has_error = 1;
 }
+
+/* A5：只写不溢出的参数缓冲区追加。
+ * snprintf 返回「应写长度」，pos 会累加超过 cap（长实参表场景）；若仍以
+ * sizeof(b)-pos 续写，size_t 无符号下溢 → snprintf 越界写栈缓冲区。这里
+ * 满则停并借助 gen_error 报错，杜绝下溢写栈。 */
+#define GEN_APPEND(b_, pos_, ...) do { \
+    if ((pos_) < sizeof(b_)) { \
+        int _gn = snprintf((b_) + (pos_), sizeof(b_) - (pos_), __VA_ARGS__); \
+        if (_gn > 0) (pos_) += (size_t)_gn; \
+    } else { \
+        gen_error("代码生成实参缓冲区溢出（调用实参过多）"); \
+    } \
+} while (0)
 
 static VusAstFunctionDef *gen_find_generic_def(const char *name) {
     if (!name) return NULL;
@@ -955,20 +1028,28 @@ static void gen_inst_emit_bodies(GenBuf *buf) {
 static void scope_classify_expr(VusAstNode *node, int region);
 
 static GenNameReg *namereg_find(const char *name) {
-    for (int i = 0; i < s_namereg_count; i++)
-        if (strcmp(s_namereg[i].name, name) == 0) return &s_namereg[i];
+    unsigned h = gen_name_hash(name) % VUS_NAME_BKTS;
+    for (int i = s_nr_bkt[h]; i >= 0; i = s_nr_nxt[i])
+        if (s_namereg[i].name && strcmp(s_namereg[i].name, name) == 0) return &s_namereg[i];
     return NULL;
 }
 
 static void namereg_note(const char *name, int region, int is_assign) {
     GenNameReg *r = namereg_find(name);
     if (!r) {
-        if (s_namereg_count >= 1024) return;
-        r = &s_namereg[s_namereg_count++];
+        if (s_namereg_count >= VUS_MAX_NAMEREG) {
+            gen_error("单函数局部变量超过 %d 上限（函数过大）", VUS_MAX_NAMEREG);
+            return;
+        }
+        int idx = s_namereg_count++;
+        r = &s_namereg[idx];
         r->name = name;
         r->first_region = -1;
         r->hoisted = 0;
         r->assigned = 0;
+        unsigned h = gen_name_hash(name) % VUS_NAME_BKTS;
+        s_nr_nxt[idx] = s_nr_bkt[h];
+        s_nr_bkt[h] = idx;
     }
     if (is_assign) r->assigned = 1;
     if (region == 0) { r->hoisted = 1; return; }
@@ -1127,8 +1208,18 @@ static void gen_globals_walk_list(VusAstList *list, GenBuf *gl);
 
 static void gen_globals_declare_name(const char *name, GenBuf *gl) {
     if (!name) return;
-    if (!gen_is_global_name(name) && s_global_count < 512)
-        s_global_names[s_global_count++] = (char *)name;
+    if (!gen_is_global_name(name)) {
+        if (s_global_count >= VUS_MAX_GLOBALS) {
+            gen_error("全局变量数量超过 %d 上限（顶层声明过多）", VUS_MAX_GLOBALS);
+            return;
+        }
+        int idx = s_global_count++;
+        s_global_names[idx] = (char *)name;
+        /* A1：同步插入全局名哈希桶 */
+        unsigned gh = gen_name_hash(name) % VUS_NAME_BKTS;
+        s_global_nxt[idx] = s_global_bkt[gh];
+        s_global_bkt[gh] = idx;
+    }
     if (!gl) return;
     char san[256];
     gen_sanitize_name(name, san, sizeof(san));
@@ -1264,6 +1355,38 @@ static char *gen_expr_access(GenBuf *buf, VusAstAccess *access) {
         obj, san_member, obj, san_member);
     free(obj);
     return result;
+}
+
+/* 结构体构造表达式。与用户函数调用相反的引用约定：结构体构造函数入口**不**
+ * vus_ref 实参（字段 vus_ref 是有意持有、不归还），返回对象 ref 初始为 0（calloc），
+ * 返回槽裸赋值。因此**必须**走无 A'/B 的专用模板（见 gen_expr_call R1 注释）：
+ * 通用调用点的「实参对称归还」会扣掉调用方实参与字段持有的引用，「返回槽归还」
+ * vus_unref(_vr) 会令 ref=0 的构造对象变 -1 被直接 free → 调用方拿到悬垂指针 UAF。
+ * 输出与 VUS_AST_STRUCT_INSTANTIATE 分支一致。 */
+static char *gen_struct_inst_expr(GenBuf *buf, const char *name, VusAstList *args) {
+    char san[256];
+    gen_sanitize_name(name, san, sizeof(san));
+    size_t nargs = args ? args->count : 0;
+    char **arg_exprs = NULL;
+    if (nargs > 0) {
+        arg_exprs = (char **)calloc(nargs, sizeof(char *));
+        for (size_t i = 0; i < nargs; i++) {
+            arg_exprs[i] = gen_expr(buf, args->items[i]);
+        }
+    }
+    char args_buf[8192] = {0};
+    size_t pos = 0;
+    GEN_APPEND(args_buf, pos,
+        "({VusString* _vus_args[%zu];_vus_args[0]=NULL;", nargs + 1);
+    for (size_t i = 0; i < nargs; i++) {
+        GEN_APPEND(args_buf, pos,
+            "_vus_args[%zu]=%s;", i + 1, arg_exprs[i]);
+    }
+    GEN_APPEND(args_buf, pos,
+        "vus_%s(_vus_args);_vus_args[0];})", san);
+    for (size_t i = 0; i < nargs; i++) free(arg_exprs[i]);
+    free(arg_exprs);
+    return strdup(args_buf);
 }
 
 /* gen_binary_concat: 字符串拼接 (..)（2 段路径） */
@@ -1718,18 +1841,18 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
         }
         char args_buf[4096] = {0};
         size_t pos = 0;
-        pos += snprintf(args_buf + pos, sizeof(args_buf) - pos,
+        GEN_APPEND(args_buf, pos,
             "({VusString* _vus_args[%zu];_vus_args[0]=NULL;", nparams + 1);
         for (size_t i = 0; i < nparams; i++)
-            pos += snprintf(args_buf + pos, sizeof(args_buf) - pos,
+            GEN_APPEND(args_buf, pos,
                 "_vus_args[%zu]=%s;", i + 1, arg_exprs[i]);
-        pos += snprintf(args_buf + pos, sizeof(args_buf) - pos,
+        GEN_APPEND(args_buf, pos,
             "VusObject* _fvx = (VusObject*)(%s); vus_object_func_call(_fvx, _vus_args);", fval);
         for (size_t i = 1; i <= nparams; i++)
-            pos += snprintf(args_buf + pos, sizeof(args_buf) - pos,
+            GEN_APPEND(args_buf, pos,
                 "vus_unref(_vus_args[%zu]);", (size_t)i);
         long long seq = s_call_seq++;
-        pos += snprintf(args_buf + pos, sizeof(args_buf) - pos,
+        GEN_APPEND(args_buf, pos,
             "VusString* _vr%lld=_vus_args[0];vus_unref(_vr%lld);_vr%lld;})", seq, seq, seq);
         for (size_t i = 0; i < nparams; i++) free(arg_exprs[i]);
         if (arg_exprs) free(arg_exprs);
@@ -3939,6 +4062,12 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
         }
         snprintf(san, sizeof(san), "%s", inst->sym + 4); /* 去掉 "vus_" 前缀，复用下方拼装 */
     } else {
+        /* 结构体构造：与用户函数调用引用约定相反（入口不 ref 实参、返回 ref=0），
+         * 必须走专用模板（不 A'/B），否则通用调用点把构造对象 ref 打到 -1 直接
+         * free、并把实参的持有引用扣掉 → 双 UAF（回归，见 gen_struct_inst_expr）。 */
+        if (gen_struct_exists(s_gen_structs, call->func_name)) {
+            return gen_struct_inst_expr(buf, call->func_name, call->args);
+        }
         gen_sanitize_name(call->func_name, san, sizeof(san));
     }
 
@@ -3961,33 +4090,33 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
 
     /* 如果有泛型类型参数，添加注释 */
     if (call->type_args && call->type_args->count > 0) {
-        pos += snprintf(args_buf + pos, sizeof(args_buf) - pos, "/* <");
+        GEN_APPEND(args_buf, pos, "/* <");
         for (size_t i = 0; i < call->type_args->count; i++) {
             VusAstNode *pnode = call->type_args->items[i];
             if (pnode->type == VUS_AST_PARAM) {
                 VusAstParam *tp = (VusAstParam *)pnode;
-                if (i > 0) pos += snprintf(args_buf + pos, sizeof(args_buf) - pos, ", ");
-                pos += snprintf(args_buf + pos, sizeof(args_buf) - pos, "%s", tp->name);
+                if (i > 0) GEN_APPEND(args_buf, pos, ", ");
+                GEN_APPEND(args_buf, pos, "%s", tp->name);
             }
         }
-        pos += snprintf(args_buf + pos, sizeof(args_buf) - pos, "> */");
+        GEN_APPEND(args_buf, pos, "> */");
     }
 
-    pos += snprintf(args_buf + pos, sizeof(args_buf) - pos, "({VusString* _vus_args[%zu];_vus_args[0]=NULL;", nargs + 1);
+    GEN_APPEND(args_buf, pos, "({VusString* _vus_args[%zu];_vus_args[0]=NULL;", nargs + 1);
     for (size_t i = 0; i < nargs; i++) {
-        pos += snprintf(args_buf + pos, sizeof(args_buf) - pos,
+        GEN_APPEND(args_buf, pos,
             "_vus_args[%zu]=%s;", i + 1, arg_exprs[i]);
     }
-    pos += snprintf(args_buf + pos, sizeof(args_buf) - pos,
+    GEN_APPEND(args_buf, pos,
         "vus_%s(_vus_args);", san);
     /* R1：对称归还实参（配平函数入口 vus_ref），并归还返回槽的计数
      * （return 处 vus_var_set(&_args[0], ...) 多加的一份）。 */
     for (size_t i = 1; i <= nargs; i++) {
-        pos += snprintf(args_buf + pos, sizeof(args_buf) - pos,
+        GEN_APPEND(args_buf, pos,
             "vus_unref(_vus_args[%zu]);", (size_t)i);
     }
     long long seq = s_call_seq++;
-    pos += snprintf(args_buf + pos, sizeof(args_buf) - pos,
+    GEN_APPEND(args_buf, pos,
         "VusString* _vr%lld=_vus_args[0];vus_unref(_vr%lld);_vr%lld;})", seq, seq, seq);
 
     /* 释放参数表达式 */
@@ -4122,13 +4251,13 @@ static char *gen_expr(GenBuf *buf, VusAstNode *node) {
             }
             char args_buf[4096] = {0};
             size_t pos = 0;
-            pos += snprintf(args_buf + pos, sizeof(args_buf) - pos,
+            GEN_APPEND(args_buf, pos,
                 "({VusString* _vus_args[%zu];_vus_args[0]=NULL;", nargs + 1);
             for (size_t i = 0; i < nargs; i++) {
-                pos += snprintf(args_buf + pos, sizeof(args_buf) - pos,
+                GEN_APPEND(args_buf, pos,
                     "_vus_args[%zu]=%s;", i + 1, arg_exprs[i]);
             }
-            pos += snprintf(args_buf + pos, sizeof(args_buf) - pos,
+            GEN_APPEND(args_buf, pos,
                 "vus_%s(_vus_args);_vus_args[0];})", san);
             for (size_t i = 0; i < nargs; i++) free(arg_exprs[i]);
             free(arg_exprs);
@@ -4903,9 +5032,15 @@ static void gen_function_impl(GenBuf *buf, VusAstFunctionDef *func, const char *
     s_namereg_count = 0;
     s_region_seq = 1;
     scope_classify_body(func->body, 0);
-    for (int i = 0; i < s_namereg_count; i++)
-        if (s_namereg[i].assigned && s_namereg[i].hoisted && s_hoisted_count < 512)
+    for (int i = 0; i < s_namereg_count; i++) {
+        if (s_namereg[i].assigned && s_namereg[i].hoisted) {
+            if (s_hoisted_count >= VUS_MAX_HOISTED) {
+                gen_error("需要提升的局部变量超过 %d 上限（函数过大）", VUS_MAX_HOISTED);
+                break;
+            }
             s_hoisted[s_hoisted_count++] = s_namereg[i].name;
+        }
+    }
     for (int i = 0; i < s_hoisted_count; i++) {
         if (gen_is_param_name(func, s_hoisted[i])) continue;
         if (gen_is_global_name(s_hoisted[i])) continue;
@@ -5056,6 +5191,7 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config,
     g_vua_bind_count = 0;
     g_vua_op_count = 0;
     s_global_count = 0; /* 每次生成前重置全局变量名集合 */
+    for (int i = 0; i < VUS_NAME_BKTS; i++) s_global_bkt[i] = -1; /* A1：重置全局名哈希桶 */
     if (g_vua_premain) { free(g_vua_premain->data); free(g_vua_premain); g_vua_premain = NULL; }
     if (g_vua_fwd) { free(g_vua_fwd->data); free(g_vua_fwd); g_vua_fwd = NULL; }
 
@@ -5294,6 +5430,78 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config,
     return result;
 }
 
+/* ===================== A4：外部探测子进程结果缓存 =====================
+ * 每次 vus_compile_c 会 popen 4-6 个外部探测（curl-config / python3-config /
+ * X11 头 / Xft 头 / pkg-config freetype2）。同进程内多次编译（LSP 校验、
+ * 多文件构建、vusx 依赖链）会反复拉起子进程。这里按「编译会话内环境不变」
+ * 的假设做 static 一次性缓存，之后同进程再编译零子进程开销。 */
+static int cached_has_curl(void) {
+    static int v = -1;
+    if (v < 0) {
+        FILE *f = popen("curl-config --version >/dev/null 2>&1", "r");
+        v = (f && pclose(f) == 0) ? 1 : 0;
+    }
+    return v;
+}
+
+static void cached_py_config(char *inc, size_t inc_cap, char *ld, size_t ld_cap) {
+    static int done = 0;
+    static char s_inc[1024], s_ld[2048];
+    if (!done) {
+        FILE *f = popen("python3-config --includes 2>/dev/null", "r");
+        if (f) {
+            if (fgets(s_inc, sizeof(s_inc), f)) {
+                size_t l = strlen(s_inc);
+                while (l > 0 && (s_inc[l-1] == '\n' || s_inc[l-1] == ' ')) s_inc[--l] = '\0';
+            }
+            pclose(f);
+        }
+        if (s_inc[0]) {
+            FILE *f2 = popen("python3-config --ldflags 2>/dev/null", "r");
+            if (f2) {
+                if (fgets(s_ld, sizeof(s_ld), f2)) {
+                    size_t l = strlen(s_ld);
+                    while (l > 0 && (s_ld[l-1] == '\n' || s_ld[l-1] == ' ')) s_ld[--l] = '\0';
+                }
+                pclose(f2);
+            }
+        }
+        done = 1;
+    }
+    snprintf(inc, inc_cap, "%s", s_inc);
+    snprintf(ld, ld_cap, "%s", s_ld);
+}
+
+/* slot: 0=X11 头 yes/no；1=Xft 头 yes/no；2=pkg-config freetype2 cflags 输出 */
+static const char *cached_probe_gui(int slot) {
+    static int done[3] = {0, 0, 0};
+    static char out[3][512];
+    static const char *cmds[3] = {
+        "test -f /usr/include/X11/Xlib.h -o -f \"${PREFIX:-/usr}/include/X11/Xlib.h\" "
+        "-o -f \"$TERMUX_PREFIX/include/X11/Xlib.h\" && echo yes || echo no",
+        "test -f /usr/include/X11/Xft/Xft.h -o -f \"${PREFIX:-/usr}/include/X11/Xft/Xft.h\" "
+        "-o -f \"$TERMUX_PREFIX/include/X11/Xft/Xft.h\" && echo yes || echo no",
+        "pkg-config --cflags freetype2 2>/dev/null",
+    };
+    if (slot < 0 || slot > 2) return "";
+    if (!done[slot]) {
+        out[slot][0] = '\0';
+        FILE *f = popen(cmds[slot], "r");
+        if (f) {
+            if (fgets(out[slot], sizeof(out[slot]), f)) {
+                size_t l = strlen(out[slot]);
+                while (l > 0 && (out[slot][l-1] == '\n' || out[slot][l-1] == ' ')) out[slot][--l] = '\0';
+            }
+            pclose(f);
+        }
+        done[slot] = 1;
+    }
+    return out[slot];
+}
+static int cached_gui_hdr_ok(int slot) {
+    return strncmp(cached_probe_gui(slot), "yes", 3) == 0;
+}
+
 int vus_compile_c(const char *c_source_path, const char *output_path,
                   VusConfig *config, char *error_msg, size_t error_size,
                   const char *extra_objects) {
@@ -5370,40 +5578,18 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
         if (lib_check) { use_static_rt = 1; fclose(lib_check); }
     }
 
-    /* 检测系统是否安装了 libcurl 开发头文件 */
-    int has_curl = 0;
-    FILE *curl_check = popen("curl-config --version >/dev/null 2>&1", "r");
-    if (curl_check) {
-        has_curl = (pclose(curl_check) == 0);
-    }
+    /* 检测系统是否安装了 libcurl 开发头文件（A4：结果进程级缓存） */
+    int has_curl = cached_has_curl();
 
     const char *curl_def = has_curl ? "-DVUS_HAVE_CURL" : "";
     const char *curl_lib = has_curl ? "-lcurl" : "";
 
-    /* 检测 libpython 开发环境（可选）：存在则启用进程内嵌入 */
+    /* 检测 libpython 开发环境（可选）：存在则启用进程内嵌入（A4：缓存） */
     int has_py = 0;
     char py_inc[1024] = {0};
     char py_ld[2048] = {0};
-    FILE *py_check = popen("python3-config --includes 2>/dev/null", "r");
-    if (py_check) {
-        if (fgets(py_inc, sizeof(py_inc), py_check)) {
-            /* 去掉末尾换行 */
-            size_t pl = strlen(py_inc);
-            while (pl > 0 && (py_inc[pl-1] == '\n' || py_inc[pl-1] == ' ')) py_inc[--pl] = '\0';
-            if (py_inc[0]) has_py = 1;
-        }
-        pclose(py_check);
-    }
-    if (has_py) {
-        FILE *py_ldf = popen("python3-config --ldflags 2>/dev/null", "r");
-        if (py_ldf) {
-            if (fgets(py_ld, sizeof(py_ld), py_ldf)) {
-                size_t pl = strlen(py_ld);
-                while (pl > 0 && (py_ld[pl-1] == '\n' || py_ld[pl-1] == ' ')) py_ld[--pl] = '\0';
-            }
-            pclose(py_ldf);
-        }
-    }
+    cached_py_config(py_inc, sizeof(py_inc), py_ld, sizeof(py_ld));
+    has_py = py_inc[0] ? 1 : 0;
     const char *py_def = has_py ? "-DVUS_USE_PY" : "";
     const char *py_inc_str = has_py ? py_inc : "";
     const char *py_ld_str = has_py ? py_ld : "";
@@ -5421,45 +5607,11 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
         snprintf(gui_src, sizeof(gui_src),
                  "\"%s/guilite_bridge.c\" \"%s/guilite_platform.c\" \"%s/guilite_wrapper.cpp\" \"%s/gifdec/gifdec.c\"",
                  abs_rt_dir, abs_rt_dir, abs_rt_dir, abs_rt_dir);
-        int has_x11 = 0;
-        /* X11 开发库检测：同时支持标准路径与 Termux $PREFIX 路径（Termux 的
-           X11 头在 $PREFIX/include/X11/Xlib.h，非 /usr/include）。 */
-        FILE *x11_check = popen(
-            "test -f /usr/include/X11/Xlib.h -o -f \"${PREFIX:-/usr}/include/X11/Xlib.h\" "
-            "-o -f \"$TERMUX_PREFIX/include/X11/Xlib.h\" && echo yes || echo no", "r");
-        if (x11_check) {
-            char line[16] = {0};
-            if (fgets(line, sizeof(line), x11_check)) {
-                has_x11 = (strncmp(line, "yes", 3) == 0);
-            }
-            pclose(x11_check);
-        }
-        /* Xft 开发库检测：用于按 UTF-8/Unicode 叠加中英文文本（X11 核心字体
-           不含中文字形）。头路径同样兼容 Termux $PREFIX。 */
-        int has_xft = 0;
-        FILE *xft_check = popen(
-            "test -f /usr/include/X11/Xft/Xft.h -o -f \"${PREFIX:-/usr}/include/X11/Xft/Xft.h\" "
-            "-o -f \"$TERMUX_PREFIX/include/X11/Xft/Xft.h\" && echo yes || echo no", "r");
-        if (xft_check) {
-            char line[16] = {0};
-            if (fgets(line, sizeof(line), xft_check)) {
-                has_xft = (strncmp(line, "yes", 3) == 0);
-            }
-            pclose(xft_check);
-        }
+        int has_x11 = cached_gui_hdr_ok(0);
+        int has_xft = cached_gui_hdr_ok(1);
         /* 捕获 FreeType 头路径（Xft.h 与 guilite_bridge.c 的 ft2build.h 都依赖它）。
-           Termux 与 PC 的 freetype 目录不同，统一用 pkg-config 解析。凡使用 GUI 均需，
-           因为 guilite_bridge.o/源会无条件 include <ft2build.h>。 */
-        {
-            FILE *ftc = popen("pkg-config --cflags freetype2 2>/dev/null", "r");
-            if (ftc) {
-                if (fgets(xft_inc, sizeof(xft_inc), ftc)) {
-                    size_t xl = strlen(xft_inc);
-                    while (xl > 0 && (xft_inc[xl-1] == '\n' || xft_inc[xl-1] == ' ')) xft_inc[--xl] = '\0';
-                }
-                pclose(ftc);
-            }
-        }
+           Termux 与 PC 的 freetype 目录不同，统一用 pkg-config 解析（A4：缓存）。 */
+        snprintf(xft_inc, sizeof(xft_inc), "%s", cached_probe_gui(2));
         gui_def = has_x11 ? "-DVUS_GUI_X11" : "";
         /* -rdynamic：把主程序全局符号导出到 dynsym，dlsym 才能反查用户脚本
            定义的 事件_点击 等回调函数；-ldl 提供 dlsym（Termux bionic 必需）。
