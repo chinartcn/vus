@@ -1,6 +1,6 @@
 {
   "versionCode": 16,
   "versionName": "2.5",
-  "apkUrl": "https://gitee.com/rtccn_mc/vus/raw/master/testdata/VUS.apk",
-  "changelog": "修复空屏：1) 渲染树校验放宽——未知控件/字段降级为占位透传，不再整屏加载失败白屏；2) 整树以 byte[] 传输 + View diff 增量更新 + 页面缓存，渲染更快"
+  "apkUrl": "https://gitee.com/rtccn_mc/vus/raw/master/examples/vua-android/dist/VUS.apk",
+  "changelog": "2.5：新增热更新测试页（更新插件[DEX 实时] / 测拓展[greet] / 加载SO[.so 重启生效]）；插件 v2 新增 greet；更新包协议 v2 落地。"
 }
