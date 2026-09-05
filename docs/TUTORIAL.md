@@ -1041,14 +1041,16 @@ tui_定位("14", "1")
 
 ### 12.2 网络函数
 
-网络函数基于 libcurl，需要系统安装 `libcurl-dev`。编译时使用 `gcc -DVUS_HAVE_CURL -lcurl`。
+网络函数基于 libcurl（桌面），需要系统安装 `libcurl-dev`，编译时使用 `gcc -DVUS_HAVE_CURL -lcurl`；**Android APK 由 Java 平台桥实现，无需任何额外依赖**。
 
-> **依赖提示**：若编译时未定义 `VUS_HAVE_CURL`（默认构建可能未启用），网络函数不会发送请求，而是返回空串/错误消息。使用前请确认目标构建已启用 libcurl。
+> **依赖提示**：桌面编译时若未定义 `VUS_HAVE_CURL`（默认构建可能未启用），网络函数不会发送请求，而是返回空串/错误消息。使用前请确认目标构建已启用 libcurl；APK 场景无此限制。
 
 | 函数 | 说明 | 示例 |
 |------|------|------|
 | `网络_GET(url)` | HTTP GET 请求，返回响应体 | `网络_GET("https://httpbin.org/get")` |
 | `网络_POST(url, 数据)` | HTTP POST 请求，返回响应体 | `网络_POST("https://httpbin.org/post", "key=value")` |
+| `网络_请求(方式, 地址, 头JSON, 数据, 超时秒, 重试次数)` | 通用请求：自定义请求头（token 认证）、超时、重试；APK 全参生效，桌面回退 curl（头/超时/重试忽略） | `网络_请求("GET", "https://api.example.com/user", "{\"Authorization\":\"Bearer t\"}", "", 30, 2)` |
+| `文件_上传(地址, 本地文件, 字段JSON, 头JSON)` | multipart 文件上传（附加字段 + 自定义头）；APK 专属，桌面回退 `curl -F` 仅传文件 | `文件_上传("https://api.example.com/upload", "photo.jpg", "{\"标签\":\"头像\"}", "")` |
 | `网络_下载(url, 文件路径)` | 下载文件到本地 | `网络_下载("https://example.com/file.zip", "下载/file.zip")` |
 
 网络请求示例：
@@ -1061,6 +1063,16 @@ tui_定位("14", "1")
 结果 = 网络_POST("https://httpbin.org/post", "name=vus&version=1.0")
 打印("POST 响应：\n")
 打印(结果 + "\n")
+
+# 带 token 认证与超时/重试（用户态请求头 JSON）
+用户 = 网络_请求("GET", "https://api.example.com/user",
+                "{\"Authorization\":\"Bearer abc123\"}", "", 15, 2)
+打印("用户信息：\n" + 用户 + "\n")
+
+# 文件上传（multipart）：上传本地文件并附带表单字段
+上传结果 = 文件_上传("https://api.example.com/upload", "photo.jpg",
+                  "{\"说明\":\"头像\"}", "")
+打印("上传结果（1=成功 / 0=失败）：" + 上传结果 + "\n")
 ```
 
 ### 12.3 文件操作函数

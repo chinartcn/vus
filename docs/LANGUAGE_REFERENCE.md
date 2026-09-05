@@ -740,8 +740,10 @@ c = 协程(生成器, "")
 
 | 调用 | 运行时 | 依赖 |
 |------|--------|------|
-| `网络_GET(url)` | `vus_plugin_http_get` | 需编译期定义 `VUS_HAVE_CURL` + `-lcurl` |
+| `网络_GET(url)` | `vus_plugin_http_get` | 需编译期定义 `VUS_HAVE_CURL` + `-lcurl`（桌面）；**APK 由 Java 平台桥实现，无依赖** |
 | `网络_POST(url, 数据)` | `vus_plugin_http_post` | 同上 |
+| `网络_请求(方式, 地址, 头JSON, 数据, 超时秒, 重试次数)` | `vus_plugin_http_request` | 上层 `网络_GET/POST`；APK 走 Java 桥（自定义头/超时/重试全参生效），桌面回退 curl |
+| `文件_上传(地址, 本地文件, 字段JSON, 头JSON)` | `vus_plugin_http_upload` | multipart 上传；APK 走 Java 桥，桌面回退 `curl -F`（仅文件） |
 | `网络_下载(url, 文件路径)` | `vus_plugin_http_download` | 同上 |
 
 > 未定义 `VUS_HAVE_CURL` 时这些函数返回错误消息（不发送请求）。

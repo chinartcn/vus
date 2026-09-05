@@ -792,7 +792,7 @@
 
 ## 8. 网络请求（HTTP）
 
-基于 libcurl 的 HTTP 请求函数。
+桌面构建基于 libcurl（需 `VUS_HAVE_CURL` + `-lcurl`）；**Android APK 由 Java 平台桥实现**（`http.get`/`http.post`/`http.request`/`http.upload`），无需额外依赖。
 
 #### `网络_GET(URL)`
 
@@ -805,6 +805,22 @@
 - **说明**：发送 HTTP POST 请求。`数据` 为请求体字符串。
 - **返回**：响应体文本（字符串）
 - **示例**：`响应 = 网络_POST("https://api.example.com/post", "key=value")`
+
+#### `网络_请求(方式, 地址, 头JSON, 数据, 超时秒, 重试次数)`
+
+- **说明**：通用 HTTP 请求（认证/超时/重试）。`方式` 为 `GET`/`POST`；`头JSON` 传入自定义请求头（如 `{"Authorization":"Bearer <token>"}` 做 token 认证）；`数据` 为 POST 请求体；`超时秒` 与 `重试次数` 可省略（默认 30 秒 / 0 次，APK 侧默认重试 2 次）。APK 全参生效；桌面回退 curl（忽略头/超时/重试）。
+- **返回**：响应体文本（字符串）
+- **示例**：
+  ```vus
+  响应 = 网络_请求("GET", "https://api.example.com/user",
+                  "{\"Authorization\":\"Bearer abc123\"}", "", 30, 2)
+  ```
+
+#### `文件_上传(地址, 本地文件, 字段JSON, 头JSON)`
+
+- **说明**：multipart/form-data 文件上传。`本地文件` 为相对应用 `filesDir` 或绝对路径；`字段JSON` 为附加表单字段；`头JSON` 自定义请求头。
+- **返回**：`"1"` 成功 / `"0"` 失败（**APK 专属能力**；桌面回退 curl `-F file=@路径` 且仅传文件）。
+- **示例**：`结果 = 文件_上传("https://api.example.com/upload", "photo.jpg", "{\"标签\":\"头像\"}", "")`
 
 #### `网络_下载(URL, 路径)`
 

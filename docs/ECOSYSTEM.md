@@ -238,6 +238,8 @@ typedef struct VusLangPlugin {
 |------|--------|------|
 | `网络_GET(url)` | `vus_plugin_http_get` | HTTP GET 请求 |
 | `网络_POST(url, 数据)` | `vus_plugin_http_post` | HTTP POST 请求 |
+| `网络_请求(方式, 地址, 头JSON, 数据, 超时秒, 重试次数)` | `vus_plugin_http_request` | 通用请求：自定义请求头（token 认证）、超时、重试；APK 走 Java 桥，桌面回退 curl |
+| `文件_上传(地址, 本地文件, 字段JSON, 头JSON)` | `vus_plugin_http_upload` | multipart 文件上传 + 附加字段/自定义头（APK 专属；桌面回退 `curl -F` 仅文件） |
 | `网络_下载(url, 文件路径)` | `vus_plugin_http_download` | 下载文件到本地 |
 
 ### 4.3 文件操作 — 基于标准 C I/O，无外部依赖

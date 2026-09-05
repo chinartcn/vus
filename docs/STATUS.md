@@ -120,6 +120,7 @@
 
 **组件解析流（`.vua` + `界面_*`）**：
 - `界面_显示`/`界面_显示_JSON`/`界面_设置`/`界面_取`/`界面_返回`/`界面_返回至`/`界面_绑定`（事件回调）
+- 内置控件：界面/列/行/卡片/表单/文本/按钮/输入框/复选框/开关/滑块/下拉/图片（含远程图异步加载+缓存）/课表 + **列表**（ListView 复用、长列表不卡、滚动到底触发「加载更多」）+ **网页**（WebView：url/HTML/Markdown，JS 经 `window.vus.onEvent` 接回 `vuaTrigger`）
 - Android 侧由 Java（VuaRenderer/VuaBridge）消费渲染树，native `vua.c` 负责解析/校验/多屏栈/事件表
 - 参考 `examples/vua-android/` 与 `docs/VUA_REFERENCE.md`、`docs/VUA_RENDER_TREE.md`
 
@@ -149,13 +150,15 @@
 | `tui_定位(行, 列)` | 移动光标 |
 | `tui_进度条(当前值, 总值, 宽度)` | 显示进度条 |
 
-**网络函数（基于 libcurl，需 `-DVUS_HAVE_CURL -lcurl`）**：
+**网络函数（桌面基于 libcurl 需 `-DVUS_HAVE_CURL -lcurl`；APK 由 Java 平台桥实现，无依赖）**：
 | 函数 | 说明 |
 |------|------|
 | `网络_GET(url)` | HTTP GET 请求 |
 | `网络_POST(url, 数据)` | HTTP POST 请求 |
+| `网络_请求(方式, 地址, 头JSON, 数据, 超时秒, 重试次数)` | 通用请求：自定义请求头（token 认证）/超时/重试；APK 全参生效，桌面回退 curl |
+| `文件_上传(地址, 本地文件, 字段JSON, 头JSON)` | multipart 文件上传（APK 专属，桌面回退 `curl -F` 仅文件） |
 | `网络_下载(url, 文件路径)` | 下载文件到本地 |
-| — | **未定义 `VUS_HAVE_CURL` 时返回错误消息，不发送请求** |
+| — | **未定义 `VUS_HAVE_CURL` 时返回错误消息，不发送请求（桌面）** |
 
 **文件操作函数（基于标准 C I/O + POSIX，无外部依赖）**：
 | 函数 | 说明 |
