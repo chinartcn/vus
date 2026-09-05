@@ -417,6 +417,195 @@ else
     exit 1
 fi
 
+# ============================================================
+# 可选：Android SDK 环境（用于编译 APK / VUA 组件流）
+# 询问是否安装 → 多来源探测宿主架构（兼容多种 uname/arch/dpkg 输出格式）
+# → 按架构从 gitee release 下载组件 → 合并分卷 → 解压到 $HOME/.vus/android/
+# ============================================================
+ASDK_BASE="https://gitee.com/rtccn_mc/android-sdk/releases/download"
+ANDK_BASE="https://gitee.com/rtccn_mc/android-ndk/releases/download"
+
+# 多来源架构探测，归一化为: x86_64 / aarch64 / arm32 / unknown
+# 覆盖：dpkg(权威)、uname -m、uname -p、arch、getconf LONG_BIT，
+# 兼容 amd64/i386/arm64/armhf/armv7l/x86_64-linux-gnu 等多种输出。
+detect_android_arch() {
+    local dp ua
+    # 1) dpkg --print-architecture（Debian/Ubuntu/Termux 皆有，最权威）
+    if command -v dpkg >/dev/null 2>&1; then
+        dp="$(dpkg --print-architecture 2>/dev/null)"
+        case "$dp" in
+            amd64) echo x86_64; return ;;
+            arm64|aarch64) echo aarch64; return ;;
+            armhf|armel|arm) echo arm32; return ;;
+        esac
+    fi
+    # 2) 回退 uname -m / -p / arch（不同发行版输出格式不同）
+    ua="$(uname -m 2>/dev/null)"
+    [ -z "$ua" ] && ua="$(uname -p 2>/dev/null)"
+    [ -z "$ua" ] && ua="$(arch 2>/dev/null)"
+    case "$ua" in
+        x86_64|amd64|x64|i86pc|ia64) echo x86_64; return ;;
+        i386|i486|i586|i686|x86)
+            # 32 位 x86 若实际为 64 位内核则归为 x86_64
+            if command -v getconf >/dev/null 2>&1 && [ "$(getconf LONG_BIT 2>/dev/null)" = "64" ]; then
+                echo x86_64; return
+            fi
+            echo unknown; return ;;
+        aarch64|arm64|armv8l) echo aarch64; return ;;
+        armv7l|armv7|armv6l|armhf|arm) echo arm32; return ;;
+        *) echo unknown; return ;;
+    esac
+}
+
+# 下载一个 URL 到文件（curl/wget 任一可用）
+fetch_one() {
+    local url="$1" dest="$2"
+    mkdir -p "$(dirname "$dest")"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --connect-timeout 20 --retry 5 -o "$dest" "$url"
+        rc=$?
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -T 30 -O "$dest" "$url"
+        rc=$?
+    else
+        return 1
+    fi
+    [ $rc -eq 0 ] && [ -s "$dest" ] || return 1
+}
+
+# 合并分卷并解压到目标目录。
+# base: 分卷前缀（如 xxx.tar.gz / xxx.tar.xz）；dest: 解压目录。
+# 分卷形如 base.000/base.001…
+cat_and_extract() {
+    local base="$1" dest="$2" out v
+    out="${base}.__merged__"
+    rm -f "$out"
+    for v in "${base}".0*; do
+        [ -f "$v" ] || continue           # 跳过不存在的卷
+        cat "$v" >> "$out"
+    done
+    [ -s "$out" ] || return 1
+    mkdir -p "$dest"
+    case "$base" in
+        *.tar.xz) tar xJf "$out" -C "$dest" ;;
+        *)        tar xzf "$out" -C "$dest" ;;
+    esac
+    rm -f "$out"
+}
+
+# 解压 zip（unzip 缺失时用 python3 兜底）
+unzip_to() {
+    local zip="$1" dest="$2"
+    mkdir -p "$dest"
+    if command -v unzip >/dev/null 2>&1; then
+        unzip -oq "$zip" -d "$dest"
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 - "$zip" "$dest" <<'PY'
+import sys,zipfile
+z=zipfile.ZipFile(sys.argv[1])
+z.extractall(sys.argv[2])
+z.close()
+PY
+    else
+        return 1
+    fi
+}
+
+install_android_sdk() {
+    local AARCH ADROID TMPD ans RC=0
+    # 询问是否安装（VUS_ANDROID=1 自动装，VUS_ANDROID=0 跳过，默认交互询问）
+    if [ "$VUS_ANDROID" = "0" ]; then return 0; fi
+    if [ "$VUS_ANDROID" != "1" ]; then
+        if [ ! -t 1 ]; then return 0; fi        # 非交互终端默认跳过
+        printf "  是否安装 Android SDK 环境（编译 APK / VUA 组件流用）? [y/N] "
+        read -r ans
+        case "$ans" in y|Y) ;; *) return 0 ;; esac
+    fi
+
+    AARCH="$(detect_android_arch)"
+    echo "  ➤ 探测到宿主架构: $AARCH"
+
+    ADROID="${VUS_ANDROID_DIR:-$HOME/.vus/android}"
+    TMPD="$(mktemp -d 2>/dev/null || mktemp -d /tmp/vus_android.XXXXXX)"
+    echo "  ➤ 安装目录: $ADROID"
+    echo "  ➤ 开始下载 Android SDK 组件（约耗时数分钟，分卷自动合并）..."
+
+    case "$AARCH" in
+        x86_64)
+            # ---- SDK 通用组件（All） ----
+            fetch_one "$ASDK_BASE/sdk-v1/platforms.tar.gz" "$TMPD/platforms.tar.gz" \
+                && cat_and_extract "$TMPD/platforms.tar.gz" "$ADROID/platforms" \
+                || { echo "  ❌ platforms 下载失败"; RC=1; }
+            fetch_one "$ASDK_BASE/sdk-v1/cmdline-tools.tar.gz.000" "$TMPD/c.000"
+            fetch_one "$ASDK_BASE/sdk-v1/cmdline-tools.tar.gz.001" "$TMPD/c.001"
+            { [ -s "$TMPD/c.000" ] && [ -s "$TMPD/c.001" ]; } && { mkdir -p "$ADROID/cmdline-tools"; cat "$TMPD/c.000" "$TMPD/c.001" > "$TMPD/clt.tar.gz" && tar xzf "$TMPD/clt.tar.gz" -C "$ADROID/cmdline-tools"; } || { echo "  ❌ cmdline-tools 下载失败"; RC=1; }
+            # ---- build-tools + JDK（x86_64） ----
+            fetch_one "$ASDK_BASE/sdk-v1/build-tools.tar.gz" "$TMPD/bt.tar.gz" \
+                && cat_and_extract "$TMPD/bt.tar.gz" "$ADROID/build-tools" \
+                || { echo "  ❌ build-tools 下载失败"; RC=1; }
+            fetch_one "$ASDK_BASE/sdk-v1/jdk8.tar.gz.000" "$TMPD/j.000"
+            fetch_one "$ASDK_BASE/sdk-v1/jdk8.tar.gz.001" "$TMPD/j.001"
+            { [ -s "$TMPD/j.000" ] && [ -s "$TMPD/j.001" ]; } && { mkdir -p "$ADROID/jdk"; cat "$TMPD/j.000" "$TMPD/j.001" > "$TMPD/jdk.tar.gz" && tar xzf "$TMPD/jdk.tar.gz" -C "$ADROID/jdk"; } || { echo "  ❌ JDK8 下载失败"; RC=1; }
+            # ---- NDK（v26.1，8 卷） ----
+            for i in 0 1 2 3 4 5 6 7; do
+                fetch_one "$ANDK_BASE/v26.1/ndk26.tar.gz.00$i" "$TMPD/n.00$i" || RC=1
+            done
+            if cat "$TMPD"/n.000 "$TMPD"/n.001 "$TMPD"/n.002 "$TMPD"/n.003 \
+                    "$TMPD"/n.004 "$TMPD"/n.005 "$TMPD"/n.006 "$TMPD"/n.007 > "$TMPD/ndk.tar.gz" 2>/dev/null \
+                && mkdir -p "$ADROID/ndk" && tar xzf "$TMPD/ndk.tar.gz" -C "$ADROID/ndk"; then
+                : 
+            else
+                echo "  ❌ NDK26 下载/解压失败"; RC=1
+            fi
+            ;;
+        aarch64)
+            # 手机端/Termux arm64：Zulu JDK + 静态 build-tools + NDK29(aarch64,4卷/tar.xz)
+            fetch_one "$ASDK_BASE/sdk-v2-arm/jdk8-aarch64.tar.gz.000" "$TMPD/j.000"
+            fetch_one "$ASDK_BASE/sdk-v2-arm/jdk8-aarch64.tar.gz.001" "$TMPD/j.001"
+            { [ -s "$TMPD/j.000" ] && [ -s "$TMPD/j.001" ]; } && { mkdir -p "$ADROID/jdk"; cat "$TMPD/j.000" "$TMPD/j.001" > "$TMPD/jdk.tar.gz" && tar xzf "$TMPD/jdk.tar.gz" -C "$ADROID/jdk"; } || { echo "  ❌ 手机端 JDK8 下载失败"; RC=1; }
+            fetch_one "$ASDK_BASE/sdk-v2-arm/android-sdk-tools-static-aarch64.zip" "$TMPD/tools.zip" \
+                && unzip_to "$TMPD/tools.zip" "$ADROID/build-tools" || { echo "  ❌ SDK tools 下载失败"; RC=1; }
+            for i in 0 1 2 3; do
+                fetch_one "$ANDK_BASE/v29-aarch64/ndk29-aarch64.tar.gz.00$i" "$TMPD/n.00$i" || RC=1
+            done
+            { cat "$TMPD"/n.000 "$TMPD"/n.001 "$TMPD"/n.002 "$TMPD"/n.003 > "$TMPD/ndk.tar.xz" 2>/dev/null \
+                && mkdir -p "$ADROID/ndk" && tar xJf "$TMPD/ndk.tar.xz" -C "$ADROID/ndk"; } || { echo "  ❌ NDK29(aarch64) 下载失败"; RC=1; }
+            ;;
+        arm32)
+            # 手机端/Termux arm32
+            fetch_one "$ASDK_BASE/sdk-v2-arm/jdk8-arm32.tar.gz.000" "$TMPD/j.000"
+            fetch_one "$ASDK_BASE/sdk-v2-arm/jdk8-arm32.tar.gz.001" "$TMPD/j.001"
+            { [ -s "$TMPD/j.000" ] && [ -s "$TMPD/j.001" ]; } && { mkdir -p "$ADROID/jdk"; cat "$TMPD/j.000" "$TMPD/j.001" > "$TMPD/jdk.tar.gz" && tar xzf "$TMPD/jdk.tar.gz" -C "$ADROID/jdk"; } || { echo "  ❌ 手机端 JDK8 下载失败"; RC=1; }
+            fetch_one "$ASDK_BASE/sdk-v2-arm/android-sdk-tools-static-arm.zip" "$TMPD/tools.zip" \
+                && unzip_to "$TMPD/tools.zip" "$ADROID/build-tools" || { echo "  ❌ SDK tools 下载失败"; RC=1; }
+            # NDK：Termux 用 deb 包安装（可在脚本外由用户自行 dpkg -i）
+            echo "  ⚠️  arm32 的 NDK 由 Termux deb 包提供："
+            echo "      下载 https://gitee.com/rtccn_mc/android-sdk/releases/download/sdk-v2-arm/ndk-multilib_29-1_all.deb"
+            echo "        + ndk-sysroot_29-2_arm.deb 后执行: dpkg -i ndk-multilib_29-1_all.deb ndk-sysroot_29-2_arm.deb"
+            ;;
+        *)
+            echo "  ⚠️  无法识别架构，跳过 Android SDK 安装。"
+            ;;
+    esac
+
+    rm -rf "$TMPD"
+    if [ "$RC" -eq 0 ]; then
+        echo "  ✅ Android SDK 已安装到 $ADROID"
+        echo "     使用的可执行环境变量可设为："
+        echo "       export ANDROID_HOME=$ADROID"
+        echo "       export JAVA_HOME=$ADROID/jdk/temurin-8.0.502+7   # x86_64"
+        echo "       ndk 路径: $ADROID/ndk/<版本>  （与 scripts/build_apk.sh 的 NDK 对齐）"
+    else
+        echo "  ⚠️  Android SDK 部分组件下载失败，可稍后重跑本脚本（VUS_ANDROID=1 自动重试）"
+    fi
+    return $RC
+}
+
+# 在 VUS 成功安装后提供 Android SDK 选项（失败不阻断主流程）
+if ! install_android_sdk; then
+    echo "  （Android SDK 安装被跳过或失败，不影响 VUS 本身使用）"
+fi
+
 # 一键测试（仅在交互式终端中提示）
 echo ""
 if [ -e /dev/tty ] 2>&1; then
