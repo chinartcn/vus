@@ -18,6 +18,7 @@
 #include "yyjson/yyjson.h"
 #include "lexer.h"
 #include "token.h"
+#include "parser.h"     /* .vus 诊断：语法错误定位 */
 #include "vua_lint.h"   /* .vua 校验闭环：发布诊断（复用 vua.c 严格校验+渲染树归一） */
 
 #include <stdio.h>
@@ -122,6 +123,87 @@ static void doc_close(const char *uri) {
             return;
         }
     }
+}
+
+/* ============ 文档增量同步（C5：didChange 增量而非仅全量） ============ */
+
+/* 把 (line, character)（0 起步，character 按字节列）换算为文档内字节偏移；
+ * 超界位置钳制到文档长度。 */
+static long offset_of(const char *text, int line, int character) {
+    if (!text) return 0;
+    int cur = 0;
+    long base = 0;
+    const char *p = text;
+    while (*p) {
+        if (cur == line) {
+            long linelen = 0;
+            const char *q = p;
+            while (*q && *q != '\n') { q++; linelen++; }
+            if (character < 0) return base;
+            if ((long)character < linelen) return base + character;
+            return base + linelen;
+        }
+        if (*p == '\n') { cur++; base = (long)(p + 1 - text); }
+        p++;
+    }
+    return (long)strlen(text);
+}
+
+/* 应用 didChange 的 contentChanges：带 range 的为增量编辑，无 range 的整文替换。
+ * 逐条按原文档顺序应用，完成后 doc_update 覆盖缓冲。文本无改动时保持原样。 */
+static void doc_apply_changes(yyjson_val *params, const char *uri) {
+    const char *current = doc_find_text(uri);
+    if (!current) return;
+    yyjson_val *cc = params ? yyjson_obj_get(params, "contentChanges") : NULL;
+    if (!cc || !yyjson_is_arr(cc)) return;
+
+    char *work = strdup(current);
+    if (!work) return;
+    size_t wc = cc ? (size_t)yyjson_arr_size(cc) : 0;
+
+    for (size_t i = 0; i < wc; i++) {
+        yyjson_val *ch = yyjson_arr_get(cc, i);
+        if (!ch || !yyjson_is_obj(ch)) continue;
+        yyjson_val *tx = yyjson_obj_get(ch, "text");
+        const char *ins = (tx && yyjson_is_str(tx)) ? yyjson_get_str(tx) : NULL;
+        if (!ins) continue;   /* 无文本（纯删除）：ins 为空串也会是 ""，非 NULL */
+        yyjson_val *rg = yyjson_obj_get(ch, "range");
+        if (!rg || !yyjson_is_obj(rg)) {
+            /* 整文替换 */
+            free(work);
+            work = strdup(ins);
+            if (!work) return;
+            continue;
+        }
+        yyjson_val *st = yyjson_obj_get(rg, "start");
+        yyjson_val *en = yyjson_obj_get(rg, "end");
+        if (!st || !en || !yyjson_is_obj(st) || !yyjson_is_obj(en)) continue;
+        int sl = 0, sc = 0, el = 0, ec = 0;
+        yyjson_val *v;
+        if ((v = yyjson_obj_get(st, "line")) && yyjson_is_int(v)) sl = (int)yyjson_get_int(v);
+        if ((v = yyjson_obj_get(st, "character")) && yyjson_is_int(v)) sc = (int)yyjson_get_int(v);
+        if ((v = yyjson_obj_get(en, "line")) && yyjson_is_int(v)) el = (int)yyjson_get_int(v);
+        if ((v = yyjson_obj_get(en, "character")) && yyjson_is_int(v)) ec = (int)yyjson_get_int(v);
+
+        long o1 = offset_of(work, sl, sc);
+        long o2 = offset_of(work, el, ec);
+        if (o1 < 0) o1 = 0;
+        if (o2 < o1) o2 = o1;
+        if (o2 > (long)strlen(work)) o2 = (long)strlen(work);
+
+        size_t nlen = (size_t)o1 + strlen(ins) + (strlen(work) - (size_t)o2);
+        char *nb = (char *)malloc(nlen + 1);
+        if (!nb) break;
+        memcpy(nb, work, (size_t)o1);
+        memcpy(nb + o1, ins, strlen(ins));
+        memcpy(nb + o1 + strlen(ins), work + o2, strlen(work) - (size_t)o2);
+        nb[nlen] = '\0';
+        free(work);
+        work = nb;
+    }
+
+    doc_update(uri, work);
+    free(work);
 }
 
 /* ============ 符号表：用词法分析器精确收集的文档符号 ============ */
@@ -438,12 +520,15 @@ static int collect_symbols_lexer(const char *text, VusSymbol *out,
     VusLexer *lx = vus_lexer_new(text, slen);
     if (!lx) return 0;
     VusToken *toks = vus_lexer_tokenize(lx, &ntok);
-    if (lx->error || !toks || ntok == 0) {
-        /* tokenize 失败：回退（调用方负责启发式） */
+    if (!toks || ntok == 0) {
+        /* tokenize 完全失败（无任何 token）：回退（调用方负责启发式） */
         if (toks) vus_lexer_free_tokens(toks, ntok);
         vus_lexer_free(lx);
         return 0;
     }
+    /* lexer 报错（如字符串未闭合）时产出的是错误点之前的 token 数组：
+       仍遍历收集已定位符号，保证带错文档中 跳转/补全/悬停 继续可用，
+       仅在完全没有 token 时才落入启发式回退。 */
 
     for (size_t i = 0; i < ntok; i++) {
         VusTokenType ty = toks[i].type;
@@ -551,12 +636,18 @@ static void send_doc(yyjson_mut_doc *doc) {
     yyjson_mut_doc_free(doc);
 }
 
-/* ============ .vua 校验闭环（publishDiagnostics） ============ */
+/* ============ .vua / .vus 校验闭环（publishDiagnostics） ============ */
 
 static int uri_is_vua(const char *uri) {
     if (!uri) return 0;
     size_t n = strlen(uri);
     return n >= 4 && strcmp(uri + n - 4, ".vua") == 0;
+}
+
+static int uri_is_vus(const char *uri) {
+    if (!uri) return 0;
+    size_t n = strlen(uri);
+    return n >= 4 && strcmp(uri + n - 4, ".vus") == 0;
 }
 
 /* 构造 publishDiagnostics 通知并发送（diags 内为空数组则清空诊断） */
@@ -606,10 +697,89 @@ static void publish_vua_diagnostics(const char *uri, const char *text) {
     send_publish_diagnostics(uri, rc != 0, rc == 0 ? NULL : &err);
 }
 
-/* 关闭 .vua 文档时清空诊断 */
-static void clear_vua_diagnostics(const char *uri) {
-    if (!uri_is_vua(uri)) return;
-    send_publish_diagnostics(uri, 0, NULL);
+/* ============ .vus 诊断（C2：语法错误进 IDE，复用 .vua 的发布模板） ============ */
+
+/* 从语法错误信息中提取「（第 X 行第 Y 列）」位置；找到返回 1（行/列为 1 起步） */
+static int parse_err_position(const char *msg, int *line_out, int *col_out) {
+    *line_out = 0;
+    *col_out = 0;
+    if (!msg) return 0;
+    const char *p = msg;
+    while ((p = strstr(p, "（第")) != NULL) {
+        const char *q = p + strlen("（第");
+        while (*q == ' ' || *q == '\t') q++;
+        if (*q >= '0' && *q <= '9') {
+            char *end = NULL;
+            long ln = strtol(q, &end, 10);
+            const char *r = end;
+            while (*r == ' ' || *r == '\t') r++;
+            if (strncmp(r, "行第", strlen("行第")) == 0) {
+                r += strlen("行第");
+                while (*r == ' ' || *r == '\t') r++;
+                long cl = strtol(r, NULL, 10);
+                *line_out = (int)ln;
+                *col_out = (int)cl;
+                return 1;
+            }
+        }
+        p += strlen("（第");
+    }
+    return 0;
+}
+
+/* 词法/语法检查 .vus 文本并发布诊断。错误链挂到栈上 err（仅发布首个，符合模板）。
+ * 注意：这里校验「当前打开的文档原文」，不做 import 展开，报告定位即当前文件行。 */
+static void publish_vus_diagnostics(const char *uri, const char *text) {
+    if (!uri_is_vus(uri)) return;
+    VuaError err;
+    memset(&err, 0, sizeof(err));
+    snprintf(err.file, sizeof(err.file), "%s", uri);
+    int have_err = 0;
+
+    if (text && text[0]) {
+        size_t len = strlen(text);
+        VusLexer *lx = vus_lexer_new(text, len);
+        if (lx) {
+            size_t ntok = 0;
+            vus_lexer_tokenize(lx, &ntok);
+            if (lx->error) {
+                err.code = 1001;                  /* 词法错误 */
+                err.line = lx->line;
+                snprintf(err.msg, sizeof(err.msg), "词法错误: %s", vus_lexer_error(lx));
+                have_err = 1;
+            } else {
+                VusToken *stoks = vus_lexer_steal_tokens(lx, &ntok);
+                if (stoks && ntok > 0) {
+                    VusParser *ps = vus_parser_new(stoks, ntok);
+                    if (ps) {
+                        VusAstProgram *prog = vus_parser_parse(ps);
+                        if (ps->error) {
+                            err.code = 1002;          /* 语法错误 */
+                            int ln = 0, cl = 0;
+                            parse_err_position(vus_parser_error(ps), &ln, &cl);
+                            err.line = ln;
+                            err.file[0] = '\0';       /* 行未知时不显示文件（模板按行渲染） */
+                            if (ln > 0) snprintf(err.file, sizeof(err.file), "%s", uri);
+                            snprintf(err.msg, sizeof(err.msg), "语法错误: %s", vus_parser_error(ps));
+                            have_err = 1;
+                        }
+                        vus_ast_node_free((VusAstNode *)prog);
+                        vus_parser_free(ps);
+                    }
+                }
+                vus_lexer_free_tokens(stoks, ntok);
+            }
+            vus_lexer_free(lx);
+        }
+    }
+
+    send_publish_diagnostics(uri, have_err, have_err ? &err : NULL);
+}
+
+/* 关闭文档时清空 .vua / .vus 诊断 */
+static void clear_document_diagnostics(const char *uri) {
+    if (uri_is_vua(uri) || uri_is_vus(uri))
+        send_publish_diagnostics(uri, 0, NULL);
 }
 
 /* ============ 补全项追加 ============ */
@@ -760,6 +930,15 @@ static void handle_initialize(yyjson_val *req) {
     yyjson_mut_obj_add_val(doc, caps, "executeCommandProvider", ecp);
     yyjson_mut_obj_add_val(doc, caps, "documentSymbolProvider", yyjson_mut_true(doc));
 
+    /* C5：跳转（definition，符号表已带行列）、增量同步、格式化、hover 能力声明 */
+    yyjson_mut_obj_add_val(doc, caps, "definitionProvider", yyjson_mut_true(doc));
+    yyjson_mut_obj_add_val(doc, caps, "hoverProvider", yyjson_mut_true(doc));
+    yyjson_mut_obj_add_val(doc, caps, "documentFormattingProvider", yyjson_mut_true(doc));
+    yyjson_mut_val *sync = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_int(doc, sync, "openClose", 1);
+    yyjson_mut_obj_add_int(doc, sync, "change", 2);   /* 2 = Incremental */
+    yyjson_mut_obj_add_val(doc, caps, "textDocumentSync", sync);
+
     yyjson_mut_obj_add_val(doc, res, "capabilities", caps);
 
     yyjson_mut_val *info = yyjson_mut_obj(doc);
@@ -850,6 +1029,63 @@ static void handle_document_symbol(yyjson_val *req) {
     send_doc(doc);
 }
 
+/* ============ 跳转到定义（C5：符号表已带行列，直接回定义位置） ============ */
+static void handle_definition(yyjson_val *req) {
+    yyjson_val *params = yyjson_obj_get(req, "params");
+    yyjson_mut_doc *doc = new_response_doc(req);
+    yyjson_mut_val *root = yyjson_mut_doc_get_root(doc);
+
+    yyjson_mut_val *result = yyjson_mut_null(doc);
+    if (params) {
+        const char *uri = req_document_uri(params);
+        const char *text = resolve_text(params, uri);
+        int line = req_position_line(params);
+        int character = req_position_character(params);
+
+        /* 取光标前标识符 token（与 hover 一致） */
+        char prefix[4096];
+        get_line_prefix(text, line, character, prefix, sizeof(prefix));
+        char token[256];
+        token[0] = '\0';
+        const char *p = prefix + strlen(prefix) - 1;
+        while (p >= prefix && is_ident_byte((unsigned char)*p)) p--;
+        p++;
+        size_t len = (size_t)(prefix + strlen(prefix) - p);
+        if (len > 0 && len < sizeof(token)) {
+            memcpy(token, p, len);
+            token[len] = '\0';
+        }
+
+        if (token[0] && !vus_builtin_find(token)) {
+            /* 内置函数无用户定义；搜索文档符号表，命中即返回其定义位置 */
+            VusSymbol syms[VUS_LSP_MAX_SYMS];
+            int ns = 0;
+            collect_symbols(text, uri, syms, &ns, VUS_LSP_MAX_SYMS);
+            for (int i = 0; i < ns; i++) {
+                if (strcmp(syms[i].name, token) == 0) {
+                    yyjson_mut_val *loc = yyjson_mut_obj(doc);
+                    obj_add_str(doc, loc, "uri", uri);
+                    yyjson_mut_val *rg = yyjson_mut_obj(doc);
+                    yyjson_mut_val *st = yyjson_mut_obj(doc);
+                    yyjson_mut_val *en = yyjson_mut_obj(doc);
+                    yyjson_mut_obj_add_int(doc, st, "line", syms[i].line);
+                    yyjson_mut_obj_add_int(doc, st, "character", syms[i].column);
+                    yyjson_mut_obj_add_int(doc, en, "line", syms[i].end_line);
+                    yyjson_mut_obj_add_int(doc, en, "character", syms[i].end_column);
+                    yyjson_mut_obj_add_val(doc, rg, "start", st);
+                    yyjson_mut_obj_add_val(doc, rg, "end", en);
+                    yyjson_mut_obj_add_val(doc, loc, "range", rg);
+                    result = loc;
+                    break;
+                }
+            }
+        }
+    }
+
+    yyjson_mut_obj_add_val(doc, root, "result", result);
+    send_doc(doc);
+}
+
 static void handle_execute_command(yyjson_val *req) {
     yyjson_val *params = yyjson_obj_get(req, "params");
     const char *command = NULL;
@@ -932,7 +1168,109 @@ static void handle_hover(yyjson_val *req) {
     send_doc(doc);
 }
 
-/* ============ 主循环与分发 ============ */
+/* ============ 文档格式化（C5：textDocument/formatting） ============
+ * 保守格式化：不重排代码结构，仅规范化空白 —— 行尾去空白、连续空行压为
+ * 一行、文件以单个换行结尾。任何文本编辑类能力都冒改坏语义的风险，因此
+ * 这里只做零语义影响的空白归一。 */
+
+/* 返回格式化后的文本（malloc）；无变化时返回原文本副本（由调用方区分） */
+static char *vus_format_text(const char *text) {
+    if (!text) return NULL;
+    size_t cap = strlen(text) + 8;
+    char *out = (char *)malloc(cap + 1);
+    if (!out) return NULL;
+    size_t o = 0;
+    int blank_run = 0;
+    const char *p = text;
+    while (*p) {
+        const char *nl = strchr(p, '\n');
+        size_t linelen = nl ? (size_t)(nl - p) : strlen(p);
+        /* 去行尾空白 */
+        size_t tl = linelen;
+        while (tl > 0) {
+            char c = p[tl - 1];
+            if (c == ' ' || c == '\t' || c == '\r') tl--;
+            else break;
+        }
+        int blank = (tl == 0);
+        if (blank) {
+            if (blank_run >= 1 || !nl) {
+                /* 连续空行只保留一条；文件末尾不补空行 */
+                blank_run = 0;   /* 本次不输出 */
+                if (!nl) break;
+                p = nl + 1;
+                continue;
+            }
+            blank_run++;
+        } else {
+            blank_run = 0;
+        }
+        if (o + tl + 2 > cap) {
+            cap = cap * 2 + tl + 16;
+            char *nb = (char *)realloc(out, cap + 1);
+            if (!nb) { free(out); return NULL; }
+            out = nb;
+        }
+        memcpy(out + o, p, tl);
+        o += tl;
+        out[o++] = '\n';
+        if (!nl) break;
+        p = nl + 1;
+    }
+    /* 以单个换行结尾（若结果以换行结束则保持单换行；非空但无换行则补） */
+    if (o == 0) {
+        out[0] = '\0';
+        return out;
+    }
+    if (o >= 2 && out[o - 1] == '\n' && out[o - 2] == '\n') {
+        /* 已压缩到单换行，无需再改 */
+    }
+    out[o] = '\0';
+    /* 去掉末尾多余换行，统一为恰好一个（若原文件尾行后本无换行则保留一个） */
+    while (o > 0 && out[o - 1] == '\n') o--;
+    /* 非空内容：保留结尾单个换行 */
+    if (o > 0) {
+        out[o++] = '\n';
+        out[o] = '\0';
+    }
+    return out;
+}
+
+static void handle_formatting(yyjson_val *req) {
+    yyjson_val *params = yyjson_obj_get(req, "params");
+    const char *uri = req_document_uri(params);
+    const char *text = resolve_text(params, uri);
+    yyjson_mut_doc *doc = new_response_doc(req);
+    yyjson_mut_val *root = yyjson_mut_doc_get_root(doc);
+    yyjson_mut_val *arr = yyjson_mut_arr(doc);
+
+    if (text && text[0]) {
+        char *fmt = vus_format_text(text);
+        if (fmt && strcmp(fmt, text) != 0) {
+            yyjson_mut_val *edit = yyjson_mut_obj(doc);
+            /* 全文档范围 */
+            yyjson_mut_val *rg = yyjson_mut_obj(doc);
+            yyjson_mut_val *st = yyjson_mut_obj(doc);
+            yyjson_mut_val *en = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_int(doc, st, "line", 0);
+            yyjson_mut_obj_add_int(doc, st, "character", 0);
+            int last_line = 0;
+            const char *q = text;
+            while (*q) { if (*q == '\n') last_line++; q++; }
+            yyjson_mut_obj_add_int(doc, en, "line", last_line);
+            yyjson_mut_obj_add_int(doc, en, "character", 0);
+            yyjson_mut_obj_add_val(doc, rg, "start", st);
+            yyjson_mut_obj_add_val(doc, rg, "end", en);
+            yyjson_mut_obj_add_val(doc, edit, "range", rg);
+            obj_add_str(doc, edit, "newText", fmt);
+            yyjson_mut_arr_append(arr, edit);
+        }
+        free(fmt);
+    }
+
+    yyjson_mut_obj_add_val(doc, root, "result", arr);
+    send_doc(doc);
+}
 
 static void process_request(yyjson_val *req) {
     yyjson_val *mv = yyjson_obj_get(req, "method");
@@ -945,6 +1283,10 @@ static void process_request(yyjson_val *req) {
         handle_completion(req);
     } else if (strcmp(method, "textDocument/documentSymbol") == 0) {
         handle_document_symbol(req);
+    } else if (strcmp(method, "textDocument/definition") == 0) {
+        handle_definition(req);            /* C5：跳转到定义 */
+    } else if (strcmp(method, "textDocument/formatting") == 0) {
+        handle_formatting(req);            /* C5：文档格式化 */
     } else if (strcmp(method, "workspace/executeCommand") == 0) {
         handle_execute_command(req);
     } else if (strcmp(method, "textDocument/hover") == 0) {
@@ -965,31 +1307,29 @@ static void process_request(yyjson_val *req) {
         const char *uri = req_document_uri(params);
         if (!uri) return;
         if (strcmp(method, "textDocument/didChange") == 0) {
-            /* 全量替换：取 contentChanges[0].text（改动总是全量时最稳）；
-               若该结果是增量（带 range 且无 text），暂不合并，保持原文档。 */
-            const char *text = NULL;
-            yyjson_val *cc = params ? yyjson_obj_get(params, "contentChanges") : NULL;
-            if (cc && yyjson_is_arr(cc)) {
-                for (size_t i = 0; i < (size_t)yyjson_arr_size(cc); i++) {
-                    yyjson_val *ch = yyjson_arr_get(cc, i);
-                    yyjson_val *tx = ch ? yyjson_obj_get(ch, "text") : NULL;
-                    if (tx && yyjson_is_str(tx)) { text = yyjson_get_str(tx); break; }
-                }
-            }
-            if (text) doc_update(uri, text);
+            /* C5 增量：contentChanges 带 range 时按增量合并；无 range 时整文替换 */
+            doc_apply_changes(params, uri);
         } else {
             /* didOpen / didSave：直接用请求内 textDocument.text 刷新 */
             const char *text = req_document_text(params);
             if (text) doc_update(uri, text);
         }
-        /* .vua 校验闭环：文档打开/变更/保存后发布诊断 */
+        /* C2：.vua 与 .vus 文档打开/变更/保存后均发布诊断 */
         publish_vua_diagnostics(uri, doc_find_text(uri));
+        publish_vus_diagnostics(uri, doc_find_text(uri));
     } else if (strcmp(method, "textDocument/didClose") == 0) {
-        /* 关闭文档：释放缓冲并清空 .vua 诊断 */
+        /* 关闭文档：释放缓冲并清空 .vua / .vus 诊断 */
         yyjson_val *params = yyjson_obj_get(req, "params");
         const char *uri = req_document_uri(params);
-        clear_vua_diagnostics(uri);
+        clear_document_diagnostics(uri);
         doc_close(uri);
+    } else if (strcmp(method, "workspace/didChangeWatchedFiles") == 0) {
+        /* C5 watch：外部文件变化 → 对全部已打开文档重发诊断（普通文本文件变动
+           常由客户端监听；服务器据此刷新诊断，保证保存后立即更新） */
+        for (int i = 0; i < g_docs_count; i++) {
+            publish_vua_diagnostics(g_docs[i].uri, g_docs[i].text);
+            publish_vus_diagnostics(g_docs[i].uri, g_docs[i].text);
+        }
     } else if (strcmp(method, "$/cancelRequest") == 0) {
         /* 忽略取消请求 */
     } else {

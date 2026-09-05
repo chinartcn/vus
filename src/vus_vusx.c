@@ -294,7 +294,7 @@ int vus_vusx_compile(VusVusxPlugin *plugin, VusConfig *config) {
     /* 5. 代码生成（库式：不生成 main，插件 .o 链接进宿主程序） */
     VusConfig gen_config = *config;
     gen_config.omit_main = 1;
-    char *c_code = vus_generate_c(program, &gen_config);
+    char *c_code = vus_generate_c(program, &gen_config, plugin->main_vus);
     if (!c_code) {
         fprintf(stderr, "vus_vusx: code generation failed for '%s'\n", plugin->main_vus);
         vus_ast_node_free((VusAstNode *)program);

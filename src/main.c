@@ -238,8 +238,8 @@ VusResult vus_compile_to_c(const char *vus_file_path, VusConfig *config) {
     vus_parser_free(parser);
     vus_lexer_free_tokens(tokens, token_count);
 
-    /* 生成 C 代码 */
-    char *c_code = vus_generate_c(program, config);
+    /* 生成 C 代码（传入源文件路径启用 C3 行号映射：GCC 报错指向 .vus 行） */
+    char *c_code = vus_generate_c(program, config, vus_file_path);
     if (!c_code) {
         result.success = 0;
         snprintf(result.error_msg, sizeof(result.error_msg),
@@ -360,9 +360,9 @@ VusResult vus_compile_to_exe(const char *vus_file_path, VusConfig *config) {
         }
     }
 
-    /* 调用 GCC 编译（带产物缓存：源脚本与运行时静态库均未变化时，复用已编译的
-       可执行，跳过编译+链接阶段，显著加快 Termux 等低性能设备上的反复运行。
-       强制重编可 touch 脚本或删除 构建/ 目录。） */
+    /* 调用 GCC 编译（带产物缓存：源脚本、import 依赖与运行时静态库均未变化时，
+       复用已编译的可执行，跳过编译+链接阶段，显著加快 Termux 等低性能设备上的
+       反复运行。强制重编可 touch 脚本或执行 vus clean。） */
     char error_msg[512];
     int compile_result = 0;
     int cached = 0;
@@ -385,6 +385,25 @@ VusResult vus_compile_to_exe(const char *vus_file_path, VusConfig *config) {
                 cached = 0;
             }
         }
+        /* C1：被导入模块（递归）更新同样触发重编，避免复用过期产物；
+           只有主文件未变时才扫描依赖，保持快速路径开销最小。 */
+        if (cached) {
+            size_t src_len = 0;
+            char *src_data = read_file(vus_file_path, &src_len);
+            if (src_data) {
+                char deps[64][512];
+                int ndep = vus_source_import_deps(src_data, vus_file_path, deps, 64);
+                free(src_data);
+                long long ex_ns = _VUS_MTIM_NS(ex_st);
+                for (int i = 0; i < ndep; i++) {
+                    struct stat d_st;
+                    if (stat(deps[i], &d_st) == 0 && _VUS_MTIM_NS(d_st) > ex_ns) {
+                        cached = 0;
+                        break;
+                    }
+                }
+            }
+        }
         if (!cached) {
             compile_result = vus_compile_c(result.c_output_path, exe_output_path,
                                            config, error_msg, sizeof(error_msg),
@@ -392,6 +411,12 @@ VusResult vus_compile_to_exe(const char *vus_file_path, VusConfig *config) {
         }
     }
     #undef _VUS_MTIM_NS
+
+    /* C4：缓存命中提示（stderr，不干扰程序 stdout 输出） */
+    if (cached && compile_result == 0) {
+        fprintf(stderr, "缓存命中：%s 及其依赖均未变化，复用 %s（强制重编请执行 vus clean）\n",
+                vus_file_path, exe_output_path);
+    }
 
     if (vusx_count > 0) vus_vusx_cleanup_all(vusx_plugins, vusx_count);
 
@@ -540,6 +565,61 @@ static int vus_init(int force) {
     return 0;
 }
 
+/* ============ vus clean 实现 ============
+ * C4：清理构建产物（构建/ 目录整树删除），消除产物累积；
+ * 同时作为强制重编的手段（缓存命中提示中引用）。 */
+
+/* 递归删除目录树（仅删构建产物目录，明确限定在单个目录内） */
+static void rm_recursive(const char *path) {
+    DIR *dir = opendir(path);
+    if (!dir) return;
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
+        char sub[2048];
+        snprintf(sub, sizeof(sub), "%s/%s", path, ent->d_name);
+        struct stat st;
+        if (stat(sub, &st) == 0 && S_ISDIR(st.st_mode)) {
+            rm_recursive(sub);
+        } else {
+            unlink(sub);
+        }
+    }
+    closedir(dir);
+    rmdir(path);
+}
+
+static int vus_clean(void) {
+    struct stat st;
+    if (stat("vus.json", &st) != 0) {
+        fprintf(stderr, "未找到 vus.json（请在有 vus.json 的项目目录下执行 vus clean）\n");
+        return 1;
+    }
+
+    VusConfig config;
+    memset(&config, 0, sizeof(config));
+    if (vus_config_load(&config, ".") != 0) {
+        strcpy(config.project_dir, ".");
+        strcpy(config.build_dir, "构建");
+    }
+    config_set_compiler_rt(&config);
+
+    char build_dir[1024];
+    if (config.build_dir[0]) {
+        snprintf(build_dir, sizeof(build_dir), "%s", config.build_dir);
+    } else {
+        snprintf(build_dir, sizeof(build_dir), "%s/构建", config.project_dir);
+    }
+
+    if (stat(build_dir, &st) == 0 && S_ISDIR(st.st_mode)) {
+        rm_recursive(build_dir);
+        printf("已清理构建产物目录: %s/\n", build_dir);
+        return 0;
+    }
+    printf("构建产物目录 %s/ 不存在，无需清理。\n", build_dir);
+    return 0;
+}
+
 /* ============ vus test 实现 ============ */
 
 static int vus_test(void) {
@@ -683,6 +763,7 @@ static void print_help(void) {
     printf("  build --apk   <file>   编译为 Android APK 项目\n");
     printf("                [--ndk-path <路径>] [--app-name <名称>] [--output <目录>]\n");
     printf("  test                   运行「测试/」目录下的测试用例\n");
+    printf("  clean                  清理构建产物（构建/ 目录），缓存产物重置\n");
     printf("  lint [--controls <控件表.json>] <file.vua>...\n");
     printf("                          离线校验 .vua（复用 vua.c 严格校验+渲染树归一）\n\n");
     printf("项目管理:\n");
@@ -754,6 +835,11 @@ int main(int argc, char *argv[]) {
     /* test */
     if (strcmp(cmd, "test") == 0) {
         return vus_test();
+    }
+
+    /* clean（C4：清理构建产物） */
+    if (strcmp(cmd, "clean") == 0) {
+        return vus_clean();
     }
 
     /* lint */

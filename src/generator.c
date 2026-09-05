@@ -4255,6 +4255,21 @@ static char *gen_expr(GenBuf *buf, VusAstNode *node) {
 
 static void gen_statement(GenBuf *buf, VusAstNode *node);
 
+/* ============ 行号映射（C3：把 GCC 报错行映射回 .vus 源行） ============
+ * 生成保守的 #line 指令：每个 VUS 语句生成前，若其源行号与当前映射值不同，
+ * 先输出 `#line <行> "<源文件>"`，则其后生成的 C 行在 GCC 眼中都指向源
+ * .vus 的对应行，编译错误不再显示生成的 .c 行号，而是直接指向用户源码。
+ * 列号以生成 C 的列为准（单语句多 C 行场景行号仍精确归一到该语句起始行）。 */
+static int     s_map_on = 0;          /* 1 = 已提供源文件名，启用映射 */
+static char    s_map_file[1024] = ""; /* 源 .vus 文件显示名 */
+static int     s_map_line = -1;       /* 最近一次映射的源行 */
+
+static void gen_line_map(GenBuf *buf, int vus_line) {
+    if (!s_map_on || vus_line <= 0 || vus_line == s_map_line) return;
+    s_map_line = vus_line;
+    gen_emit_linef(buf, "#line %d \"%s\"", vus_line, s_map_file);
+}
+
 static void gen_stmt_assign(GenBuf *buf, VusAstAssign *assign) {
     char *val = gen_expr(buf, assign->value);
     char gsan[300];
@@ -4680,6 +4695,9 @@ static void gen_stmt_throw(GenBuf *buf, VusAstThrow *thr) {
 static void gen_statement(GenBuf *buf, VusAstNode *node) {
     if (!node) return;
 
+    /* C3：语句级 #line 映射（同一源行只输出一次） */
+    gen_line_map(buf, node->line);
+
     switch (node->type) {
         case VUS_AST_ASSIGN:
             gen_stmt_assign(buf, (VusAstAssign *)node);
@@ -5026,7 +5044,8 @@ static void gen_main_function(GenBuf *buf, VusAstProgram *program, int debug) {
 
 /* ============ 公开 API 实现 ============ */
 
-char *vus_generate_c(VusAstProgram *program, VusConfig *config) {
+char *vus_generate_c(VusAstProgram *program, VusConfig *config,
+                     const char *source_name) {
     if (!program || !config) return NULL;
 
     g_vua_prog = program; /* 供 界面_绑定 闭包生成时按名查事件函数定义 */
@@ -5039,6 +5058,15 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config) {
     s_global_count = 0; /* 每次生成前重置全局变量名集合 */
     if (g_vua_premain) { free(g_vua_premain->data); free(g_vua_premain); g_vua_premain = NULL; }
     if (g_vua_fwd) { free(g_vua_fwd->data); free(g_vua_fwd); g_vua_fwd = NULL; }
+
+    /* C3：行号映射状态 —— 提供源 .vus 文件名才启用；否则保持旧行为（不插 #line） */
+    s_map_on = (source_name && source_name[0]) ? 1 : 0;
+    s_map_line = -1;
+    if (s_map_on) {
+        snprintf(s_map_file, sizeof(s_map_file), "%s", source_name);
+    } else {
+        s_map_file[0] = '\0';
+    }
 
     /* 泛型单态化状态重置 */
     s_generic_def_count = 0;
@@ -5185,6 +5213,7 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config) {
             if (node->type == VUS_AST_FUNCTION_DEF) {
                 VusAstFunctionDef *fd = (VusAstFunctionDef *)node;
                 if (fd->type_params && fd->type_params->count > 0) continue;
+                gen_line_map(buf, node->line);   /* C3：函数签名行也映射到源 */
                 gen_function(buf, fd);
             }
         }

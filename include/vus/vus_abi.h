@@ -122,6 +122,25 @@ VusResult vus_eval(const char *code, VusConfig *config, char *output);
  */
 char *vus_source_expand_imports(const char *source, const char *source_name);
 
+/* ===================================================================
+ * import 依赖路径收集（增量编译缓存判定）
+ * ===================================================================
+ * 按与 vus_source_expand_imports 完全一致的命中顺序，递归收集主脚本
+ * 及其 import 的全部依赖（.vus 模块文件路径 + .vaz 包目录），写入 deps
+ * （每项最多 max 项，路径字符串各 512 字节）。
+ *
+ * 用途：产物缓存判定应把被导入模块的 mtime 一并纳入，否则改被导入的
+ * 模块不触发重编，会产出过期产物。
+ *
+ * @param source        VUS 源码（'\0' 结尾）
+ * @param source_name   主脚本路径（用于解析同目录模块），可为 NULL
+ * @param deps          输出的依赖路径数组
+ * @param max           deps 容量
+ * @return              依赖个数（0 = 无 import 依赖）
+ */
+int vus_source_import_deps(const char *source, const char *source_name,
+                           char deps[][512], int max);
+
 #ifdef __cplusplus
 }
 #endif

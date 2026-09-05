@@ -133,6 +133,37 @@ static void set_add(VusImportSet *s, const char *key) {
     s->count++;
 }
 
+/* 解析 import 行引用的模块（与 expand_rec 同一命中顺序，供展开与依赖收集共用）：
+ * 返回  1 = 本地 .vus 模块命中（out_file 为解析后的文件路径）；
+ *       0 = .vaz 依赖包命中（out_vaz_dir 为包目录，out_vaz_src 为合并源码，
+ *          非 NULL 时由调用方 free，为 NULL 时函数内部释放）；
+ *      -1 = 均未命中（保留 import 原行的兼容行为）。 */
+static int resolve_import(const char *modname, const char *base_dir,
+                          char *out_file, size_t file_sz,
+                          char *out_vaz_dir, size_t vaz_sz,
+                          char **out_vaz_src) {
+    struct stat st;
+    /* 优先主脚本同目录，其次当前工作目录 */
+    if (base_dir && base_dir[0] && strcmp(base_dir, ".") != 0) {
+        snprintf(out_file, file_sz, "%s/%s.vus", base_dir, modname);
+        if (stat(out_file, &st) == 0 && S_ISREG(st.st_mode)) return 1;
+        snprintf(out_file, file_sz, "%s/%s", base_dir, modname);
+        if (stat(out_file, &st) == 0 && S_ISREG(st.st_mode)) return 1;
+    }
+    snprintf(out_file, file_sz, "%s.vus", modname);
+    if (stat(out_file, &st) == 0 && S_ISREG(st.st_mode)) return 1;
+
+    /* .vaz 依赖包回退：「导入 "包名"」→ 解析并内联包逻辑库源码 */
+    char *vaz_src = NULL;
+    if (vus_vaz_import(modname, base_dir, &vaz_src, NULL,
+                       out_vaz_dir, vaz_sz) == 0 && vaz_src) {
+        if (out_vaz_src) *out_vaz_src = vaz_src; else free(vaz_src);
+        return 0;
+    }
+    free(vaz_src);
+    return -1;
+}
+
 /* 递归展开 content：import 行替换为模块源码，其余行原样保留。 */
 static void expand_rec(const char *content, const char *base_dir,
                        VusImportSet *set, VusGrow *out) {
@@ -162,41 +193,24 @@ static void expand_rec(const char *content, const char *base_dir,
                 }
             }
 
-            char file[1024]; int found = 0;
-            struct stat st;
-            /* 优先主脚本同目录，其次当前工作目录 */
-            if (base_dir && base_dir[0] && strcmp(base_dir, ".") != 0) {
-                snprintf(file, sizeof(file), "%s/%s.vus", base_dir, modname);
-                if (stat(file, &st) == 0 && S_ISREG(st.st_mode)) found = 1;
-                if (!found) {
-                    snprintf(file, sizeof(file), "%s/%s", base_dir, modname);
-                    if (stat(file, &st) == 0 && S_ISREG(st.st_mode)) found = 1;
+            char file[1024]; char vlibdir[1024]; char *vaz_src = NULL;
+            int rc = resolve_import(modname, base_dir,
+                                    file, sizeof(file),
+                                    vlibdir, sizeof(vlibdir), &vaz_src);
+            if (rc == 0) {
+                /* .vaz 依赖包：内联其逻辑库源码（包目录作去重键，避免循环） */
+                if (!set_has(set, vlibdir)) {
+                    set_add(set, vlibdir);
+                    expand_rec(vaz_src, vlibdir, set, out);
                 }
-            }
-            if (!found) {
-                snprintf(file, sizeof(file), "%s.vus", modname);
-                if (stat(file, &st) == 0 && S_ISREG(st.st_mode)) found = 1;
+                free(vaz_src);
+                free(line);
+                if (!nl) break;
+                p = nl + 1;
+                continue;
             }
 
-            if (!found) {
-                /* .vaz 依赖包回退：「导入 "包名"」→ 解析并内联包逻辑库源码 */
-                char *vaz_src = NULL;
-                char vlibdir[1024];
-                if (vus_vaz_import(modname, base_dir, &vaz_src, NULL,
-                                   vlibdir, sizeof(vlibdir)) == 0 && vaz_src) {
-                    if (!set_has(set, vlibdir)) {
-                        set_add(set, vlibdir);
-                        expand_rec(vaz_src, vlibdir, set, out);
-                    }
-                    free(vaz_src);
-                    free(line);
-                    if (!nl) break;
-                    p = nl + 1;
-                    continue;
-                }
-            }
-
-            if (found && !set_has(set, file)) {
+            if (rc == 1 && !set_has(set, file)) {
                 size_t mco_len = 0;
                 char *mco = read_file(file, &mco_len);
                 if (mco) {
@@ -216,7 +230,7 @@ static void expand_rec(const char *content, const char *base_dir,
                     grow_add(out, line, linelen);
                     grow_add(out, "\n", 1);
                 }
-            } else if (found) {
+            } else if (rc == 1) {
                 /* 已展开过（避免循环 import 重复/无限） */
             } else {
                 grow_add(out, line, linelen);
@@ -250,6 +264,107 @@ char *vus_source_expand_imports(const char *source, const char *source_name) {
     VusGrow out; grow_init(&out);
     expand_rec(source, base, &set, &out);
     return out.buf; /* 可能为 NULL（无内容） */
+}
+
+/* ============ import 依赖收集（增量编译缓存判定用） ============
+ * C1：主脚本只比较自身 mtime，被导入模块改动后复用了过期产物。这里按与
+ * 展开完全一致的命中顺序，递归收集全部 import 依赖（.vus 模块文件路径 +
+ * .vaz 包目录），供 main.c 在缓存判定时逐一比较 mtime。seen 数组去重防环。 */
+static void deps_rec(const char *content, const char *base_dir,
+                     char deps[][512], int max, int *count,
+                     char seen[][512], int *seen_count) {
+    const char *p = content;
+    while (*p) {
+        const char *nl = strchr(p, '\n');
+        size_t linelen = nl ? (size_t)(nl - p) : strlen(p);
+        char *line = (char *)malloc(linelen + 1);
+        if (line) { memcpy(line, p, linelen); line[linelen] = '\0'; }
+
+        const char *mod = NULL; size_t mlen = 0;
+        if (line && import_line(line, &mod, &mlen)) {
+            char modname[256];
+            size_t clen = mlen < sizeof(modname) - 1 ? mlen : sizeof(modname) - 1;
+            memcpy(modname, mod, clen); modname[clen] = '\0';
+            {
+                char q = modname[0];
+                size_t mn = strlen(modname);
+                if ((q == '"' || q == '\'') && mn >= 2 && modname[mn - 1] == q) {
+                    char tmp[256];
+                    size_t tl = mn - 2;
+                    if (tl >= sizeof(tmp)) tl = sizeof(tmp) - 1;
+                    memcpy(tmp, modname + 1, tl);
+                    tmp[tl] = '\0';
+                    strcpy(modname, tmp);
+                }
+            }
+
+            char file[1024]; char vlibdir[1024]; char *vaz_src = NULL;
+            int rc = resolve_import(modname, base_dir,
+                                    file, sizeof(file),
+                                    vlibdir, sizeof(vlibdir), &vaz_src);
+            const char *dep = (rc == 1) ? file : (rc == 0 ? vlibdir : NULL);
+            int dup = 0;
+            if (dep) {
+                for (int i = 0; i < *seen_count; i++)
+                    if (strcmp(seen[i], dep) == 0) { dup = 1; break; }
+                if (!dup && *seen_count < VUS_IMPORT_MAX_DEPTH) {
+                    snprintf(seen[*seen_count], sizeof(seen[0]), "%s", dep);
+                    (*seen_count)++;
+                }
+                if (!dup && *count < max) {
+                    snprintf(deps[*count], sizeof(deps[0]), "%s", dep);
+                    (*count)++;
+                }
+            }
+
+            if (rc == 1 && !dup) {
+                /* 本地模块：递归其自身 import */
+                size_t mco_len = 0;
+                char *mco = read_file(file, &mco_len);
+                if (mco) {
+                    char mdir[1024];
+                    const char *slash = strrchr(file, '/');
+                    if (slash) {
+                        size_t dl = (size_t)(slash - file);
+                        if (dl > 0) snprintf(mdir, sizeof(mdir), "%.*s", (int)dl, file);
+                        else strcpy(mdir, ".");
+                    } else {
+                        strcpy(mdir, ".");
+                    }
+                    deps_rec(mco, mdir, deps, max, count, seen, seen_count);
+                    free(mco);
+                }
+            } else if (rc == 0 && !dup && vaz_src) {
+                /* vaz 包：递归其逻辑库源码依赖 */
+                deps_rec(vaz_src, vlibdir, deps, max, count, seen, seen_count);
+            }
+            free(vaz_src);
+        }
+        free(line);
+        if (!nl) break;
+        p = nl + 1;
+    }
+}
+
+/* 收集主脚本（及其递归 import）的全部依赖文件路径，写入 deps（最多 max 项）。
+ * 返回依赖个数（0 = 无 import 依赖）。供 main.c 的产物缓存判定使用。 */
+int vus_source_import_deps(const char *source, const char *source_name,
+                           char deps[][512], int max) {
+    if (!source || max <= 0) return 0;
+    char base[1024];
+    const char *slash = source_name ? strrchr(source_name, '/') : NULL;
+    if (slash) {
+        size_t dl = (size_t)(slash - source_name);
+        if (dl > 0) snprintf(base, sizeof(base), "%.*s", (int)dl, source_name);
+        else strcpy(base, ".");
+    } else {
+        strcpy(base, ".");
+    }
+    char seen[VUS_IMPORT_MAX_DEPTH][512];
+    int seen_count = 0;
+    int count = 0;
+    deps_rec(source, base, deps, max, &count, seen, &seen_count);
+    return count;
 }
 
 /* 将 VUS 源码字符串编译为 C 代码，核心编译流水线 */
@@ -327,8 +442,8 @@ static VusResult compile_source(const char *source, size_t source_len,
     vus_parser_free(parser);
     vus_lexer_free_tokens(tokens, token_count);
 
-    /* 代码生成 */
-    char *c_code = vus_generate_c(program, config);
+    /* 代码生成（source_name 非空时启用 C3 行号映射：#line 回指 .vus 源行） */
+    char *c_code = vus_generate_c(program, config, source_name);
     if (!c_code) {
         snprintf(result.error_msg, sizeof(result.error_msg), "文件 %s: C 代码生成失败", source_name);
         vus_ast_node_free((VusAstNode *)program);

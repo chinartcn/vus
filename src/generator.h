@@ -16,8 +16,11 @@ extern "C" {
 
 /* ============ 代码生成器 ============ */
 
-/* 将 AST 生成 C 代码，返回分配的字符串 */
-char *vus_generate_c(VusAstProgram *program, VusConfig *config);
+/* 将 AST 生成 C 代码，返回分配的字符串。
+ * source_name：源 .vus 文件路径（可为 NULL）。提供时在生成结果中嵌入
+ * #line 指令，把 GCC 编译错误行号映射回 .vus 源行（C3）。 */
+char *vus_generate_c(VusAstProgram *program, VusConfig *config,
+                     const char *source_name);
 
 /* 将 C 代码编译为可执行文件（调用 GCC）
  * extra_objects — 额外 .o 文件列表（空格分隔），可为 NULL */
