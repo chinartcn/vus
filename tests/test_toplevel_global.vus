@@ -1,0 +1,21 @@
+// test_toplevel_global.vus — 回归：顶层控制流块内赋值收集为全局变量（反馈 1.1）
+// 修复前：块内赋值不生成全局声明，C 编译报 undeclared；修复后应编译运行成功。
+// 同时验证函数内可读这些文件级变量（登记为全局名，不被收集为局部遮蔽）。
+
+定义 主():
+    返回
+
+如果 "a" == "a":
+    if_var = "ok-if"
+结束
+循环 i 从 1 到 1:
+    loop_var = "ok-loop"
+结束
+当循环 1 < 1:
+    while_var = "ok-while"
+结束
+
+定义 读全局():
+    返回 if_var + loop_var + while_var
+
+打印(读全局())

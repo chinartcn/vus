@@ -302,6 +302,73 @@ static int gen_is_global_name(const char *name) {
     return 0;
 }
 
+/* ---- 顶层文件级变量收集（递归进入顶层控制流子块）----
+ * 修复反馈 1.1：此前只扫描顶层「平坦」赋值，如果/循环/异常块内的赋值不生成
+ * 全局声明，C 代码报 undeclared。现递归遍历顶层 if/elif/else、for、while、try
+ * 的子块，把其中所有赋值目标/显式全局声明一并：登记全局名（函数内不收集为
+ * 局部，避免遮蔽）+ 生成 VusString* 全局声明（去重）。函数定义体不进入。 */
+static void gen_globals_walk_list(VusAstList *list, GenBuf *gl);
+
+static void gen_globals_declare_name(const char *name, GenBuf *gl) {
+    if (!name) return;
+    if (!gen_is_global_name(name) && s_global_count < 512)
+        s_global_names[s_global_count++] = (char *)name;
+    if (!gl) return;
+    char san[256];
+    gen_sanitize_name(name, san, sizeof(san));
+    char decl[320];
+    snprintf(decl, sizeof(decl), "VusString* vus_%s = NULL;\n", san);
+    if (!strstr(gl->data, decl)) gen_emit(gl, decl);
+}
+
+static void gen_globals_walk_stmt(VusAstNode *node, GenBuf *gl) {
+    if (!node) return;
+    switch (node->type) {
+    case VUS_AST_ASSIGN:
+        gen_globals_declare_name(((VusAstAssign *)node)->target, gl);
+        break;
+    case VUS_AST_GLOBAL_DECL:
+        gen_globals_declare_name(((VusAstGlobalDecl *)node)->name, gl);
+        break;
+    case VUS_AST_IF: {
+        VusAstIf *s = (VusAstIf *)node;
+        gen_globals_walk_list(s->then_body, gl);
+        if (s->elif_bodies)
+            for (size_t i = 0; i < s->elif_bodies->count; i++)
+                gen_globals_walk_list((VusAstList *)s->elif_bodies->items[i], gl);
+        gen_globals_walk_list(s->else_body, gl);
+        break;
+    }
+    case VUS_AST_FOR_RANGE:
+        gen_globals_walk_list(((VusAstForRange *)node)->body, gl);
+        break;
+    case VUS_AST_FOR_EACH:
+        gen_globals_walk_list(((VusAstForEach *)node)->body, gl);
+        break;
+    case VUS_AST_WHILE:
+        gen_globals_walk_list(((VusAstWhile *)node)->body, gl);
+        break;
+    case VUS_AST_TRY: {
+        VusAstTry *t = (VusAstTry *)node;
+        gen_globals_walk_list(t->try_body, gl);
+        if (t->except_bodies)
+            for (size_t i = 0; i < t->except_bodies->count; i++)
+                gen_globals_walk_list((VusAstList *)t->except_bodies->items[i], gl);
+        break;
+    }
+    default:
+        break;   /* 函数定义/结构体定义/表达式等不进文件级变量收集 */
+    }
+}
+
+static void gen_globals_walk_list(VusAstList *list, GenBuf *gl) {
+    if (!list) return;
+    for (size_t i = 0; i < list->count; i++) {
+        VusAstNode *node = list->items[i];
+        if (node) gen_globals_walk_stmt(node, gl);
+    }
+}
+
 /* 按函数名在 AST 根里查函数定义；未找到返回 NULL。 */
 static VusAstFunctionDef *gen_vua_find_func(const char *name) {
     if (!g_vua_prog || !name || !g_vua_prog->statements) return NULL;
@@ -3433,34 +3500,14 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config) {
     gen_emit(buf, "    return _vus_args[0];\n");
     gen_emit(buf, "}\n\n");
 
-    /* 全局变量声明（去重，避免同一变量多次赋值导致重复声明） */
+    /* 全局变量声明（去重，递归含顶层控制流块内赋值，修复反馈 1.1） */
     if (program->statements) {
         GenBuf gl;
         memset(&gl, 0, sizeof(gl));
         gl.cap = 4096;
         gl.data = (char *)malloc(gl.cap);
         gl.data[0] = '\0';
-        for (size_t i = 0; i < program->statements->count; i++) {
-            VusAstNode *node = program->statements->items[i];
-            const char *name = NULL;
-            if (node->type == VUS_AST_ASSIGN) {
-                name = ((VusAstAssign *)node)->target;
-            } else if (node->type == VUS_AST_GLOBAL_DECL) {
-                name = ((VusAstGlobalDecl *)node)->name;
-            }
-            if (!name) continue;
-            /* 登记为全局名：函数内同名赋值不收集为局部（修复函数内全局变量不可用） */
-            if (!gen_is_global_name(name) && s_global_count < 512) {
-                s_global_names[s_global_count++] = (char *)name;
-            }
-            char san[256];
-            gen_sanitize_name(name, san, sizeof(san));
-            char decl[320];
-            snprintf(decl, sizeof(decl), "VusString* vus_%s = NULL;\n", san);
-            /* 检查是否已声明 */
-            if (strstr(gl.data, decl)) continue;
-            gen_emit(&gl, decl);
-        }
+        gen_globals_walk_list(program->statements, &gl);
         gen_emit(buf, gl.data);
         free(gl.data);
     }

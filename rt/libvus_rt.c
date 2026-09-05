@@ -28,12 +28,14 @@ void vus_unref(void* obj) {
 }
 
 /* 变量赋值热路径：*slot = v（v/旧值均可 NULL）。生成器把原先
- * { _tmp = v; vus_ref(_tmp); vus_unref(*slot); *slot = _tmp; } 收敛成一行。 */
-void vus_var_set(VusString** slot, VusString* v) {
+ * { _tmp = v; vus_ref(_tmp); vus_unref(*slot); *slot = _tmp; } 收敛成一行。
+ * 值类型用 void*：普通赋值传 VusString*，列表/字典字面量传装箱后的 VusObject*，
+ * 避免生成代码出现 -Wincompatible-pointer-types（反馈四.1）。 */
+void vus_var_set(VusString** slot, void* v) {
     if (!slot) return;
     if (v) vus_ref(v);
     if (*slot) vus_unref(*slot);
-    *slot = v;
+    *slot = (VusString*)v;
 }
 
 // ============ 字符串 ============

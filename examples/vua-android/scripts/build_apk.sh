@@ -157,10 +157,13 @@ for ABI in "${ABIS[@]}"; do
   fi
   NM="${TC}/llvm-nm"
   [ -x "$NM" ] || NM="nm"
+  # nm 输出先落临时文件再逐个 grep：`nm | grep -q` 在 grep 命中早期符号后退出，
+  # nm 收到 SIGPIPE 中断、后续符号输出丢失 → 误报"缺少导出符号"（反馈 3.1）。
+  "$NM" -D --defined-only "$LS/libvus_app.so" > "$WORK/nm_$ABI.txt" 2>/dev/null || true
   missing=0
   while read -r sym; do
     [ -z "$sym" ] && continue
-    if ! "$NM" -D --defined-only "$LS/libvus_app.so" | grep -q " T $sym$"; then
+    if ! grep -q " T $sym$" "$WORK/nm_$ABI.txt"; then
       echo "  [JNI 校验] 缺少导出符号: $sym" >&2
       missing=1
     fi
@@ -180,7 +183,8 @@ rm -rf "$WORK/dex"; mkdir -p "$WORK/dex"
 # dex 工具：SDK 下已有 R8 jar 则优先（build-tools 自带 d8 8.2.2-dev 对此工程的嵌套类
 # 有 NPE 崩溃 bug，R8 正式版正常；无 jar 时回退 d8）。--lib android.jar 为 desugar
 # lambda/默认接口方法提供 java.lang.Runnable 等平台类型。
-R8_JAR_FOUND="$(find "$SDK" -maxdepth 3 -name 'r8-*.jar' 2>/dev/null | head -1)"
+# 探测放宽：文件名可能是 r8.jar/r8-8.x.jar，深度可到 4+（cmdline-tools/latest/lib）（反馈 3.2）
+R8_JAR_FOUND="$(find "$SDK" -maxdepth 5 -name 'r8*.jar' 2>/dev/null | head -1)"
 if [ -n "$R8_JAR_FOUND" ] && command -v java >/dev/null 2>&1; then
   echo "[2/6] 用 R8 jar 做 dex: $R8_JAR_FOUND"
   java -cp "$R8_JAR_FOUND" com.android.tools.r8.D8 --release --min-api 21 --lib "$AJ" \

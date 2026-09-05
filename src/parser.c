@@ -110,6 +110,17 @@ static VusToken *parser_expect(VusParser *parser, VusTokenType type) {
     VusToken *token = parser_peek(parser);
     if (!token || token->type != type) {
         const char *expected = vus_token_type_name(type);
+        if (type == VUS_TOKEN_INDENT) {
+            /* 块体缩进期望失败的常见错因是单行写法 `如果 条件: 语句`，明确指导（反馈 1.2） */
+            if (token) {
+                parser_set_error(parser,
+                    "期望 %s（块体需换行并缩进；不支持 `如果 条件: 单行语句` 写法，请将分支体写在下一行），但遇到 %s（第 %d 行第 %d 列）",
+                    expected, vus_token_type_name(token->type), token->line, token->column);
+            } else {
+                parser_set_error(parser, "期望 %s（块体需换行并缩进），但遇到文件结尾", expected);
+            }
+            return NULL;
+        }
         if (token) {
             const char *got = vus_token_type_name(token->type);
             parser_set_error(parser, "期望 %s，但遇到 %s（第 %d 行第 %d 列）",
