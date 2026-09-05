@@ -1,0 +1,18 @@
+{
+  "版本": 2,
+  "最低宿主版本": 0,
+  "文件": {
+    "sample_logo.jpg": "sha256:b45d182283327ae3d850a764aeb8126ecfc4d70d675df1556bd311369b54352e",
+    "vua_class.vua": "sha256:1757e44000b7ee00dd9688f338dcdb49c4f92322a52b3328b86290b0fcdf5d29",
+    "vua_advanced.vua": "sha256:73369dfe14d004ebd8e5e2e3e59c3229a69c495e4c8623c43d7f062d8cac7616",
+    "vua_home.vua": "sha256:a9a283e52ba05475b4b96bb9f9f47f71452d6b81d639694237f9d35afe46a7c2",
+    "vua_settings.vua": "sha256:607ba2bb4849eba16aacaafad9f5ad50d52134e647711c203c350cec5c6b0725",
+    "vua_controls.json": "sha256:17145967af07d54e936847560714c6cda2999453883d77f1bccaaf770b22e599",
+    "vua_logic.vua": "sha256:28a6c12166d3e72ccbdd5f18801e18138f000e26224fc4e65ab58a0900d056aa",
+    "plugins/sample.dex": "sha256:281246edb0b32936dbc857a43b24c96f54f1cc51925bdb0b9e22bda8b4ed0bb2",
+    "plugins/sample.dex.sha256": "sha256:94135f624a54cafb8a9890d24e7c24f0637b5346a486dcd81719529dff342964",
+    "lib/armeabi-v7a/libvus_app.so": "sha256:0e7c07f19055625f98ba8d05ebe0dcc523ff38e58dedb4f6d47f4f449e1a0b49",
+    "lib/x86_64/libvus_app.so": "sha256:fac2b8bd7dc6fd08d40b7b73f0b0a41f58fcb8499fb51bebb38bac1f11718bd5",
+    "lib/arm64-v8a/libvus_app.so": "sha256:08d076410f17d64e95fe5ce66cdccb19524528c0ab54476a0d2de5f26d695430"
+  }
+}

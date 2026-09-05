@@ -397,6 +397,123 @@ static void lexer_read_string(VusLexer *lexer)
 }
 
 /*
+ * 读取 f"..." 字符串插值字面量（VUS_TOKEN_FSTRING）。
+ *
+ * 语法：f"文本{表达式}文本..."
+ *  - 大括号 {..} 之间的内容为插值表达式，**原样保留**（不做字符串转义），
+ *    交由 parser 递归解析；结束的 } 回到文本态。
+ *  - 文本态支持与普通字符串相同的转义：\n \r \t \\ \" \xHH \uHHHH；
+ *    `\{` 可转义出字面花括号（避免误开插值）。
+ *  - 插值态内遇到 " 按普通字符保留（第一版插值内不支持嵌套字符串字面量）。
+ *  value 存整个解码后文本（含 {表达式}），parser 再拆分解析。
+ */
+static void lexer_read_fstring(VusLexer *lexer)
+{
+    int line = lexer->line;
+    int col  = lexer->column;
+
+    /* 跳过 f" */
+    lexer_advance(lexer);
+    lexer_advance(lexer);
+
+    size_t cap = 64;
+    size_t len = 0;
+    char *buf = malloc(cap);
+    if (!buf) {
+        lexer_set_error(lexer, "内存不足：无法分配插值串缓冲区");
+        return;
+    }
+
+    int interp = 0;   /* 1=处于 {..} 插值态（原样复制） */
+    while (lexer->pos < lexer->source_len) {
+        char c = lexer->source[lexer->pos];
+
+        if (interp) {
+            if (c == '}') {
+                if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
+                buf[len++] = '}';
+                interp = 0;
+                lexer_advance(lexer);
+            } else if (c == '\n') {
+                lexer_set_error(lexer, "插值串未闭合（遇到换行）");
+                free(buf);
+                return;
+            } else {
+                if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
+                buf[len++] = c;
+                lexer_advance(lexer);
+            }
+            continue;
+        }
+
+        if (c == '"') {
+            lexer_advance(lexer);
+            buf[len] = '\0';
+            lexer_add_token_value(lexer, VUS_TOKEN_FSTRING, buf, line, col);
+            free(buf);
+            return;
+        }
+        if (c == '{') {
+            if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
+            buf[len++] = '{';
+            interp = 1;
+            lexer_advance(lexer);
+            continue;
+        }
+        if (c == '\n') {
+            lexer_set_error(lexer, "插值串未闭合（遇到换行）");
+            free(buf);
+            return;
+        }
+        if (c == '\\') {
+            lexer_advance(lexer);
+            if (lexer->pos >= lexer->source_len) {
+                lexer_set_error(lexer, "插值串中反斜杠后缺少字符");
+                free(buf);
+                return;
+            }
+            char esc = lexer->source[lexer->pos];
+            lexer_advance(lexer);
+            switch (esc) {
+            case 'n':
+                if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
+                buf[len++] = '\n'; break;
+            case 'r':
+                if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
+                buf[len++] = '\r'; break;
+            case 't':
+                if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
+                buf[len++] = '\t'; break;
+            case '\\':
+                if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
+                buf[len++] = '\\'; break;
+            case '"':
+                if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
+                buf[len++] = '"'; break;
+            case '{':
+                if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
+                buf[len++] = '{'; break;
+            case '}':
+                if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
+                buf[len++] = '}'; break;
+            default:
+                /* 未知转义保持原样 */
+                if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
+                buf[len++] = esc;
+                break;
+            }
+        } else {
+            if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
+            buf[len++] = c;
+            lexer_advance(lexer);
+        }
+    }
+
+    lexer_set_error(lexer, "插值串未闭合（遇到文件末尾）");
+    free(buf);
+}
+
+/*
  * 读取数字字面量。
  * 支持：十进制整数/浮点数、十六进制 (0x)、二进制 (0b)。
  */
@@ -680,10 +797,24 @@ VusToken *vus_lexer_tokenize(VusLexer *lexer, size_t *out_count)
                 lexer_skip_comment(lexer);
                 continue;
             }
+            if (lexer_peek_next(lexer) == '=') {
+                /* /= 复合赋值 */
+                lexer_advance(lexer);
+                lexer_advance(lexer);
+                lexer_add_token(lexer, VUS_TOKEN_DIV_ASSIGN,
+                                lexer->source + (lexer->pos - 2), 2, line, col);
+                continue;
+            }
             /* 除号运算符 */
             lexer_advance(lexer);
             lexer_add_token(lexer, VUS_TOKEN_SLASH,
                             lexer->source + (lexer->pos - 1), 1, line, col);
+            continue;
+        }
+
+        /* === 字符串插值 f"..."（在标识符前拦截，避免把 f 当标识符） === */
+        if (c == 'f' && lexer_peek_next(lexer) == '"') {
+            lexer_read_fstring(lexer);
             continue;
         }
 
@@ -716,7 +847,16 @@ VusToken *vus_lexer_tokenize(VusLexer *lexer, size_t *out_count)
         /* === 点号 / 连接运算符 === */
         if (c == '.') {
             if (lexer_peek_next(lexer) == '.') {
-                /* .. 连接运算符 */
+                /* .. 连接运算符；..= 为拼接复合赋值 */
+                if (lexer->pos + 2 < lexer->source_len &&
+                    lexer->source[lexer->pos + 2] == '=') {
+                    lexer_advance(lexer); /* 第一个 . */
+                    lexer_advance(lexer); /* 第二个 . */
+                    lexer_advance(lexer); /* = */
+                    lexer_add_token(lexer, VUS_TOKEN_CONCAT_ASSIGN,
+                                    lexer->source + (lexer->pos - 3), 3, line, col);
+                    continue;
+                }
                 lexer_advance(lexer); /* 第一个 . */
                 lexer_advance(lexer); /* 第二个 . */
                 lexer_add_token(lexer, VUS_TOKEN_CONCAT,
@@ -846,24 +986,52 @@ VusToken *vus_lexer_tokenize(VusLexer *lexer, size_t *out_count)
                             lexer->source + (lexer->pos - 1), 1, line, col);
             break;
         case '+':
-            lexer_advance(lexer);
-            lexer_add_token(lexer, VUS_TOKEN_PLUS,
-                            lexer->source + (lexer->pos - 1), 1, line, col);
+            if (lexer_peek_next(lexer) == '=') {
+                lexer_advance(lexer);
+                lexer_advance(lexer);
+                lexer_add_token(lexer, VUS_TOKEN_ADD_ASSIGN,
+                                lexer->source + (lexer->pos - 2), 2, line, col);
+            } else {
+                lexer_advance(lexer);
+                lexer_add_token(lexer, VUS_TOKEN_PLUS,
+                                lexer->source + (lexer->pos - 1), 1, line, col);
+            }
             break;
         case '-':
-            lexer_advance(lexer);
-            lexer_add_token(lexer, VUS_TOKEN_MINUS,
-                            lexer->source + (lexer->pos - 1), 1, line, col);
+            if (lexer_peek_next(lexer) == '=') {
+                lexer_advance(lexer);
+                lexer_advance(lexer);
+                lexer_add_token(lexer, VUS_TOKEN_SUB_ASSIGN,
+                                lexer->source + (lexer->pos - 2), 2, line, col);
+            } else {
+                lexer_advance(lexer);
+                lexer_add_token(lexer, VUS_TOKEN_MINUS,
+                                lexer->source + (lexer->pos - 1), 1, line, col);
+            }
             break;
         case '*':
-            lexer_advance(lexer);
-            lexer_add_token(lexer, VUS_TOKEN_STAR,
-                            lexer->source + (lexer->pos - 1), 1, line, col);
+            if (lexer_peek_next(lexer) == '=') {
+                lexer_advance(lexer);
+                lexer_advance(lexer);
+                lexer_add_token(lexer, VUS_TOKEN_MUL_ASSIGN,
+                                lexer->source + (lexer->pos - 2), 2, line, col);
+            } else {
+                lexer_advance(lexer);
+                lexer_add_token(lexer, VUS_TOKEN_STAR,
+                                lexer->source + (lexer->pos - 1), 1, line, col);
+            }
             break;
         case '%':
-            lexer_advance(lexer);
-            lexer_add_token(lexer, VUS_TOKEN_PERCENT,
-                            lexer->source + (lexer->pos - 1), 1, line, col);
+            if (lexer_peek_next(lexer) == '=') {
+                lexer_advance(lexer);
+                lexer_advance(lexer);
+                lexer_add_token(lexer, VUS_TOKEN_MOD_ASSIGN,
+                                lexer->source + (lexer->pos - 2), 2, line, col);
+            } else {
+                lexer_advance(lexer);
+                lexer_add_token(lexer, VUS_TOKEN_PERCENT,
+                                lexer->source + (lexer->pos - 1), 1, line, col);
+            }
             break;
         case '&':
             lexer_advance(lexer);

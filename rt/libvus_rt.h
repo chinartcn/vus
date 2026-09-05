@@ -13,6 +13,7 @@
 #define TYPE_BOOL    4
 #define TYPE_LIST    5
 #define TYPE_DICT    6
+#define TYPE_FUNC    7
 #define TYPE_MIXED   99
 
 // ============ 前向声明 ============
@@ -31,11 +32,12 @@ typedef struct VusObject VusObject;
 struct VusObject {
     int ref;    // 引用计数，必须为第一个字段（与 VusString/VusList/VusDict 约定一致）
     int magic;  // VUS_OBJECT_MAGIC：供 vus_print/vus_typeof 区分 VusObject 与 VusString
-    int type;   // TYPE_LIST / TYPE_DICT / TYPE_STR / TYPE_INT / TYPE_FLOAT / TYPE_BOOL
+    int type;   // TYPE_LIST / TYPE_DICT / TYPE_STR / TYPE_INT / TYPE_FLOAT / TYPE_BOOL / TYPE_FUNC
     union {
         VusList*    list;
         VusDict*    dict;
         VusString*  str;
+        void (*fn)(void*);   /* TYPE_FUNC：裸函数指针（VUS 函数一等公民载体） */
     } u;
 };
 
@@ -96,6 +98,8 @@ void vus_list_append(VusList* list, void* item);
  * 列表/字典字面量（ref 初始 0，与生成器旧内联模板等价）。 */
 VusObject* vus_object_list(void);
 VusObject* vus_object_dict(void);
+VusObject* vus_object_func(void (*fn)(void*));
+VusString* vus_object_func_call(VusObject* o, VusString** args);
 void* vus_list_get(VusList* list, int index);
 void vus_list_remove(VusList* list, int index);
 void vus_list_set(VusList* list, int index, void* item);
@@ -123,6 +127,12 @@ VusList* vus_dict_keys(VusDict* dict);
 /* 取结构化字典（VusObject* 的 TYPE_DICT）的键列表；非字典容器返回空列表。
  * 供脚本内建「字典_键」使用，避免误把任意对象当 VusDict 解引用。 */
 VusList* vus_dict_keys_of(void* obj);
+
+/* 取结构化字典（VusObject* 的 TYPE_DICT）的全部键值对：返回 VusObject*(TYPE_LIST)，
+ * 每个元素又是一个 VusObject*(TYPE_LIST)「[键, 值]」双元素列表。
+ * 供脚本内建「字典_项」使用：可配合「循环 对 在 字典_项(字典)」同时拿到键与值。
+ * 非字典容器返回空列表。调用方按 VUS 引用计数规则负责释放返回对象。 */
+VusObject* vus_dict_items(void* obj);
 
 /* ---- Termux-X11 一键启动（Termux_* 内建） ----
  * 在脚本里免去手动敲 termux-x11/环境变量/virgl_test_server 的命令。 */
@@ -256,6 +266,10 @@ void vus_coro_resume(VusCoroutine* coro);
 void vus_coro_yield(void);
 int vus_coro_is_done(VusCoroutine* coro);
 
+// 真 await：驱动协程句柄到完成并返回其返回值；vus_coro_store_result 让协程存结果
+VusString* vus_coro_await_handle(VusString* handle);
+void vus_coro_store_result(void* result);
+
 // ============ 插件运行时函数（VusString* 接口） ============
 
 /* TUI（使用 ANSI 转义码） */
@@ -272,6 +286,10 @@ VusString* vus_plugin_http_download(VusString* url, VusString* filepath);
 
 /* DEX 逻辑拓展（仅 APK）：转 Java 平台桥 ext.* 命名空间，原样返回响应 JSON 串 */
 VusString* vus_plugin_ext_call(VusString* plugin_op, VusString* args);
+
+/* 热更协议（仅 APK）：应用含新 .so/.vua/.dex 的更新包（UpdateManager.applyUpdate）。
+ * 返回 data：0=已应用(实时层生效, .so 重启生效) 1=无更新 -1=宿主过低 -2=失败 */
+VusString* vus_plugin_hotupdate_apply(VusString* url);
 
 /* 插件调用（调用 .vux Python 插件） */
 VusString* vus_plugin_run_vux(VusString* plugin, VusString* cmd);

@@ -184,6 +184,34 @@ VusAstReturn *vus_ast_return_new(VusAstNode *val, int line, int col) {
     return node;
 }
 
+VusAstReturnMulti *vus_ast_return_multi_new(VusAstList *values, int line, int col) {
+    VusAstReturnMulti *node = calloc(1, sizeof(VusAstReturnMulti));
+    if (!node) return NULL;
+    node->type = VUS_AST_RETURN_MULTI;
+    node->line = line;
+    node->column = col;
+    node->values = values;
+    return node;
+}
+
+VusAstMultiAssign *vus_ast_multi_assign_new(VusAstList *targets, VusAstNode *val, int line, int col) {
+    VusAstMultiAssign *node = calloc(1, sizeof(VusAstMultiAssign));
+    if (!node) return NULL;
+    node->type = VUS_AST_MULTI_ASSIGN;
+    node->line = line;
+    node->column = col;
+    node->targets = targets;
+    node->value = val;
+    node->is_local = 0;
+    return node;
+}
+
+VusAstMultiAssign *vus_ast_multi_assign_local_new(VusAstList *targets, VusAstNode *val, int line, int col) {
+    VusAstMultiAssign *node = vus_ast_multi_assign_new(targets, val, line, col);
+    if (node) node->is_local = 1;
+    return node;
+}
+
 VusAstAssign *vus_ast_assign_new(const char *target, const char *type_ann, VusAstNode *val, int line, int col) {
     VusAstAssign *node = calloc(1, sizeof(VusAstAssign));
     if (!node) return NULL;
@@ -414,6 +442,16 @@ VusAstCoroYield *vus_ast_coro_yield_new(int line, int col) {
     return node;
 }
 
+VusAstAwait *vus_ast_await_new(VusAstNode *coro, int line, int col) {
+    VusAstAwait *node = calloc(1, sizeof(VusAstAwait));
+    if (!node) return NULL;
+    node->type = VUS_AST_AWAIT;
+    node->line = line;
+    node->column = col;
+    node->coro = coro;
+    return node;
+}
+
 VusAstSubscript *vus_ast_subscript_new(VusAstNode *obj, VusAstNode *idx, int line, int col) {
     VusAstSubscript *node = calloc(1, sizeof(VusAstSubscript));
     if (!node) return NULL;
@@ -540,6 +578,17 @@ void vus_ast_node_free(VusAstNode *node) {
         vus_ast_node_free(n->value);
         break;
     }
+    case VUS_AST_RETURN_MULTI: {
+        VusAstReturnMulti *n = (VusAstReturnMulti *)node;
+        vus_ast_list_free(n->values);
+        break;
+    }
+    case VUS_AST_MULTI_ASSIGN: {
+        VusAstMultiAssign *n = (VusAstMultiAssign *)node;
+        vus_ast_list_free(n->targets);
+        vus_ast_node_free(n->value);
+        break;
+    }
     case VUS_AST_ASSIGN: {
         VusAstAssign *n = (VusAstAssign *)node;
         free(n->target);
@@ -645,6 +694,11 @@ void vus_ast_node_free(VusAstNode *node) {
     }
     case VUS_AST_CORO_YIELD:
         break;
+    case VUS_AST_AWAIT: {
+        VusAstAwait *n = (VusAstAwait *)node;
+        vus_ast_node_free(n->coro);
+        break;
+    }
     case VUS_AST_SUBSCRIPT: {
         VusAstSubscript *n = (VusAstSubscript *)node;
         vus_ast_node_free(n->object);

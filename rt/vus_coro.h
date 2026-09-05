@@ -36,6 +36,8 @@ void          vus_coro_resume(VusCoroutine* coro);
 void          vus_coro_yield(void);
 int           vus_coro_is_done(VusCoroutine* coro);
 void          vus_coro_free(VusCoroutine* coro);
+void          vus_coro_store_result(void* result);
+VusCoroutine* vus_coro_current(void);
 
 #ifdef __cplusplus
 }

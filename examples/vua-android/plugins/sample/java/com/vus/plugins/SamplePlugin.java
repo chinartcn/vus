@@ -9,6 +9,7 @@
  *   factorial 求 n 的阶乘
  *   upper     文本转大写
  *   echo      回显 msg
+ *   greet     问候（v2 新增，用于验证 dex 热更新：旧版无此操作 → 更新后可用）
  */
 package com.vus.plugins;
 
@@ -38,6 +39,9 @@ public class SamplePlugin implements VusExtension {
             }
             if ("echo".equals(op)) {
                 return ok(args.optString("msg", "pong"));
+            }
+            if ("greet".equals(op)) {
+                return ok("Hello, VUS! 来自 gitee 热更新插件 v2");
             }
             return err("未知操作: " + op);
         } catch (Throwable t) {

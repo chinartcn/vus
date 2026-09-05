@@ -19,6 +19,7 @@ typedef enum {
     /* 标识符与字面量 */
     VUS_TOKEN_IDENTIFIER,
     VUS_TOKEN_STRING,
+    VUS_TOKEN_FSTRING,   /* f"文本{表达式}文本"：字符串插值（表达式递归解析） */
     VUS_TOKEN_NUMBER,
 
     /* 关键字 — 函数风格英文 */
@@ -112,6 +113,13 @@ typedef enum {
     VUS_TOKEN_PERCENT,
     VUS_TOKEN_CONCAT,
     VUS_TOKEN_ASSIGN,
+    /* 复合赋值：a op= b 等价于 a = a op b（parser 展开） */
+    VUS_TOKEN_ADD_ASSIGN,
+    VUS_TOKEN_SUB_ASSIGN,
+    VUS_TOKEN_MUL_ASSIGN,
+    VUS_TOKEN_DIV_ASSIGN,
+    VUS_TOKEN_MOD_ASSIGN,
+    VUS_TOKEN_CONCAT_ASSIGN,
     VUS_TOKEN_EQ,
     VUS_TOKEN_NEQ,
     VUS_TOKEN_LT,

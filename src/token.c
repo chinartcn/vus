@@ -55,6 +55,7 @@ const char *vus_token_type_name(VusTokenType type)
     switch (type) {
     case VUS_TOKEN_IDENTIFIER:   return "标识符";
     case VUS_TOKEN_STRING:       return "字符串";
+    case VUS_TOKEN_FSTRING:      return "插值串";
     case VUS_TOKEN_NUMBER:       return "数字";
 
     /* 英文关键字 */
@@ -147,6 +148,12 @@ const char *vus_token_type_name(VusTokenType type)
     case VUS_TOKEN_PERCENT:      return "百分号";
     case VUS_TOKEN_CONCAT:       return "拼接";
     case VUS_TOKEN_ASSIGN:       return "赋值";
+    case VUS_TOKEN_ADD_ASSIGN:   return "加等";
+    case VUS_TOKEN_SUB_ASSIGN:   return "减等";
+    case VUS_TOKEN_MUL_ASSIGN:   return "乘等";
+    case VUS_TOKEN_DIV_ASSIGN:   return "除等";
+    case VUS_TOKEN_MOD_ASSIGN:   return "余等";
+    case VUS_TOKEN_CONCAT_ASSIGN:return "拼接等";
     case VUS_TOKEN_EQ:           return "等于";
     case VUS_TOKEN_NEQ:          return "不等于";
     case VUS_TOKEN_LT:           return "小于";

@@ -49,6 +49,7 @@ struct VusCoroutine {
     char*     stack;
     size_t    stack_size;
     struct VusCoroutine* link;   /* yield / finish 后回到谁 */
+    void*     result;            /* 协程完成后的返回值（vus_coro_store_result 写入） */
 };
 
 /* ---------- 调度器全局 ---------- */
@@ -401,4 +402,26 @@ void vus_coro_free(VusCoroutine* coro)
         coro->stack = NULL;
     }
     free(coro);
+}
+
+/* 让当前协程把其结果存入自身的 result 槽（仅当有当前协程时）。
+ * 供生成代码的协程入口在用户函数返回后调用。 */
+void vus_coro_store_result(void* result)
+{
+    VusCoroutine* cur = g_current;
+    if (cur && cur != &g_main_coro) {
+        cur->result = result;
+    }
+}
+
+/* 返回当前协程（无则返回 NULL）。供 await 时判定当前是否已在协程内。 */
+VusCoroutine* vus_coro_current(void)
+{
+    return g_current;
+}
+
+/* 取出协程的 result 槽值（await 侧读取，因 VusCoroutine 为不完全类型）。 */
+void* vus_coro_take_result(VusCoroutine* coro)
+{
+    return coro ? coro->result : NULL;
 }

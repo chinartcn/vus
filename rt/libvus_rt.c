@@ -17,14 +17,32 @@ void vus_ref(void* obj) {
     (*ref)++;
 }
 
+/* --- 递归释放（容器内部成员）---
+ * 引用计数归零时，除释放自身外，还需释放其持有的内部成员，避免泄漏：
+ *  - 字符串(VusString*)：单块分配，直接 free；
+ *  - 容器(VusObject*)：按其类型递归释放内部列表/字典的每个成员，
+ *    元素可再为标量或容器，逐层向下。
+ * 环/过深引用用固定释放链(rel_chain)防无限递归与重复释放。 */
+static void vus_object_release(VusObject* o);
+
+static void *g_rel_chain[256];
+static int   g_rel_depth = 0;
+static int rel_contains(void *p) {
+    for (int i = 0; i < g_rel_depth; i++) if (g_rel_chain[i] == p) return 1;
+    return 0;
+}
+
 void vus_unref(void* obj) {
     if (!obj) return;
     int* ref = (int*)obj;
     (*ref)--;
-    if (*ref <= 0) {
-        // 根据类型释放 - 简化实现，由调用方确保正确释放
-        free(obj);
+    if (*ref > 0) return;
+    if (vus_is_object(obj)) {
+        vus_object_release((VusObject*)obj);
+        return;
     }
+    /* 非容器：VusString 标量（单块分配），直接释放 */
+    free(obj);
 }
 
 /* 变量赋值热路径：*slot = v（v/旧值均可 NULL）。生成器把原先
@@ -397,6 +415,82 @@ VusList* vus_dict_keys_of(void* obj) {
     VusObject* o = (VusObject*)obj;
     if (o->type == TYPE_DICT && o->u.dict) return vus_dict_keys(o->u.dict);
     return vus_list_new(TYPE_STR);
+}
+
+/* 取结构化字典的全部键值对列表（VusObject* TYPE_LIST）。
+ * 每个元素为一个「[键, 值]」双元素列表（VusObject* TYPE_LIST）：
+ * 键/值按 vus_list_append 引用计数规则各自持有新引用，pair 又由 out 持有。
+ * 供「字典_项」内建配合「循环 对 在 字典_项(字典)」遍历键和值。 */
+VusObject* vus_dict_items(void* obj) {
+    VusObject* out = vus_object_list();
+    if (!out) return NULL;
+    if (!obj || !vus_is_object(obj)) return out;
+    VusObject* o = (VusObject*)obj;
+    if (o->type != TYPE_DICT || !o->u.dict) return out;
+    struct DictImpl* impl = (struct DictImpl*)o->u.dict->impl;
+    for (int i = 0; i < impl->size; i++) {
+        DictEntry* e = impl->buckets[i];
+        while (e) {
+            VusObject* pair = vus_object_list();
+            vus_list_append(pair->u.list, e->key);
+            vus_list_append(pair->u.list, e->value);
+            vus_list_append(out->u.list, pair);
+            e = e->next;
+        }
+    }
+    return out;
+}
+
+// ============ 容器递归释放（配合 vus_unref 归零路径） ============
+
+/* 释放列表内部：逐元素按引用计数 vus_unref（元素可为标量或容器），
+ * 再释放 items 数组与列表头。元素为共享引用时不归零释放，由计数保护。 */
+static void vus_release_list(VusList* l) {
+    if (!l) return;
+    if (l->items) {
+        for (int i = 0; i < l->len; i++)
+            if (l->items[i]) vus_unref(l->items[i]);
+        free(l->items);
+    }
+    free(l);
+}
+
+/* 释放字典内部：遍历桶内全部条目，释放键与值（按引用计数），再释放桶/impl/字典头。 */
+static void vus_release_dict(VusDict* d) {
+    if (!d) return;
+    struct DictImpl* impl = (struct DictImpl*)d->impl;
+    if (impl) {
+        for (int i = 0; i < impl->size; i++) {
+            DictEntry* e = impl->buckets[i];
+            while (e) {
+                DictEntry* next = e->next;
+                if (e->key)   vus_unref(e->key);
+                if (e->value) vus_unref(e->value);
+                free(e);
+                e = next;
+            }
+        }
+        free(impl->buckets);
+        free(impl);
+    }
+    free(d);
+}
+
+/* 递归释放 VusObject 容器。释放链防环/防过深（自身已在链上则跳过，
+ * 避免无限递归与重复释放）；内层列表/字典为对象专属成员，直接整树回收。 */
+static void vus_object_release(VusObject* o) {
+    if (!vus_is_object(o)) return;
+    if (g_rel_depth >= 256 || rel_contains(o)) return;
+    g_rel_chain[g_rel_depth++] = o;
+    if (o->type == TYPE_LIST && o->u.list) {
+        vus_release_list(o->u.list);
+    } else if (o->type == TYPE_DICT && o->u.dict) {
+        vus_release_dict(o->u.dict);
+    } else if (o->type == TYPE_STR && o->u.str) {
+        vus_unref(o->u.str);   /* 持有串按引用计数回收（可共享/驻留） */
+    }
+    g_rel_depth--;
+    free(o);
 }
 
 // ============ 闭包 ============
@@ -960,6 +1054,35 @@ VusCoroutine* vus_coro_create(void (*func)(void*), void* arg);
 void          vus_coro_resume(VusCoroutine* coro);
 void          vus_coro_yield(void);
 int           vus_coro_is_done(VusCoroutine* coro);
+void vus_coro_store_result(void* result);
+VusCoroutine* vus_coro_current(void);
+void* vus_coro_take_result(VusCoroutine* coro);
+
+/* 真 await：驱动协程到完成（可能需多次 resume 越过让出点），并返回其结果。
+ * 完成后的协程会被释放并清空句柄槽。 */
+VusString* vus_coro_await_handle(VusString* handle) {
+    if (!handle) return NULL;
+    int idx = atoi(handle->data);
+    if (idx < 0 || idx >= vus_coro_handle_count || !vus_coro_handles[idx]) {
+        return NULL;
+    }
+    VusCoroutine* coro = (VusCoroutine*)vus_coro_handles[idx];
+    /* 驱动直到完成 */
+    int guard = 0;
+    while (!vus_coro_is_done(coro) && guard < 1000000) {
+        vus_coro_resume(coro);
+        guard++;
+    }
+    void* res = vus_coro_take_result(coro);
+    VusString* out = NULL;
+    if (res) out = (VusString*)res;
+    /* 复用现成资源回收：释放协程并清槽 */
+    vus_coro_free(coro);
+    vus_coro_handles[idx] = NULL;
+    if (out) vus_ref(out);
+    else out = vus_string_new("");
+    return out;
+}
 
 /* ============ 插件运行时函数实现 ============ */
 
@@ -1333,6 +1456,21 @@ VusString* vus_plugin_ext_call(VusString* plugin_op, VusString* args) {
     return resp ? resp : vus_string_new("");
 }
 
+/* 热更_应用(更新清单URL)（仅 APK）：转 Java 平台桥 hotupdate.apply，
+ * 内部走 UpdateManager.applyUpdate（拉清单→校验→下载→原子提交→回滚防护）。
+ * 返回 data：0=已应用(实时层生效, .so 重启生效) 1=无更新 -1=宿主过低 -2=失败。 */
+VusString* vus_plugin_hotupdate_apply(VusString *url) {
+    if (!url || !g_java_cb) return vus_string_new("-2");
+    const char *u = vus_string_cstr(url);
+    if (!u || !u[0]) return vus_string_new("-2");
+    char *aj = vus_java_json_2("url", u, "path", "");
+    if (!aj) return vus_string_new("-2");
+    VusString *jr = vus_java_rpc("hotupdate.apply", aj);
+    free(aj);
+    if (jr) return jr;
+    return vus_string_new("-2");
+}
+
 /* ---- 插件调用（.vux Python 插件） ---- */
 
 /*
@@ -1430,6 +1568,25 @@ static VusObject* vus_json_scalar_wrap(VusString* s) {
     o->type = TYPE_STR;
     o->u.str = s;
     return o;
+}
+
+/* 函数一等公民：把裸函数指针装箱为 VusObject(TYPE_FUNC)。
+ * ref 初值 0，与 vus_object_list/dict 约定一致（首次 vus_ref 后为 1）。 */
+VusObject* vus_object_func(void (*fn)(void*)) {
+    VusObject* o = (VusObject*)calloc(1, sizeof(VusObject));
+    if (!o) return NULL;
+    o->magic = VUS_OBJECT_MAGIC;
+    o->type = TYPE_FUNC;
+    o->u.fn = fn;
+    return o;
+}
+
+/* 调用已装箱的函数值：o 为 TYPE_FUNC 的 VusObject，args 为 VusString* 数组
+ * （槽0=返回值，槽1..N=参数），与用户函数 _args 约定一致。返回 args[0]。 */
+VusString* vus_object_func_call(VusObject* o, VusString** args) {
+    if (!o || o->type != TYPE_FUNC || !o->u.fn) return NULL;
+    o->u.fn(args);
+    return args[0];
 }
 
 static VusString* vus_json_number_to_string(double d) {

@@ -186,6 +186,27 @@ public final class VuaBridge {
             if (api.startsWith("ext.")) {
                 return ExtensionLoader.dispatch(api.substring(4), a);
             }
+            // 热更协议：应用含新 .so/.vua/.dex 的更新包（UpdateManager.applyUpdate）。
+            // vars: {"url":"<manifest.json 地址>"}，返回 data: 0=已应用 1=无更新 -1=宿主过低 -2=失败。
+            if ("hotupdate.apply".equals(api)) {
+                final String url = a.optString("url");
+                final int[] rc = new int[1];
+                final Throwable[] terr = new Throwable[1];
+                Runnable job = () -> {
+                    try { rc[0] = UpdateManager.applyUpdate(url); }
+                    catch (Throwable t) { terr[0] = t; }
+                };
+                if (!isMainThread()) {
+                    job.run();
+                } else {
+                    final CountDownLatch latch = new CountDownLatch(1);
+                    new Thread(() -> { job.run(); latch.countDown(); }).start();
+                    try { latch.await(200L, TimeUnit.SECONDS); }
+                    catch (InterruptedException e) { return err("更新请求超时"); }
+                }
+                if (terr[0] != null) return err(String.valueOf(terr[0]));
+                return ok(String.valueOf(rc[0]));
+            }
             return err("未知能力: " + api);
         } catch (Exception e) {
             return err(String.valueOf(e));

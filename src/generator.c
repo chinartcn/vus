@@ -327,6 +327,13 @@ static void gen_globals_walk_stmt(VusAstNode *node, GenBuf *gl) {
     case VUS_AST_ASSIGN:
         gen_globals_declare_name(((VusAstAssign *)node)->target, gl);
         break;
+    case VUS_AST_MULTI_ASSIGN: {
+        VusAstMultiAssign *ma = (VusAstMultiAssign *)node;
+        if (ma->targets)
+            for (size_t i = 0; i < ma->targets->count; i++)
+                gen_globals_declare_name(((VusAstIdentifier *)ma->targets->items[i])->name, gl);
+        break;
+    }
     case VUS_AST_GLOBAL_DECL:
         gen_globals_declare_name(((VusAstGlobalDecl *)node)->name, gl);
         break;
@@ -812,6 +819,49 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
             return result;
         }
         return strdup("vus_print(vus_string_new(\"\"))");
+    }
+
+    /* ============= 函数一等公民 =============
+     * 函数值(函数名)  → 返回装箱的 VusObject(TYPE_FUNC)，作为可传递/可调用的函数值。
+     * 调用(函数值, 实参...)  → 解包函数值并调用，返回其返回值。 */
+    if (strcmp(call->func_name, "函数值") == 0) {
+        if (call->args && call->args->count == 1 &&
+            call->args->items[0]->type == VUS_AST_IDENTIFIER) {
+            VusAstIdentifier *fid = (VusAstIdentifier *)call->args->items[0];
+            char fs[256];
+            gen_sanitize_name(fid->name, fs, sizeof(fs));
+            char *r = (char *)malloc(strlen(fs) + 128);
+            snprintf(r, strlen(fs) + 128,
+                "({VusObject* _fv = vus_object_func((void(*)(void*))vus_%s); (VusString*)_fv;})", fs);
+            return r;
+        }
+        return strdup("vus_string_new(\"\")");
+    }
+    if (strcmp(call->func_name, "调用") == 0 || strcmp(call->func_name, "调用函数") == 0) {
+        /* 调用(函数值, 实参...) ：函数值是 args[0]，实参 args[1..] */
+        size_t nargs = call->args ? call->args->count : 0;
+        if (nargs < 1) return strdup("vus_string_new(\"\")");
+        char *fval = gen_expr(buf, call->args->items[0]);
+        char **arg_exprs = NULL;
+        size_t nparams = nargs - 1;
+        if (nparams > 0) {
+            arg_exprs = (char **)calloc(nparams, sizeof(char *));
+            for (size_t i = 0; i < nparams; i++)
+                arg_exprs[i] = gen_expr(buf, call->args->items[i + 1]);
+        }
+        char args_buf[4096] = {0};
+        size_t pos = 0;
+        pos += snprintf(args_buf + pos, sizeof(args_buf) - pos,
+            "({VusString* _vus_args[%zu];_vus_args[0]=NULL;", nparams + 1);
+        for (size_t i = 0; i < nparams; i++)
+            pos += snprintf(args_buf + pos, sizeof(args_buf) - pos,
+                "_vus_args[%zu]=%s;", i + 1, arg_exprs[i]);
+        pos += snprintf(args_buf + pos, sizeof(args_buf) - pos,
+            "VusObject* _fvx = (VusObject*)(%s); vus_object_func_call(_fvx, _vus_args); _vus_args[0];})", fval);
+        for (size_t i = 0; i < nparams; i++) free(arg_exprs[i]);
+        if (arg_exprs) free(arg_exprs);
+        free(fval);
+        return strdup(args_buf);
     }
 
     /* ============= VUA 界面内建（Android 组件流，rt/vua.c） =============
@@ -2170,6 +2220,17 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
         }
     }
 
+    /* ============= 热更协议（仅 APK）：应用含新 .so/.vua/.dex 的更新包 ============= */
+    if (strcmp(call->func_name, "热更_应用") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *url = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_hotupdate_apply(%s)", url);
+            free(url);
+            return strdup(result);
+        }
+    }
+
     /* ============= 文件操作内置函数 ============= */
     if (strcmp(call->func_name, "文件_读取") == 0) {
         if (call->args && call->args->count >= 1) {
@@ -2520,6 +2581,18 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
         }
         return strdup("vus_string_new(\"\")");
     }
+    /* 字典_项(字典)：返回所有键值对组成的列表，每个元素是「[键, 值]」双元素列表。
+     * 可配合「循环 对 在 字典_项(字典)」同时遍历键与值。 */
+    if (strcmp(call->func_name, "字典_项") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_dict_items(%s)", a);
+            free(a);
+            return strdup(result);
+        }
+        return strdup("vus_dict_items(vus_dict_create())");
+    }
 
     /* 普通函数调用 */
     char san[256];
@@ -2732,14 +2805,24 @@ static char *gen_expr(GenBuf *buf, VusAstNode *node) {
         case VUS_AST_CORO_YIELD: {
             return strdup("(vus_coro_yield(), NULL)");
         }
+        case VUS_AST_AWAIT: {
+            VusAstAwait *aw = (VusAstAwait *)node;
+            char *coro = gen_expr(buf, aw->coro);
+            char result[1024];
+            snprintf(result, sizeof(result), "vus_coro_await_handle(%s)", coro);
+            free(coro);
+            return strdup(result);
+        }
         case VUS_AST_SUBSCRIPT: {
             VusAstSubscript *sub = (VusAstSubscript *)node;
             char *obj = gen_expr(buf, sub->object);
             char *idx = gen_expr(buf, sub->index);
-            /* 生成 vus_list_get / vus_list_set 调用 */
+            /* 用 vus_list_unwrap 解包：兼容 VusObject*(TYPE_LIST) 装箱与裸 VusList*。
+             * 若直接强转 (VusList*)，对装箱列表会把 magic/type 当 len/items 读，
+             * 下标访问越界。与「列表_取」内建同一解包风格。 */
             char result[4096];
             snprintf(result, sizeof(result),
-                "vus_list_get((VusList*)(%s), vus_to_int(%s, &_err))",
+                "vus_list_get(vus_list_unwrap((void*)(%s)), vus_to_int(%s, &_err))",
                 obj, idx);
             free(obj);
             free(idx);
@@ -2902,10 +2985,18 @@ static void gen_stmt_for_each(GenBuf *buf, VusAstForEach *fe) {
     gen_emit_linef(buf, "{");
     buf->indent++;
     gen_emit_linef(buf, "VusString* vus_%s = NULL;", san);
-    gen_emit_linef(buf, "VusList* _list = vus_is_object((void*)(%s)) ? ((VusObject*)(void*)(%s))->u.list : (VusList*)(%s);", iter, iter, iter);
-    gen_emit_linef(buf, "for (int _i = 0; _i < vus_list_len(_list); _i++) {", iter);
+    /* 先对可迭代对象求值一次，再按容器类型分派：
+     *  - 字典容器(VusObject* TYPE_DICT)：vus_dict_keys_of 取键列表遍历（键），
+     *    返回的键列表为本函数新建，循环结束须 vus_unref 归还；
+     *  - 列表容器(TYPE_LIST) / 裸 VusList*：沿用既有列表遍历（零额外开销）。 */
+    gen_emit_linef(buf, "void* _it = (void*)(%s);", iter);
+    gen_emit_linef(buf,
+        "VusList* _kl = (vus_is_object(_it) && ((VusObject*)_it)->type == TYPE_DICT) ? vus_dict_keys_of(_it) : NULL;");
+    gen_emit_linef(buf,
+        "VusList* _list = _kl ? _kl : (vus_is_object(_it) ? ((VusObject*)_it)->u.list : (VusList*)_it);");
+    gen_emit_linef(buf, "for (int _i = 0; _i < vus_list_len(_list); _i++) {");
     buf->indent++;
-    /* 取一次列表元素：vus_var_set 交接新旧引用 */
+    /* 取一次元素：vus_var_set 交接新旧引用 */
     gen_emit_linef(buf, "{ VusString* _tmp = (VusString*)vus_list_get(_list, _i); vus_var_set(&vus_%s, _tmp); }", san);
 
     if (fe->body) {
@@ -2916,6 +3007,8 @@ static void gen_stmt_for_each(GenBuf *buf, VusAstForEach *fe) {
 
     buf->indent--;
     gen_emit_line(buf, "}");
+    /* 字典分支：归还 keys_of 新建的键列表（含其键副本引用） */
+    gen_emit_line(buf, "if (_kl) vus_unref((void*)_kl);");
     buf->indent--;
     gen_emit_line(buf, "}");
 
@@ -2952,6 +3045,67 @@ static void gen_stmt_return(GenBuf *buf, VusAstReturn *ret) {
         gen_emit_line(buf, "vus_stack_pop();");
         gen_emit_line(buf, ret_stmt);
     }
+}
+
+/* 多返回值：返回 a, b, c → 打包成列表对象放入 _vus_args[0]。
+ * 调用侧多目标赋值（VUS_AST_MULTI_ASSIGN）再从列表拆包。 */
+static void gen_stmt_return_multi(GenBuf *buf, VusAstReturnMulti *ret) {
+    const char *ret_stmt = s_gen_in_main ? "return 0;" : "return;";
+    /* 构造 VusObject(TYPE_LIST) 并 append 每个返回值 */
+    char *tmp = strdup("({VusObject* _o = vus_object_list();");
+    if (!tmp) return;
+    if (ret->values) {
+        for (size_t i = 0; i < ret->values->count; i++) {
+            char *e = gen_expr(buf, ret->values->items[i]);
+            char *n2 = NULL;
+            if (asprintf(&n2, "vus_list_append(_o->u.list, (void*)(%s));", e) < 0) { n2 = NULL; }
+            free(e);
+            if (!n2) { continue; }
+            char *n3 = NULL;
+            if (asprintf(&n3, "%s%s", tmp, n2) < 0) { n3 = NULL; }
+            free(n2);
+            char *old = tmp;
+            if (n3) tmp = n3; else tmp = NULL;
+            free(old);
+            if (!tmp) { return; }
+        }
+    }
+    {
+        char *tail = NULL;
+        if (asprintf(&tail, "%s(VusString*)_o;})", tmp) < 0) { tail = NULL; }
+        free(tmp);
+        if (!tail) { return; }
+        gen_emit_linef(buf, "vus_var_set(&((VusString**)_args)[0], %s);", tail);
+        free(tail);
+    }
+    gen_emit_line(buf, "vus_stack_pop();");
+    gen_emit_line(buf, ret_stmt);
+}
+
+/* 多目标赋值：a, b = 函数() → 右侧求值得到列表，逐项拆包赋值。 */
+static void gen_stmt_multi_assign(GenBuf *buf, VusAstMultiAssign *assign) {
+    char *val = gen_expr(buf, assign->value);
+    int n = assign->targets ? (int)assign->targets->count : 0;
+    /* 用一个临时变量持有函数返回的列表对象，避免多次求值调用 */
+    gen_emit_line(buf, "{");
+    buf->indent++;
+    gen_emit_linef(buf, "VusObject* _mret = (vus_is_object((void*)(%s))) ? (VusObject*)(%s) : NULL;", val, val);
+    if (n > 0) {
+        for (int i = 0; i < n; i++) {
+            VusAstIdentifier *idn = (VusAstIdentifier*)assign->targets->items[i];
+            char san[256];
+            gen_sanitize_name(idn->name, san, sizeof(san));
+            gen_emit_linef(buf, "VusString* _mval%d = (_mret && _mret->type==TYPE_LIST && _mret->u.list && vus_list_len(_mret->u.list) > %d) ? (VusString*)vus_list_get(_mret->u.list, %d) : NULL;",
+                i, i, i);
+            gen_emit_linef(buf, "vus_ref(_mval%d);", i);
+            gen_emit_linef(buf, "vus_var_set(&vus_%s, _mval%d);", san, i);
+            gen_emit_linef(buf, "vus_unref(_mval%d);", i);
+        }
+    }
+    gen_emit_line(buf, "vus_unref(_mret);");
+    buf->indent--;
+    gen_emit_line(buf, "}");
+    free(val);
 }
 
 static void gen_stmt_break(GenBuf *buf) {
@@ -3085,6 +3239,12 @@ static void gen_statement(GenBuf *buf, VusAstNode *node) {
         case VUS_AST_RETURN:
             gen_stmt_return(buf, (VusAstReturn *)node);
             break;
+        case VUS_AST_RETURN_MULTI:
+            gen_stmt_return_multi(buf, (VusAstReturnMulti *)node);
+            break;
+        case VUS_AST_MULTI_ASSIGN:
+            gen_stmt_multi_assign(buf, (VusAstMultiAssign *)node);
+            break;
         case VUS_AST_BREAK:
             gen_stmt_break(buf);
             break;
@@ -3145,6 +3305,20 @@ static void gen_collect_locals(VusAstFunctionDef *func, VusAstNode *node, VusAst
             }
             VusAstIdentifier *id = vus_ast_ident_new(assign->target, 0, 0);
             vus_ast_list_push(locals, (VusAstNode *)id);
+        }
+    } else if (node->type == VUS_AST_MULTI_ASSIGN) {
+        VusAstMultiAssign *ma = (VusAstMultiAssign *)node;
+        if (ma->is_local && ma->targets) {
+            for (size_t i = 0; i < ma->targets->count; i++) {
+                VusAstIdentifier *idn = (VusAstIdentifier *)ma->targets->items[i];
+                if (gen_is_param_name(func, idn->name) || gen_is_global_name(idn->name)) continue;
+                int found = 0;
+                for (size_t j = 0; j < locals->count; j++) {
+                    VusAstIdentifier *id = (VusAstIdentifier *)locals->items[j];
+                    if (strcmp(id->name, idn->name) == 0) { found = 1; break; }
+                }
+                if (!found) vus_ast_list_push(locals, (VusAstNode *)vus_ast_ident_new(idn->name, 0, 0));
+            }
         }
     } else if (node->type == VUS_AST_IF) {
         VusAstIf *ifn = (VusAstIf *)node;
@@ -3497,6 +3671,7 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config) {
     gen_emit(buf, "    _VusThreadTask* _task = (_VusThreadTask*)_arg;\n");
     gen_emit(buf, "    VusString* _vus_args[2] = {NULL, (VusString*)_task->arg};\n");
     gen_emit(buf, "    _task->func(_vus_args);\n");
+    gen_emit(buf, "    vus_coro_store_result(_vus_args[0]);\n");
     gen_emit(buf, "    return _vus_args[0];\n");
     gen_emit(buf, "}\n\n");
 

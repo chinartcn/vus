@@ -10,6 +10,7 @@
 
 #define _GNU_SOURCE
 #include "parser.h"
+#include "lexer.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -813,17 +814,31 @@ static VusAstNode *parse_return_stmt(VusParser *parser) {
     int col = keyword->column;
     parser_advance(parser);
 
-    VusAstNode *value = NULL;
-
     /* 检查是否返回值（后面不是 NEWLINE/INDENT/DEDENT/EOF 时） */
     VusToken *next = parser_peek(parser);
     if (next && next->type != VUS_TOKEN_NEWLINE && next->type != VUS_TOKEN_INDENT &&
         next->type != VUS_TOKEN_DEDENT && next->type != VUS_TOKEN_EOF) {
-        value = parse_expr(parser);
-        if (!value) return NULL;
+        /* 多返回值：返回 1, 2, 3 */
+        VusAstNode *first = parse_expr(parser);
+        if (!first) return NULL;
+
+        if (parser_peek(parser) && parser_peek(parser)->type == VUS_TOKEN_COMMA) {
+            VusAstList *values = vus_ast_list_new();
+            if (!values) { vus_ast_node_free(first); return NULL; }
+            vus_ast_list_push(values, first);
+            while (parser_peek(parser) && parser_peek(parser)->type == VUS_TOKEN_COMMA) {
+                parser_advance(parser); /* 跳过逗号 */
+                VusAstNode *v = parse_expr(parser);
+                if (!v) { vus_ast_list_free(values); return NULL; }
+                vus_ast_list_push(values, v);
+            }
+            return (VusAstNode*)vus_ast_return_multi_new(values, line, col);
+        }
+
+        return (VusAstNode*)vus_ast_return_new(first, line, col);
     }
 
-    return (VusAstNode*)vus_ast_return_new(value, line, col);
+    return (VusAstNode*)vus_ast_return_new(NULL, line, col);
 }
 
 /* ==================================================================
@@ -1068,14 +1083,67 @@ static VusAstNode *parse_struct_def(VusParser *parser) {
 /* ==================================================================
  * 赋值或表达式语句解析
  * ================================================================== */
+/* 复合赋值 token → 对应二元运算符串（a op= b ≡ a = a op b） */
+static const char *assign_op_for(VusTokenType t) {
+    switch (t) {
+        case VUS_TOKEN_ADD_ASSIGN:    return "+";
+        case VUS_TOKEN_SUB_ASSIGN:    return "-";
+        case VUS_TOKEN_MUL_ASSIGN:    return "*";
+        case VUS_TOKEN_DIV_ASSIGN:    return "/";
+        case VUS_TOKEN_MOD_ASSIGN:    return "%";
+        case VUS_TOKEN_CONCAT_ASSIGN: return "..";
+        default: return NULL;
+    }
+}
+
 static VusAstNode *parse_assign_or_expr(VusParser *parser) {
     VusToken *token = parser_peek(parser);
     if (!token) return NULL;
 
-    /* 检查是否为赋值语句：identifier = expr 或 identifier : type = expr */
+    /* 多目标赋值：a, b = 函数() 或 a, b, c = 列表
+     * 需至少两个逗号分隔标识符，随后是 =（复合赋值不适用多目标）。 */
+    if (token->type == VUS_TOKEN_IDENTIFIER && parser_peek_next(parser) &&
+        parser_peek_next(parser)->type == VUS_TOKEN_COMMA) {
+        /* 尝试前瞻：identifier (, identifier)* = */
+        VusParser saved = *parser;
+        VusAstList *targets = vus_ast_list_new();
+        int ok = 1;
+        while (1) {
+            VusToken *t = parser_peek(parser);
+            if (!t || t->type != VUS_TOKEN_IDENTIFIER) { ok = 0; break; }
+            char *nm = strndup(t->start, t->length);
+            int ln = t->line, cl = t->column;
+            parser_advance(parser);
+            VusAstNode *idn = (VusAstNode*)vus_ast_ident_new(nm, ln, cl);
+            free(nm);
+            if (!idn) { ok = 0; break; }
+            vus_ast_list_push(targets, idn);
+            VusToken *nxt = parser_peek(parser);
+            if (nxt && nxt->type == VUS_TOKEN_COMMA) { parser_advance(parser); continue; }
+            break;
+        }
+        if (ok && parser_peek(parser) && parser_peek(parser)->type == VUS_TOKEN_ASSIGN) {
+            parser_advance(parser);
+            VusAstNode *value = parse_expr(parser);
+            if (!value) { vus_ast_list_free(targets); return NULL; }
+            VusAstMultiAssign *node;
+            if (parser->in_function) node = vus_ast_multi_assign_local_new(targets, value, token->line, token->column);
+            else node = vus_ast_multi_assign_new(targets, value, token->line, token->column);
+            if (!node) { vus_ast_node_free(value); vus_ast_list_free(targets); return NULL; }
+            return (VusAstNode*)node;
+        }
+        /* 回退 */
+        vus_ast_list_free(targets);
+        *parser = saved;
+    }
+
+    /* 检查是否为赋值语句：identifier = expr、identifier : type = expr，
+     * 或复合赋值 identifier op= expr */
     if (token->type == VUS_TOKEN_IDENTIFIER) {
         VusToken *next = parser_peek_next(parser);
-        if (next && (next->type == VUS_TOKEN_ASSIGN || next->type == VUS_TOKEN_COLON)) {
+        const char *cop = next ? assign_op_for(next->type) : NULL;
+        if (next && (next->type == VUS_TOKEN_ASSIGN ||
+                     next->type == VUS_TOKEN_COLON || cop)) {
             /* 赋值语句 */
             VusToken *id_token = parser_peek(parser);
             char *target = strndup(id_token->start, id_token->length);
@@ -1083,8 +1151,9 @@ static VusAstNode *parse_assign_or_expr(VusParser *parser) {
             int col = id_token->column;
             parser_advance(parser);
             char *type_ann = NULL;
+            VusAstNode *value = NULL;
 
-            if (parser_match(parser, VUS_TOKEN_COLON)) {
+            if (parser_peek(parser)->type == VUS_TOKEN_COLON) {
                 /* 类型注解 */
                 VusToken *type_token = parser_expect(parser, VUS_TOKEN_IDENTIFIER);
                 if (!type_token) { free(target); return NULL; }
@@ -1092,14 +1161,24 @@ static VusAstNode *parse_assign_or_expr(VusParser *parser) {
 
                 parser_expect(parser, VUS_TOKEN_ASSIGN);
                 if (parser->error) { free(target); free(type_ann); return NULL; }
+                value = parse_expr(parser);
+                if (!value) { free(target); free(type_ann); return NULL; }
+            } else if (parser_peek(parser)->type == VUS_TOKEN_ASSIGN) {
+                parser_advance(parser);
+                value = parse_expr(parser);
+                if (!value) { free(target); return NULL; }
+            } else if (assign_op_for(parser_peek(parser)->type)) {
+                /* 复合赋值：a op= b → a = a op b（左侧为标识符，无副作用，安全） */
+                const char *op = assign_op_for(parser_peek(parser)->type);
+                parser_advance(parser);
+                VusAstNode *rhs = parse_expr(parser);
+                if (!rhs) { free(target); return NULL; }
+                VusAstNode *idn = (VusAstNode*)vus_ast_ident_new(target, line, col);
+                value = (VusAstNode*)vus_ast_binary_new(op, idn, rhs, line, col);
             } else {
-                /* 无类型注解，直接消耗赋值号 */
-                parser_expect(parser, VUS_TOKEN_ASSIGN);
-                if (parser->error) { free(target); return NULL; }
+                free(target);
+                return (VusAstNode*)parse_expr(parser);
             }
-
-            VusAstNode *value = parse_expr(parser);
-            if (!value) { free(target); free(type_ann); return NULL; }
 
             VusAstAssign *node;
             if (parser->in_function) {
@@ -1409,6 +1488,118 @@ static VusAstNode *parse_multiplicative(VusParser *parser) {
 /*
  * unary → ("-"|"not"|"非"|"!"|"~") unary | primary
  */
+
+/* 递归解析一个插值表达式子串（由 lexer 分出 token，独立 parser 求 expr）。
+ * 返回 AST 表达式节点，归属外层 AST；出错或子串为空返回 NULL。 */
+static char g_fs_err[256];
+static VusAstNode *parse_fstring_expr(VusParser *parser, const char *src, int line, int col) {
+    g_fs_err[0] = '\0';
+    if (!src || !src[0]) {
+        snprintf(g_fs_err, sizeof(g_fs_err), "插值为空");
+        return NULL;
+    }
+    size_t cnt = 0;
+    VusLexer *L = vus_lexer_new(src, (size_t)strlen(src));
+    if (!L) { snprintf(g_fs_err, sizeof(g_fs_err), "插值词法器分配失败"); return NULL; }
+    VusToken *ts = vus_lexer_tokenize(L, &cnt);
+    if (!ts || vus_lexer_error(L)) {
+        snprintf(g_fs_err, sizeof(g_fs_err), "插值词法: %s", vus_lexer_error(L) ? vus_lexer_error(L) : "失败");
+        vus_lexer_free(L);
+        return NULL;
+    }
+    VusParser *sub = vus_parser_new(ts, cnt);
+    if (!sub) { vus_lexer_free_tokens(ts, cnt); vus_lexer_free(L); snprintf(g_fs_err, sizeof(g_fs_err), "子解析器分配失败"); return NULL; }
+    VusAstNode *e = parse_expr(sub);
+    if (!e || sub->error) {
+        if (sub->error_msg[0]) snprintf(g_fs_err, sizeof(g_fs_err), "插值语法: %s", sub->error_msg);
+        else snprintf(g_fs_err, sizeof(g_fs_err), "插值无结果");
+        vus_parser_free(sub);
+        vus_lexer_free_tokens(ts, cnt);
+        vus_lexer_free(L);
+        return NULL;
+    }
+    vus_parser_free(sub);
+    vus_lexer_free_tokens(ts, cnt);
+    vus_lexer_free(L);
+    return e;
+}
+
+/* 把 f"..." 的已解码 value 拆成 文本段 + {插值} 段，串成 ".." 拼接链。
+ * 相邻文本/插值依次作为 ".." 的右操作数。
+ * `{{` 折叠为字面 `{`，`}}` 折叠为字面 `}`（不触发插值的转义写法）。 */
+static VusAstNode *parse_fstring(VusParser *parser, const char *value, int line, int col) {
+    const char *p = value ? value : "";
+    VusAstNode *result = NULL;
+
+    for (;;) {
+        const char *lb = strchr(p, '{');
+        if (lb) {
+            /* 文本段 [p, lb)：先折叠 `}}` 为字面 `}` 后拼接 */
+            for (const char *q = p; q < lb;) {
+                if (q + 1 < lb && q[0] == '}' && q[1] == '}') {
+                    VusAstNode *t = (VusAstNode*)vus_ast_string_new("}", line, col);
+                    if (result) result = (VusAstNode*)vus_ast_binary_new("..", result, t, line, col);
+                    else result = t;
+                    q += 2;
+                } else {
+                    const char *n = memchr(q, '}', (size_t)(lb - q));
+                    size_t seglen = n ? (size_t)(n - q) : (size_t)(lb - q);
+                    char *seg = strndup(q, seglen);
+                    VusAstNode *t = (VusAstNode*)vus_ast_string_new(seg, line, col);
+                    free(seg);
+                    if (result) result = (VusAstNode*)vus_ast_binary_new("..", result, t, line, col);
+                    else result = t;
+                    q = n ? n : lb;
+                }
+            }
+            /* `{{` 折叠为字面 `{`，跳过，不进入插值态 */
+            if (lb[1] == '{') {
+                VusAstNode *t = (VusAstNode*)vus_ast_string_new("{", line, col);
+                if (result) result = (VusAstNode*)vus_ast_binary_new("..", result, t, line, col);
+                else result = t;
+                p = lb + 2;
+                continue;
+            }
+            /* 插值段 {..} */
+            const char *rb = strchr(lb + 1, '}');
+            if (!rb) {
+                parser_set_error(parser, "插值串缺少右花括号 '}'");
+                return result;
+            }
+            char *expr = strndup(lb + 1, (size_t)(rb - lb - 1));
+            VusAstNode *ie = parse_fstring_expr(parser, expr, line, col);
+            free(expr);
+            if (!ie) {
+                parser_set_error(parser, g_fs_err[0] ? g_fs_err : "插值表达式解析失败");
+                return result;
+            }
+            if (result) result = (VusAstNode*)vus_ast_binary_new("..", result, ie, line, col);
+            else result = ie;
+            p = rb + 1;
+        } else {
+            /* 剩余全为文本：直接折叠 `}}` 为 `}` 后拼接 */
+            const char *q = p;
+            while (*q) {
+                if (q[0] == '}' && q[1] == '}') {
+                    VusAstNode *t = (VusAstNode*)vus_ast_string_new("}", line, col);
+                    if (result) result = (VusAstNode*)vus_ast_binary_new("..", result, t, line, col);
+                    else result = t;
+                    q += 2;
+                } else {
+                    VusAstNode *t = (VusAstNode*)vus_ast_string_new(q, line, col);
+                    if (result) result = (VusAstNode*)vus_ast_binary_new("..", result, t, line, col);
+                    else result = t;
+                    break;
+                }
+            }
+            break;
+        }
+    }
+
+    if (!result) return (VusAstNode*)vus_ast_string_new("", line, col);
+    return result;
+}
+
 static VusAstNode *parse_unary(VusParser *parser) {
     VusToken *token = parser_peek(parser);
     if (!token) return NULL;
@@ -1445,6 +1636,16 @@ static VusAstNode *parse_primary(VusParser *parser) {
     }
 
     switch (token->type) {
+        case VUS_TOKEN_FSTRING: {
+            /* f"文本{表达式}..."：拆段并串成 ".." 拼接链 */
+            char *val = strdup(token->value);
+            int fl = token->line, fc = token->column;
+            parser_advance(parser);
+            VusAstNode *node = parse_fstring(parser, val, fl, fc);
+            free(val);
+            if (parser->error || !node) return NULL;
+            return node;
+        }
         case VUS_TOKEN_IDENTIFIER: {
             parser_advance(parser);
             char *name = strndup(token->start, token->length);
@@ -1782,6 +1983,22 @@ static VusAstNode *parse_primary(VusParser *parser) {
             VusAstList *args = vus_ast_list_new();
             vus_ast_list_push(args, ms);
             return (VusAstNode*)vus_ast_call_new("睡眠", args, NULL, kw_line, kw_col);
+        }
+
+        case VUS_TOKEN_CN_AWAIT: {
+            /* 等待(协程句柄) — 驱动协程到完成并取回结果 → VUS_AST_AWAIT */
+            int kw_line = token->line;
+            int kw_col = token->column;
+            parser_advance(parser); /* 消耗 等待 */
+
+            parser_expect(parser, VUS_TOKEN_LPAREN);
+            if (parser->error) return NULL;
+            VusAstNode *coro = parse_expr(parser);
+            if (!coro) return NULL;
+            parser_expect(parser, VUS_TOKEN_RPAREN);
+            if (parser->error) { vus_ast_node_free(coro); return NULL; }
+
+            return (VusAstNode*)vus_ast_await_new(coro, kw_line, kw_col);
         }
 
         default:

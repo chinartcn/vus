@@ -26,6 +26,8 @@ typedef enum {
     VUS_AST_IMPORT,
     VUS_AST_FROM_IMPORT,
     VUS_AST_RETURN,
+    VUS_AST_RETURN_MULTI,
+    VUS_AST_MULTI_ASSIGN,
     VUS_AST_BREAK,
     VUS_AST_CONTINUE,
     VUS_AST_GLOBAL_DECL,
@@ -54,6 +56,7 @@ typedef enum {
     VUS_AST_CORO_CREATE,
     VUS_AST_CORO_RESUME,
     VUS_AST_CORO_YIELD,
+    VUS_AST_AWAIT,
 
     /* 下标访问 */
     VUS_AST_SUBSCRIPT,
@@ -186,6 +189,24 @@ typedef struct {
     int            column;
     VusAstNode    *value;       /* 可为 NULL */
 } VusAstReturn;
+
+/* ReturnMulti — 多返回值语句：返回 1, 2, 3（值打包为列表） */
+typedef struct {
+    VusAstNodeType type;   /* VUS_AST_RETURN_MULTI */
+    int            line;
+    int            column;
+    VusAstList    *values;   /* 返回表达式列表 */
+} VusAstReturnMulti;
+
+/* MultiAssign — 多目标赋值：a, b = 函数()（从列表拆包） */
+typedef struct {
+    VusAstNodeType type;   /* VUS_AST_MULTI_ASSIGN */
+    int            line;
+    int            column;
+    VusAstList    *targets;  /* 左侧目标（VusAstIdentifier 节点） */
+    VusAstNode    *value;    /* 右侧表达式（通常为函数调用，返回列表） */
+    int            is_local; /* 1=函数内局部变量, 0=全局变量 */
+} VusAstMultiAssign;
 
 /* Assign — 赋值语句 */
 typedef struct {
@@ -385,6 +406,14 @@ typedef struct {
     int            column;
 } VusAstCoroYield;
 
+/* Await — 等待协程完成并取回结果：等待(协程句柄) */
+typedef struct {
+    VusAstNodeType type;   /* VUS_AST_AWAIT */
+    int            line;
+    int            column;
+    VusAstNode    *coro;   /* 协程句柄表达式 */
+} VusAstAwait;
+
 /* ============ 下标访问节点类型 ============ */
 
 /* Subscript — 下标访问，如 list[0] 或 dict["key"] */
@@ -408,6 +437,9 @@ VusAstForEach    *vus_ast_for_each_new(const char *var, VusAstNode *iter, VusAst
 VusAstWhile      *vus_ast_while_new(VusAstNode *cond, VusAstList *body, int line, int col);
 VusAstTry        *vus_ast_try_new(VusAstList *try_body, int line, int col);
 VusAstReturn     *vus_ast_return_new(VusAstNode *val, int line, int col);
+VusAstReturnMulti *vus_ast_return_multi_new(VusAstList *values, int line, int col);
+VusAstMultiAssign *vus_ast_multi_assign_new(VusAstList *targets, VusAstNode *val, int line, int col);
+VusAstMultiAssign *vus_ast_multi_assign_local_new(VusAstList *targets, VusAstNode *val, int line, int col);
 VusAstAssign     *vus_ast_assign_new(const char *target, const char *type_ann, VusAstNode *val, int line, int col);
 VusAstAssign     *vus_ast_assign_local_new(const char *target, const char *type_ann, VusAstNode *val, int line, int col);
 VusAstExprStmt   *vus_ast_expr_stmt_new(VusAstNode *expr, int line, int col);
@@ -432,6 +464,7 @@ VusAstThreadJoin   *vus_ast_thread_join_new(VusAstNode *thread, int line, int co
 VusAstCoroCreate   *vus_ast_coro_create_new(VusAstNode *func, VusAstNode *arg, int line, int col);
 VusAstCoroResume   *vus_ast_coro_resume_new(VusAstNode *coro, int line, int col);
 VusAstCoroYield    *vus_ast_coro_yield_new(int line, int col);
+VusAstAwait        *vus_ast_await_new(VusAstNode *coro, int line, int col);
 
 /* 下标访问节点创建函数 */
 VusAstSubscript   *vus_ast_subscript_new(VusAstNode *obj, VusAstNode *idx, int line, int col);
