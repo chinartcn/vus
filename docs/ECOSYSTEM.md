@@ -232,7 +232,7 @@ typedef struct VusLangPlugin {
 
 ### 4.2 网络 — 基于 libcurl（可选）
 
-> **依赖标注**：依赖编译期宏 `VUS_HAVE_CURL` 及 `-lcurl`（系统需安装 `libcurl-dev`）。未定义 `VUS_HAVE_CURL` 时，以下函数为空实现（返回错误消息，不发送请求）。
+> **依赖标注**：桌面优先编译期宏 `VUS_HAVE_CURL` + `-lcurl`（系统需安装 `libcurl-dev`）；未定义 `VUS_HAVE_CURL` 时自动回退系统 `curl` 命令（需 PATH 中有 curl），能力不降级；APK 走 Java 平台桥。
 
 | 函数 | 运行时 | 说明 |
 |------|--------|------|

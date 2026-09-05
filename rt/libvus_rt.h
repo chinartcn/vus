@@ -158,11 +158,16 @@ struct VusError {
     int code;
     int line;
     const char* func;
+    const char* type;   // 异常类型名（如 值错误/网络错误；无类型时默认 "错误"）
     const char* msg;
     VusError* next;   // 错误链（最新错误在链头）
 };
 
 VusError* vus_error_new(int code, const char* msg, int line, const char* func);
+/* 带类型的异常：type 为异常类型名（NULL 记默认 "错误"）；旧 vus_error_new 等价于 type="错误" */
+VusError* vus_error_new_typed(int code, const char* type, const char* msg, int line, const char* func);
+/* except 类型匹配：name == type 或 name == msg（兼容旧「消息即类型」用法）均命中 */
+int vus_error_matches(VusError* err, const char* name);
 void vus_error_push(VusError** chain, VusError* err);
 void vus_error_print(VusError* err);
 void vus_error_free(VusError* err);

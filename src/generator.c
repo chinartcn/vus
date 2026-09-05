@@ -4496,18 +4496,19 @@ static void gen_stmt_try(GenBuf *buf, VusAstTry *try_stmt) {
     if (try_stmt->except_bodies && try_stmt->except_bodies->count > 0) {
         gen_emit_line(buf, "if (_vus_err && !_vus_caught) {");
         buf->indent++;
-        /* 遍历所有 except 子句 */
+        /* 遍历所有 except 子句：链式 if/else if/else，每个 except 体不单独收尾，
+         * 由下一个 else 分支或循环后的收尾行闭合（修复多 except 时 } 错位关闭外层 if 的遗留 bug） */
         for (size_t i = 0; i < try_stmt->except_bodies->count; i++) {
             VusAstIdentifier *et = (VusAstIdentifier *)try_stmt->except_types->items[i];
             VusAstList *body = (VusAstList *)try_stmt->except_bodies->items[i];
             if (!body) continue;
 
             if (et && et->name && et->name[0]) {
-                /* 带类型匹配的 except */
+                /* 带类型匹配的 except：类型名 == err->type，或 == err->msg（兼容旧「消息即类型」） */
                 if (i == 0) {
-                    gen_emit_linef(buf, "if (strcmp(_vus_err->msg, \"%s\") == 0) {", et->name);
+                    gen_emit_linef(buf, "if (vus_error_matches(_vus_err, \"%s\")) {", et->name);
                 } else {
-                    gen_emit_linef(buf, "} else if (strcmp(_vus_err->msg, \"%s\") == 0) {", et->name);
+                    gen_emit_linef(buf, "} else if (vus_error_matches(_vus_err, \"%s\")) {", et->name);
                 }
             } else {
                 /* 通配 except（无类型或空类型名） */
@@ -4528,11 +4529,11 @@ static void gen_stmt_try(GenBuf *buf, VusAstTry *try_stmt) {
                 gen_statement(buf, body->items[j]);
             }
             scope_pop();
-            gen_emit_line(buf, "}");
             buf->indent--;
         }
+        gen_emit_line(buf, "}");   /* 闭合最后一个 except 块 */
         buf->indent--;
-        gen_emit_line(buf, "}");
+        gen_emit_line(buf, "}");   /* 闭合 if (_vus_err && !_vus_caught) */
         /* 如果所有 except 都不匹配，恢复错误 */
         gen_emit_line(buf, "if (!_vus_caught && _vus_err) {");
         buf->indent++;
@@ -4555,14 +4556,40 @@ static void gen_stmt_try(GenBuf *buf, VusAstTry *try_stmt) {
 }
 
 static void gen_stmt_throw(GenBuf *buf, VusAstThrow *thr) {
-    char *val = gen_expr(buf, thr->value);
-    gen_emit_linef(buf, "_vus_err = vus_error_new(1, vus_string_cstr(%s), __LINE__, __func__);", val);
-    /* 字面量来自驻留池（借用，不增计数），unref 会误释放池实例；仅释放新分配值 */
-    if (!(strncmp(val, "vus_literal(", 12) == 0 && val[strlen(val) - 1] == ')')) {
-        gen_emit_linef(buf, "vus_unref(%s);", val);
+    /* 抛出 [类型,] [消息]：etype 非空 → 带类型异常（vus_error_new_typed），否则默认类型"错误" */
+    if (thr->etype) {
+        char *et = NULL;
+        /* 类型名裸标识符 → 字符串字面量（非变量引用）；否则按表达式求值 */
+        if (thr->etype->type == VUS_AST_IDENTIFIER) {
+            char escaped[512];
+            gen_string_escape(((VusAstIdentifier *)thr->etype)->name, escaped, sizeof(escaped));
+            char tmp[640];
+            snprintf(tmp, sizeof(tmp), "vus_literal(\"%s\")", escaped);
+            et = strdup(tmp);
+        } else {
+            et = gen_expr(buf, thr->etype);
+        }
+        char *val = thr->value ? gen_expr(buf, thr->value) : strdup("vus_string_new(\"\")");
+        if (!val) val = strdup("vus_string_new(\"\")");
+        gen_emit_linef(buf, "_vus_err = vus_error_new_typed(1, vus_string_cstr(%s), vus_string_cstr(%s), __LINE__, __func__);",
+                       et, val);
+        /* 字面量来自驻留池（借用，不增计数），unref 会误释放池实例；仅释放新分配值 */
+        if (!(strncmp(et, "vus_literal(", 12) == 0 && et[strlen(et) - 1] == ')'))
+            gen_emit_linef(buf, "vus_unref(%s);", et);
+        if (!(strncmp(val, "vus_literal(", 12) == 0 && val[strlen(val) - 1] == ')'))
+            gen_emit_linef(buf, "vus_unref(%s);", val);
+        free(et);
+        free(val);
+    } else {
+        char *val = gen_expr(buf, thr->value);
+        gen_emit_linef(buf, "_vus_err = vus_error_new_typed(1, NULL, vus_string_cstr(%s), __LINE__, __func__);", val);
+        /* 字面量来自驻留池（借用，不增计数），unref 会误释放池实例；仅释放新分配值 */
+        if (!(strncmp(val, "vus_literal(", 12) == 0 && val[strlen(val) - 1] == ')')) {
+            gen_emit_linef(buf, "vus_unref(%s);", val);
+        }
+        free(val);
     }
     gen_emit_line(buf, "break;");
-    free(val);
 }
 
 static void gen_statement(GenBuf *buf, VusAstNode *node) {

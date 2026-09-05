@@ -984,15 +984,36 @@ static VusAstNode *parse_throw_stmt(VusParser *parser) {
     int col = keyword->column;
     parser_advance(parser);
 
-    VusAstNode *value = NULL;
+    VusAstNode *first = NULL;
     VusToken *next = parser_peek(parser);
     if (next && next->type != VUS_TOKEN_NEWLINE && next->type != VUS_TOKEN_INDENT &&
         next->type != VUS_TOKEN_DEDENT && next->type != VUS_TOKEN_EOF) {
-        value = parse_expr(parser);
-        if (!value) return NULL;
+        first = parse_expr(parser);
+        if (!first) return NULL;
     }
 
-    return (VusAstNode*)vus_ast_throw_new(value, line, col);
+    VusAstNode *etype = NULL;
+    VusAstNode *value = first;
+    /* 抛出 [类型,] [消息]：
+     * - 遇逗号 → 第一个表达式为异常类型、第二个为消息；
+     * - 单个裸标识符 → 视为异常类型（消息为空），如 抛出 网络错误；
+     * - 其它单表达式 → 消息（默认类型"错误"），如 抛出 "超时" / 抛出 变量消息。 */
+    if (parser_peek(parser) && parser_peek(parser)->type == VUS_TOKEN_COMMA) {
+        parser_advance(parser);
+        etype = first;
+        value = NULL;
+        VusToken *n2 = parser_peek(parser);
+        if (n2 && n2->type != VUS_TOKEN_NEWLINE && n2->type != VUS_TOKEN_INDENT &&
+            n2->type != VUS_TOKEN_DEDENT && n2->type != VUS_TOKEN_EOF) {
+            value = parse_expr(parser);
+            if (!value) { vus_ast_node_free(first); return NULL; }
+        }
+    } else if (first && first->type == VUS_AST_IDENTIFIER) {
+        etype = first;
+        value = NULL;
+    }
+
+    return (VusAstNode*)vus_ast_throw_new(value, etype, line, col);
 }
 
 static VusAstNode *parse_global_stmt(VusParser *parser) {

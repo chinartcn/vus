@@ -462,7 +462,7 @@ struct VusError {
 按功能分组，多以 `VusString*` 入出参返回 `"0"/"-1"`/数据：
 
 - **TUI**：`vus_plugin_tui_*`（ANSI 转义码，清屏/配色/定位/进度条/复位）。
-- **网络**：`vus_plugin_http_get/post/download`（`VUS_HAVE_CURL` 下用 libcurl，否则返回空串/`-1`）。
+- **网络**：`vus_plugin_http_get/post/download`（`VUS_HAVE_CURL` 下用 libcurl，否则回退系统 `curl` 命令；均不可用时返回空串/`-1`）。
 - **文件**：`vus_plugin_file_*`（读/写/追加/存在/删除/列表）。
 - **日期**：`vus_plugin_date_*`（now/format/parse/timestamp/年/月/日/时/分/秒）。
 - **插件调用**：
@@ -735,7 +735,7 @@ C 源码 → vus_compile_c（追加 .vusx 编译期插件的 .o 到 GCC 命令�
 4. **`vus_eval` 开销**：每次求值都启动一个子进程，且输出截断为 4096 字节，不适合高频/大数据量求值。
 5. **字典遍历缺失**：`VusDict` 无迭代 API（语言层无 `遍历字典` 语法）；语言层可经 `字典_键` 取键列表再逐个 `字典_取值`。JSON 生成已能正确序列化字典（yyjson）。
 6. **句柄表上限**：线程/协程句柄注册表各 64 槽，溢出返回 `"-1"` 并回收；长时间大量创建线程/协程可能触发上限。
-7. **网络依赖可选**：HTTP/TUI 中网络功能依赖 `VUS_HAVE_CURL`；未启用时相应内建返回空串/`-1`。
+7. **网络依赖可选**：HTTP 网络功能桌面优先 `VUS_HAVE_CURL`（libcurl），缺失时自动回退系统 `curl` 命令（需 PATH 中有 curl）；curl 也不可用才返回空串/`-1`。
 8. **嵌入式 Python 降级**：未定义 `VUS_USE_PY`（无 `python3-config` 或无 libpython）时，`vus_plugin_run_vux_inproc` 回退子进程、`vus_typeof` 恒返回 `"空"`；`JSON_*` 不依赖 Python（基于 yyjson，始终可用）。
 9. **GUI 画布流为自绘软件渲染**：`图形_*` 的画布流控件为软件绘制 + 命中矩形，不接入平台原生控件树；Linux 桌面需 X11 环境，Termux 需 `Termux_启动X11()`。
 10. **VUA 仅限 Android APK**：`.vua`/`界面_*` 组件解析流依赖 APK 壳的 Java 渲染器（`examples/vua-android`），桌面构建不包含该链路。

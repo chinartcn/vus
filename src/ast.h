@@ -323,7 +323,8 @@ typedef struct {
     VusAstNodeType type;   /* VUS_AST_THROW */
     int            line;
     int            column;
-    VusAstNode    *value;
+    VusAstNode    *value;   /* 消息表达式（可为 NULL） */
+    VusAstNode    *etype;   /* 异常类型名表达式（NULL=默认 "错误"），抛出 类型, 消息 时非空 */
 } VusAstThrow;
 
 typedef struct {
@@ -452,7 +453,7 @@ VusAstNumber     *vus_ast_number_new(const char *val, int is_float, int line, in
 VusAstBool       *vus_ast_bool_new(int val, int line, int col);
 VusAstNull       *vus_ast_null_new(int line, int col);
 VusAstBreak      *vus_ast_break_new(int line, int col);
-VusAstThrow      *vus_ast_throw_new(VusAstNode *val, int line, int col);
+VusAstThrow      *vus_ast_throw_new(VusAstNode *val, VusAstNode *etype, int line, int col);
 VusAstGlobalDecl *vus_ast_global_new(const char *name, int line, int col);
 VusAstStructDef  *vus_ast_struct_def_new(const char *name, VusAstList *fields, int line, int col);
 VusAstStructInst *vus_ast_struct_inst_new(const char *name, VusAstList *args, int line, int col);

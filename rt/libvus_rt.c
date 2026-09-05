@@ -513,15 +513,29 @@ void vus_closure_call(VusClosure* closure, void* args) {
 
 // ============ 错误处理 ============
 
-VusError* vus_error_new(int code, const char* msg, int line, const char* func) {
+VusError* vus_error_new_typed(int code, const char* type, const char* msg, int line, const char* func) {
     VusError* err = (VusError*)malloc(sizeof(VusError));
     if (!err) return NULL;
     err->code = code;
+    err->type = (type && type[0]) ? strdup(type) : strdup("错误");
     err->msg = msg ? strdup(msg) : NULL;
     err->line = line;
     err->func = func ? strdup(func) : NULL;
     err->next = NULL;
     return err;
+}
+
+VusError* vus_error_new(int code, const char* msg, int line, const char* func) {
+    return vus_error_new_typed(code, NULL, msg, line, func);
+}
+
+/* except 类型匹配：name 与 err->type 相等，或与 err->msg 相等（旧「消息即类型」用法）即命中 */
+int vus_error_matches(VusError* err, const char* name) {
+    if (!err || !name || !name[0]) return 0;
+    const char* t = err->type;
+    const char* m = err->msg;
+    return (t && t[0] && strcmp(t, name) == 0) ||
+           (m && m[0] && strcmp(m, name) == 0);
 }
 
 void vus_error_push(VusError** chain, VusError* err) {
@@ -532,7 +546,8 @@ void vus_error_push(VusError** chain, VusError* err) {
 
 void vus_error_print(VusError* err) {
     if (!err) return;
-    fprintf(stderr, "E%03d %s (代码行号: %d)\n", err->code, err->msg ? err->msg : "", err->line);
+    fprintf(stderr, "E%03d[%s] %s (代码行号: %d)\n", err->code,
+            err->type ? err->type : "错误", err->msg ? err->msg : "", err->line);
     if (err->func) {
         fprintf(stderr, "    位置: %s\n", err->func);
     }
@@ -545,6 +560,7 @@ void vus_error_free(VusError* err) {
     while (err) {
         VusError* next = err->next;
         free((void*)err->msg);
+        free((void*)err->type);
         free((void*)err->func);
         free(err);
         err = next;

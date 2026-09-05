@@ -335,13 +335,14 @@ VusAstBreak *vus_ast_break_new(int line, int col) {
     return node;
 }
 
-VusAstThrow *vus_ast_throw_new(VusAstNode *val, int line, int col) {
+VusAstThrow *vus_ast_throw_new(VusAstNode *val, VusAstNode *etype, int line, int col) {
     VusAstThrow *node = calloc(1, sizeof(VusAstThrow));
     if (!node) return NULL;
     node->type = VUS_AST_THROW;
     node->line = line;
     node->column = col;
     node->value = val;
+    node->etype = etype;
     return node;
 }
 
@@ -644,6 +645,7 @@ void vus_ast_node_free(VusAstNode *node) {
     case VUS_AST_THROW: {
         VusAstThrow *n = (VusAstThrow *)node;
         vus_ast_node_free(n->value);
+        vus_ast_node_free(n->etype);
         break;
     }
     case VUS_AST_GLOBAL_DECL: {
