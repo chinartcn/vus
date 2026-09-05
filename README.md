@@ -18,6 +18,7 @@ VUS 是生成标准 ANSI C 代码的中文友好多范式**编译型**编程语�
 ## 📖 文档
 
 - **[教程](docs/TUTORIAL.md)** — 从零开始学会 VUS（安装、语言基础、运算符、流程控制、函数、线程协程、插件运行时函数）
+- **[实战教程分册](docs/tutorials/)** — Android 组件流（VUA）从零到高级、网络与文件实战、APK 构建与发布
 - **[语言参考](docs/LANGUAGE_REFERENCE.md)** — 已实现的关键字 / 运算符 / 类型 / 语句 / 函数清单，并明确区分「已实现 vs 尚未实现」
 - **[API 参考](docs/API_REFERENCE.md)** — C ABI 与四层插件体系、运行时库的公开接口（基于真实头文件）
 - **[架构](docs/ARCHITECTURE.md)** — 编译流水线、词法 / 语法 / AST / 代码生成、运行时、APK 打包等实现机制
