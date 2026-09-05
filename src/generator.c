@@ -1856,8 +1856,11 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
             GEN_APPEND(args_buf, pos,
                 "vus_unref(_vus_args[%zu]);", (size_t)i);
         long long seq = s_call_seq++;
+        /* 返回值直接转交（函数返回已改为直接赋值、不再 vus_var_set 多加一 ref），
+         * 故此处不再 vus_unref(_vr)——容器返回值初值 ref=0，若 unref 会把
+         * vus_var_set 升上去的 ref=1 降回 0 提前释放，调用方随后解引用即 UAF。 */
         GEN_APPEND(args_buf, pos,
-            "VusString* _vr%lld=_vus_args[0];vus_unref(_vr%lld);_vr%lld;})", seq, seq, seq);
+            "VusString* _vr%lld=_vus_args[0];_vr%lld;})", seq, seq);
         for (size_t i = 0; i < nparams; i++) free(arg_exprs[i]);
         if (arg_exprs) free(arg_exprs);
         free(fval);
@@ -3895,7 +3898,10 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
                 " VusString* _vargs[2]; _vargs[0] = NULL;"
                 " _vargs[1] = (VusString*)vus_list_get(_l, _i);"
                 " vus_object_func_call(_fv, _vargs);"
-                " if (_vargs[0]) vus_unref(_vargs[0]);"
+                " /* 返回值直接丢弃：函数返回已改为直接赋值（不 vus_var_set 加 ref），"
+                "    此处若 vus_unref(_vargs[0]) 会对字面量池字符串（ref=1 池持有）"
+                "    触发 free 造成池损坏；容器返回值（ref=0）unref 也只是下溢泄漏。"
+                "    放弃释放避免崩溃，动态字符串的一次泄漏为可接受代价。 */"
                 " } (void)0; })", cb ? cb : "NULL", lst);
             free(lst);
             if (cb) free(cb);
@@ -4113,15 +4119,17 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
     }
     GEN_APPEND(args_buf, pos,
         "vus_%s(_vus_args);", san);
-    /* R1：对称归还实参（配平函数入口 vus_ref），并归还返回槽的计数
-     * （return 处 vus_var_set(&_args[0], ...) 多加的一份）。 */
+    /* R1：对称归还实参（配平函数入口 vus_ref）。
+     * 返回值不再 unref：函数返回已改为直接赋值（不加 vus_var_set 的额外 ref），
+     * 此处若 vus_unref(_vr) 会把容器返回值（初值 ref=0，经调用方 vus_var_set
+     * 升为 ref=1）的 ref 降回 0 提前释放，调用方随后解引用即 UAF。 */
     for (size_t i = 1; i <= nargs; i++) {
         GEN_APPEND(args_buf, pos,
             "vus_unref(_vus_args[%zu]);", (size_t)i);
     }
     long long seq = s_call_seq++;
     GEN_APPEND(args_buf, pos,
-        "VusString* _vr%lld=_vus_args[0];vus_unref(_vr%lld);_vr%lld;})", seq, seq, seq);
+        "VusString* _vr%lld=_vus_args[0];_vr%lld;})", seq, seq);
 
     /* 释放参数表达式 */
     for (size_t i = 0; i < nargs; i++) {
@@ -4605,8 +4613,13 @@ static void gen_stmt_return(GenBuf *buf, VusAstReturn *ret) {
     const char *ret_stmt = s_gen_in_main ? "return 0;" : "return;";
     if (ret->value) {
         char *val = gen_expr(buf, ret->value);
-        /* 返回槽位赋值（args[0]）与普通变量一样走 vus_var_set 引用计数热路径 */
-        gen_emit_linef(buf, "vus_var_set(&((VusString**)_args)[0], %s);", val);
+        /* 返回槽位直接转移所有权：不调用 vus_var_set（它会 vus_ref 多加一份引用）。
+         * 调用点不再对返回值做 vus_unref（见 gen_expr_call R1 修订），因此此处必须
+         * 保持返回值的原始引用计数原样转交——容器（vus_object_list 初值 ref=0）
+         * 经此转交后由调用方 vus_var_set 升为 ref=1，字符串（初值 ref=1）升为 ref=2。
+         * 旧实现用 vus_var_set 多加一 ref、调用点再 vus_unref，对容器会把 ref 从 1
+         * 降到 0 提前释放，调用方随后解引用即 UAF（test_multi_return ASAN 命中）。 */
+        gen_emit_linef(buf, "((VusString**)_args)[0] = (VusString*)(%s);", val);
         gen_emit_line(buf, "vus_stack_pop();");
         gen_emit_line(buf, ret_stmt);
         free(val);
@@ -4644,7 +4657,7 @@ static void gen_stmt_return_multi(GenBuf *buf, VusAstReturnMulti *ret) {
         if (asprintf(&tail, "%s(VusString*)_o;})", tmp) < 0) { tail = NULL; }
         free(tmp);
         if (!tail) { return; }
-        gen_emit_linef(buf, "vus_var_set(&((VusString**)_args)[0], %s);", tail);
+        gen_emit_linef(buf, "((VusString**)_args)[0] = (VusString*)(%s);", tail);
         free(tail);
     }
     gen_emit_line(buf, "vus_stack_pop();");
