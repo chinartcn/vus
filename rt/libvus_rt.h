@@ -361,4 +361,14 @@ VusString* vus_plugin_date_hour(VusString* dummy);
 VusString* vus_plugin_date_minute(VusString* dummy);
 VusString* vus_plugin_date_second(VusString* dummy);
 
+/* ============ 旧式标准库辅助函数（设计文档 §10.1 核心库接线） ============ */
+/* 长度：列表/字典返回元素个数，其余（含字符串）返回 UTF-8 字节长度 */
+VusString* vus_length(void* obj);
+/* 替换：把 text 中所有 old_s 出现替换为 rep，返回新字符串 */
+VusString* vus_string_replace(VusString* text, VusString* old_s, VusString* rep);
+/* 取随机数：[最小值, 最大值] 闭区间随机整数 */
+VusString* vus_random_int(VusString* min_s, VusString* max_s);
+/* 断言失败：打印消息并以退出码 1 终止进程 */
+void vus_assert_fail(VusString* msg);
+
 #endif // VUS_RT_H

@@ -2447,3 +2447,82 @@ VusString* vus_plugin_date_second(VusString* dummy) {
     snprintf(buf, sizeof(buf), "%d", tm_info->tm_sec);
     return vus_string_new(buf);
 }
+
+/* ============ 旧式标准库辅助函数（设计文档 §10.1 核心库接线） ============
+ * 供生成器把旧式名称（长度/替换/取随机数/断言 等）映射到现代实现。
+ * 语义均与对应的 文本_* 系列、列表_* 系列、字典_* 系列、文件_* 系列、
+ * 日期_* 系列新式函数一致。 */
+#include <limits.h>
+#include <time.h>
+
+static int vus_rt_seeded = 0;   /* 取随机数：进程内只播种一次 */
+
+/* 长度：列表/字典返回元素个数，其余（含字符串）返回 UTF-8 字节长度 */
+VusString* vus_length(void* obj) {
+    if (!obj) return vus_to_string(0);
+    if (vus_is_object(obj)) {
+        VusObject* o = (VusObject*)obj;
+        switch (o->type) {
+            case TYPE_LIST:  return vus_to_string(vus_list_len(o->u.list));
+            case TYPE_DICT:  return vus_to_string(vus_dict_len(o->u.dict));
+            case TYPE_STR:   return vus_to_string(o->u.str ? o->u.str->len : 0);
+            default:         return vus_to_string(0);
+        }
+    }
+    return vus_to_string(((VusString*)obj)->len);
+}
+
+/* 替换：把 text 中所有 old_s 出现替换为 rep，返回新字符串（不修改原串）。
+ * old_s 为空时原样返回 text 的副本。 */
+VusString* vus_string_replace(VusString* text, VusString* old_s, VusString* rep) {
+    if (!text) return vus_string_new("");
+    const char* hay   = text->data ? text->data : "";
+    int hlen          = text->len;
+    int nlen          = (old_s && old_s->data) ? old_s->len : 0;
+    const char* repl  = (rep && rep->data) ? rep->data : "";
+    size_t rlen       = strlen(repl);
+    if (nlen <= 0) return vus_string_new_len(hay, hlen);
+
+    size_t count = 0;
+    for (int i = 0; i + nlen <= hlen; ) {
+        if (memcmp(hay + i, old_s->data, (size_t)nlen) == 0) { count++; i += nlen; }
+        else i++;
+    }
+    if (count == 0) return vus_string_new_len(hay, hlen);
+    size_t total = (size_t)hlen + count * (rlen > (size_t)nlen ? rlen - (size_t)nlen : 0);
+    if (total > (size_t)INT_MAX) return vus_string_new_len(hay, hlen);   /* 溢出防护：回退原文 */
+    char* out = (char*)malloc(total + 1);
+    if (!out) return vus_string_new_len(hay, hlen);
+    size_t p = 0;
+    for (int i = 0; i < hlen; ) {
+        if (i + nlen <= hlen && memcmp(hay + i, old_s->data, (size_t)nlen) == 0) {
+            memcpy(out + p, repl, rlen); p += rlen; i += nlen;
+        } else {
+            out[p++] = hay[i++];
+        }
+    }
+    out[p] = '\0';
+    VusString* r = vus_string_new_len(out, (int)p);
+    free(out);
+    return r;
+}
+
+/* 取随机数：[最小值, 最大值] 闭区间随机整数（过程内只播种一次） */
+VusString* vus_random_int(VusString* min_s, VusString* max_s) {
+    int err = 0;
+    long long lo = min_s ? vus_to_int(min_s, &err) : 0;
+    long long hi = max_s ? vus_to_int(max_s, &err) : lo + 1;
+    if (hi < lo) { long long t = lo; lo = hi; hi = t; }
+    if (!vus_rt_seeded) {
+        srand((unsigned)time(NULL) ^ (unsigned)(uintptr_t)(void*)min_s);
+        vus_rt_seeded = 1;
+    }
+    if (hi <= lo) return vus_to_string(lo);
+    return vus_to_string(lo + (rand() % (hi - lo + 1)));
+}
+
+/* 断言失败：打印消息并以退出码 1 终止进程（不触发 尝试/捕获 异常链） */
+void vus_assert_fail(VusString* msg) {
+    fprintf(stderr, "断言失败: %s\n", (msg && msg->data) ? msg->data : "");
+    exit(1);
+}

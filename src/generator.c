@@ -2720,6 +2720,331 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
         return strdup("vus_dict_items(vus_dict_create())");
     }
 
+    /* ============= 旧式标准库接线（设计文档 §10.1 核心库） =============
+     * 把旧式名称映射到现代实现/运行时辅助函数，语义与
+     * 文本_*、列表_*、字典_*、文件_*、日期_* 新式版本一致。
+     * 注：「等待」为协程保留词（VUS_TOKEN_CN_AWAIT），不做等待(毫秒) 接线。 */
+
+    /* —— 字符串 —— */
+    if (strcmp(call->func_name, "长度") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char result[8192];
+            snprintf(result, sizeof(result), "vus_length((void*)(%s))", a);
+            free(a);
+            return strdup(result);
+        }
+        return strdup("vus_to_string(0)");
+    }
+    if (strcmp(call->func_name, "拼接") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char *b = gen_expr(buf, call->args->items[1]);
+            char result[8192];
+            snprintf(result, sizeof(result),
+                "vus_string_concat((VusString*)(%s), (VusString*)(%s))", a, b);
+            free(a); free(b);
+            return strdup(result);
+        }
+        return strdup("vus_string_new(\"\")");
+    }
+    if (strcmp(call->func_name, "分割") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char *b = gen_expr(buf, call->args->items[1]);
+            char result[8192];
+            snprintf(result, sizeof(result), "vus_plugin_text_split(%s, %s)", a, b);
+            free(a); free(b);
+            return strdup(result);
+        }
+        return strdup("vus_plugin_text_split(vus_string_new(\"\"), NULL)");
+    }
+    if (strcmp(call->func_name, "替换") == 0) {
+        if (call->args && call->args->count >= 3) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char *b = gen_expr(buf, call->args->items[1]);
+            char *c = gen_expr(buf, call->args->items[2]);
+            char result[8192];
+            snprintf(result, sizeof(result),
+                "vus_string_replace((VusString*)(%s), (VusString*)(%s), (VusString*)(%s))",
+                a, b, c);
+            free(a); free(b); free(c);
+            return strdup(result);
+        }
+        return strdup("vus_string_new(\"\")");
+    }
+    if (strcmp(call->func_name, "取子串") == 0) {
+        if (call->args && call->args->count >= 3) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char *b = gen_expr(buf, call->args->items[1]);
+            char *c = gen_expr(buf, call->args->items[2]);
+            char result[8192];
+            snprintf(result, sizeof(result),
+                "vus_string_slice(%s, (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err))",
+                a, b, c);
+            free(a); free(b); free(c);
+            return strdup(result);
+        }
+        return strdup("vus_string_new(\"\")");
+    }
+
+    /* —— 数字 —— */
+    if (strcmp(call->func_name, "取整") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char result[8192];
+            snprintf(result, sizeof(result), "vus_to_string(vus_to_int(%s, &_err))", a);
+            free(a);
+            return strdup(result);
+        }
+        return strdup("vus_to_string(0)");
+    }
+    if (strcmp(call->func_name, "取随机数") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char *b = gen_expr(buf, call->args->items[1]);
+            char result[8192];
+            snprintf(result, sizeof(result), "vus_random_int(%s, %s)", a, b);
+            free(a); free(b);
+            return strdup(result);
+        }
+        return strdup("vus_to_string(0)");
+    }
+
+    /* —— 列表 —— */
+    if (strcmp(call->func_name, "创建列表") == 0) {
+        char *tmp = strdup("({VusObject* _o = vus_object_list();");
+        size_t n = call->args ? call->args->count : 0;
+        for (size_t i = 0; i < n; i++) {
+            char *e = gen_expr(buf, call->args->items[i]);
+            char *tmp2 = NULL;
+            if (asprintf(&tmp2, "vus_list_append(_o->u.list, (void*)(%s));", e) < 0) tmp2 = NULL;
+            char *nb = (char *)realloc(tmp, strlen(tmp) + strlen(tmp2 ? tmp2 : "") + 1);
+            if (nb) { strcat(nb, tmp2 ? tmp2 : ""); tmp = nb; }
+            free(tmp2); free(e);
+        }
+        char *tail = "_o;})";
+        char *nb2 = (char *)realloc(tmp, strlen(tmp) + strlen(tail) + 1);
+        if (nb2) { strcat(nb2, tail); tmp = nb2; }
+        return tmp;
+    }
+    if (strcmp(call->func_name, "添加元素") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char *b = gen_expr(buf, call->args->items[1]);
+            char result[8192];
+            snprintf(result, sizeof(result),
+                "({ vus_list_append(vus_list_unwrap((void*)(%s)), (void*)(%s)); %s; })",
+                a, b, a);
+            free(a); free(b);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "取元素") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char *b = gen_expr(buf, call->args->items[1]);
+            char result[8192];
+            snprintf(result, sizeof(result),
+                "vus_list_get(vus_list_unwrap((void*)(%s)), (int)vus_to_int(%s, &_err))", a, b);
+            free(a); free(b);
+            return strdup(result);
+        }
+        return strdup("vus_string_new(\"\")");
+    }
+    if (strcmp(call->func_name, "删除元素") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char *b = gen_expr(buf, call->args->items[1]);
+            char result[8192];
+            snprintf(result, sizeof(result),
+                "({ vus_list_remove(vus_list_unwrap((void*)(%s)), (int)vus_to_int(%s, &_err)); %s; })",
+                a, b, a);
+            free(a); free(b);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "列表长度") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char result[8192];
+            snprintf(result, sizeof(result),
+                "vus_to_string(vus_list_len(vus_list_unwrap((void*)(%s))))", a);
+            free(a);
+            return strdup(result);
+        }
+        return strdup("vus_to_string(0)");
+    }
+    if (strcmp(call->func_name, "遍历列表") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *lst = gen_expr(buf, call->args->items[0]);
+            char *cb = NULL;
+            VusAstNode *fn = call->args->items[1];
+            if (fn->type == VUS_AST_IDENTIFIER) {
+                /* 直接写函数名：包装为其一等公民函数值 */
+                char fs[256];
+                gen_sanitize_name(((VusAstIdentifier *)fn)->name, fs, sizeof(fs));
+                if (asprintf(&cb, "vus_object_func((void(*)(void*))vus_%s)", fs) < 0) cb = NULL;
+            } else {
+                cb = gen_expr(buf, fn);   /* 函数值(...) 表达式的函数值 */
+            }
+            char result[16384];
+            snprintf(result, sizeof(result),
+                "({ VusObject* _fv = %s;"
+                " VusList* _l = vus_list_unwrap((void*)(%s));"
+                " for (int _i = 0; _i < (int)_l->len; _i++) {"
+                " VusString* _vargs[2]; _vargs[0] = NULL;"
+                " _vargs[1] = (VusString*)vus_list_get(_l, _i);"
+                " vus_object_func_call(_fv, _vargs);"
+                " if (_vargs[0]) vus_unref(_vargs[0]);"
+                " } (void)0; })", cb ? cb : "NULL", lst);
+            free(lst);
+            if (cb) free(cb);
+            return strdup(result);
+        }
+    }
+
+    /* —— 字典 —— */
+    if (strcmp(call->func_name, "创建字典") == 0) {
+        return strdup("vus_object_dict()");
+    }
+    if (strcmp(call->func_name, "字典设值") == 0) {
+        if (call->args && call->args->count >= 3) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char *b = gen_expr(buf, call->args->items[1]);
+            char *c = gen_expr(buf, call->args->items[2]);
+            char result[8192];
+            snprintf(result, sizeof(result),
+                "({ vus_dict_set(vus_dict_unwrap((void*)(%s)), (VusString*)(%s), (void*)(%s)); %s; })",
+                a, b, c, a);
+            free(a); free(b); free(c);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "字典取值") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char *b = gen_expr(buf, call->args->items[1]);
+            char result[8192];
+            snprintf(result, sizeof(result),
+                "vus_dict_get(vus_dict_unwrap((void*)(%s)), (VusString*)(%s))", a, b);
+            free(a); free(b);
+            return strdup(result);
+        }
+        return strdup("vus_string_new(\"\")");
+    }
+    if (strcmp(call->func_name, "字典删除") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char *b = gen_expr(buf, call->args->items[1]);
+            char result[8192];
+            snprintf(result, sizeof(result),
+                "({ vus_dict_remove(vus_dict_unwrap((void*)(%s)), (VusString*)(%s)); %s; })",
+                a, b, a);
+            free(a); free(b);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "字典长度") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char result[8192];
+            snprintf(result, sizeof(result),
+                "vus_to_string(vus_dict_len(vus_dict_unwrap((void*)(%s))))", a);
+            free(a);
+            return strdup(result);
+        }
+        return strdup("vus_to_string(0)");
+    }
+
+    /* —— 文件 —— */
+    if (strcmp(call->func_name, "读取文件") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *arg = gen_expr(buf, call->args->items[0]);
+            char result[8192];
+            snprintf(result, sizeof(result), "vus_plugin_file_read(%s)", arg);
+            free(arg);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "写入文件") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *arg1 = gen_expr(buf, call->args->items[0]);
+            char *arg2 = gen_expr(buf, call->args->items[1]);
+            char result[8192];
+            snprintf(result, sizeof(result), "vus_plugin_file_write(%s, %s)", arg1, arg2);
+            free(arg1); free(arg2);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "追加文件") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *arg1 = gen_expr(buf, call->args->items[0]);
+            char *arg2 = gen_expr(buf, call->args->items[1]);
+            char result[8192];
+            snprintf(result, sizeof(result), "vus_plugin_file_append(%s, %s)", arg1, arg2);
+            free(arg1); free(arg2);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "删除文件") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *arg = gen_expr(buf, call->args->items[0]);
+            char result[8192];
+            snprintf(result, sizeof(result), "vus_plugin_file_delete(%s)", arg);
+            free(arg);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "文件是否存在") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *arg = gen_expr(buf, call->args->items[0]);
+            char result[8192];
+            snprintf(result, sizeof(result), "vus_plugin_file_exists(%s)", arg);
+            free(arg);
+            return strdup(result);
+        }
+    }
+
+    /* —— 时间与调试 —— */
+    if (strcmp(call->func_name, "当前时间") == 0) {
+        return strdup("vus_plugin_date_now(NULL)");
+    }
+    if (strcmp(call->func_name, "调试输出") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *arg = gen_expr(buf, call->args->items[0]);
+            char result[8192];
+            snprintf(result, sizeof(result), "vus_debug_print(vus_string_cstr(%s))", arg);
+            free(arg);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "退出") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *arg = gen_expr(buf, call->args->items[0]);
+            char result[8192];
+            snprintf(result, sizeof(result),
+                "({ exit((int)vus_to_int(%s, &_err)); vus_literal(\"\"); })", arg);
+            free(arg);
+            return strdup(result);
+        }
+        return strdup("({ exit(0); vus_literal(\"\"); })");
+    }
+    if (strcmp(call->func_name, "断言") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *cond = gen_cond(buf, call->args->items[0]);
+            char *msg = NULL;
+            if (call->args->count >= 2) msg = gen_expr(buf, call->args->items[1]);
+            char result[16384];
+            snprintf(result, sizeof(result),
+                "({ if (!(%s)) vus_assert_fail(%s); (void)0; })",
+                cond, msg ? msg : "NULL");
+            free(cond);
+            if (msg) free(msg);
+            return strdup(result);
+        }
+    }
+
     /* 普通函数调用 */
     char san[256];
     gen_sanitize_name(call->func_name, san, sizeof(san));
