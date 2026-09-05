@@ -17,6 +17,7 @@ import android.text.InputType;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
+import android.webkit.WebViewClient;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -766,6 +767,18 @@ public final class VuaRenderer {
                 com.vus.android.VuaBridge.postToTriggerById(id, json);
             }
         }, "vus");
+
+        /* WebViewClient：链接点击 → VUS 事件（让 .vus 逻辑决定跳转） */
+        wv.setWebViewClient(new WebViewClient() {
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                if (url == null) return false;
+                if (url.startsWith("#")) return false;  // 锚点让 WebView 自己处理
+                VuaBridge.postToTrigger("链接点击",
+                        "{\"url\":\"" + esc(url) + "\"}");
+                return true;
+            }
+        });
 
         int h = node.optInt("高度", 480);
         parent.addView(wv, new LinearLayout.LayoutParams(
