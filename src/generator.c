@@ -284,6 +284,7 @@ static int g_uses_freetype = 0; /* 是否使用 图形_字体_加载（决定追
 static GenBuf *g_vua_premain = NULL;     /* 收集 界面_绑定 的静态包装函数 */
 static GenBuf *g_vua_fwd = NULL;         /* 收集包装函数的前向声明（放 include 后） */
 static int     g_vua_bind_count = 0;     /* 包装函数序号，用于唯一命名 */
+static int     g_vua_op_count = 0;       /* 界面_* 内建语句表达式临时变量序号（唯一命名） */
 static int     g_uses_vua = 0;           /* 用户代码是否用了 界面_*（决定 include vua.h）*/
 static VusAstProgram *g_vua_prog = NULL; /* 当前生成中的 AST 根（界面_绑定 查事件函数参数用） */
 
@@ -1061,6 +1062,131 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
             return r;
         }
         return strdup("vua_state_get_or_empty(vua_session_current(vua_global_session(NULL)), vus_string_new(\"\"))");
+    }
+    if (strcmp(call->func_name, "界面_触发") == 0) {
+        g_uses_vua = 1;
+        /* 界面_触发(事件名[, 变量JSON])：程序化派发事件（绕过 Java 触摸回传）。
+         * 变量 JSON 经 vua_dict_from_json 转成 VusDict 交给处理闭包，用后 unref；
+         * 未传变量 JSON 时不携带参数（vars=NULL）。 */
+        if (call->args && call->args->count >= 1) {
+            char *ev = gen_expr(buf, call->args->items[0]);
+            if (call->args->count >= 2) {
+                char *vars = gen_expr(buf, call->args->items[1]);
+                int id = g_vua_op_count++;
+                size_t sz = strlen(ev) + strlen(vars) + 256;
+                char *r = (char *)malloc(sz);
+                snprintf(r, sz,
+                    "({ VusDict* _vdt_%d = vua_dict_from_json(vus_string_cstr(%s), NULL); if (_vdt_%d) { vua_trigger_event(vua_session_current(vua_global_session(NULL)), vus_string_cstr(%s), _vdt_%d); vus_unref((void*)_vdt_%d); } })",
+                    id, vars, id, ev, id, id);
+                free(ev);
+                free(vars);
+                return r;
+            }
+            size_t sz = strlen(ev) + 160;
+            char *r = (char *)malloc(sz);
+            snprintf(r, sz,
+                "(void)vua_trigger_event(vua_session_current(vua_global_session(NULL)), vus_string_cstr(%s), NULL)", ev);
+            free(ev);
+            return r;
+        }
+        return strdup("(void)0; /* 界面_触发: 参数不足 */");
+    }
+    if (strcmp(call->func_name, "界面_按ID触发") == 0) {
+        g_uses_vua = 1;
+        /* 界面_按ID触发(控件id[, 变量JSON])：按渲染树节点 id 解析事件后派发。 */
+        if (call->args && call->args->count >= 1) {
+            char *nid = gen_expr(buf, call->args->items[0]);
+            if (call->args->count >= 2) {
+                char *vars = gen_expr(buf, call->args->items[1]);
+                int id = g_vua_op_count++;
+                size_t sz = strlen(nid) + strlen(vars) + 256;
+                char *r = (char *)malloc(sz);
+                snprintf(r, sz,
+                    "({ VusDict* _vdd_%d = vua_dict_from_json(vus_string_cstr(%s), NULL); if (_vdd_%d) { vua_trigger_by_id(vua_session_current(vua_global_session(NULL)), vus_string_cstr(%s), _vdd_%d); vus_unref((void*)_vdd_%d); } })",
+                    id, vars, id, nid, id, id);
+                free(nid);
+                free(vars);
+                return r;
+            }
+            size_t sz = strlen(nid) + 160;
+            char *r = (char *)malloc(sz);
+            snprintf(r, sz,
+                "(void)vua_trigger_by_id(vua_session_current(vua_global_session(NULL)), vus_string_cstr(%s), NULL)", nid);
+            free(nid);
+            return r;
+        }
+        return strdup("(void)0; /* 界面_按ID触发: 参数不足 */");
+    }
+    if (strcmp(call->func_name, "界面_解绑") == 0) {
+        g_uses_vua = 1;
+        /* 界面_解绑(事件名)：从会话级事件表移除已登记的处理函数（未登记则无操作）。 */
+        if (call->args && call->args->count >= 1) {
+            char *ev = gen_expr(buf, call->args->items[0]);
+            size_t sz = strlen(ev) + 160;
+            char *r = (char *)malloc(sz);
+            snprintf(r, sz,
+                "(void)vua_off(vua_session_current(vua_global_session(NULL)), vus_string_cstr(%s))", ev);
+            free(ev);
+            return r;
+        }
+        return strdup("(void)0; /* 界面_解绑: 参数不足 */");
+    }
+    if (strcmp(call->func_name, "界面_全局置") == 0) {
+        g_uses_vua = 1;
+        /* 界面_全局置(键, 值)：写会话级全局变量（跨屏共享）。
+         * 字面量键走字符串驻留路径，避免高频重建 VusString。 */
+        if (call->args && call->args->count >= 2) {
+            char *val = gen_expr(buf, call->args->items[1]);
+            char *r;
+            if (call->args->items[0]->type == VUS_AST_STRING_LITERAL) {
+                char escaped[4096];
+                gen_string_escape(((VusAstString *)call->args->items[0])->value, escaped, sizeof(escaped));
+                int id = g_vua_op_count++;
+                size_t sz = strlen(escaped) + strlen(val) + 192;
+                r = (char *)malloc(sz);
+                snprintf(r, sz,
+                    "({ VusString* _vkg_%d = vus_string_intern(\"%s\"); vua_session_global_set(vua_global_session(NULL), _vkg_%d, %s); vus_unref(_vkg_%d); })",
+                    id, escaped, id, val, id);
+            } else {
+                char *key = gen_expr(buf, call->args->items[0]);
+                size_t sz = strlen(key) + strlen(val) + 192;
+                r = (char *)malloc(sz);
+                snprintf(r, sz,
+                    "(void)vua_session_global_set(vua_global_session(NULL), %s, %s)", key, val);
+                free(key);
+            }
+            free(val);
+            return r;
+        }
+        return strdup("(void)0; /* 界面_全局置: 参数不足 */");
+    }
+    if (strcmp(call->func_name, "界面_全局取") == 0) {
+        g_uses_vua = 1;
+        /* 界面_全局取(键)：读会话级全局变量；缺失返回空串。
+         * 返回新 VusString（拷贝），可安全 unref。 */
+        if (call->args && call->args->count >= 1) {
+            int id = g_vua_op_count++;
+            char *r;
+            if (call->args->items[0]->type == VUS_AST_STRING_LITERAL) {
+                char escaped[4096];
+                gen_string_escape(((VusAstString *)call->args->items[0])->value, escaped, sizeof(escaped));
+                size_t sz = strlen(escaped) + 256;
+                r = (char *)malloc(sz);
+                snprintf(r, sz,
+                    "({ VusString* _vkg_%d = vus_string_intern(\"%s\"); void* _vgg_%d = vua_session_global_get(vua_global_session(NULL), _vkg_%d); VusString* _vgv_%d = _vgg_%d ? vus_string_new(vus_string_cstr((VusString*)_vgg_%d)) : vus_string_new(\"\"); vus_unref(_vkg_%d); _vgv_%d; })",
+                    id, escaped, id, id, id, id, id, id, id);
+            } else {
+                char *key = gen_expr(buf, call->args->items[0]);
+                size_t sz = strlen(key) + 256;
+                r = (char *)malloc(sz);
+                snprintf(r, sz,
+                    "({ void* _vgg_%d = vua_session_global_get(vua_global_session(NULL), %s); VusString* _vgv_%d = _vgg_%d ? vus_string_new(vus_string_cstr((VusString*)_vgg_%d)) : vus_string_new(\"\"); _vgv_%d; })",
+                    id, key, id, id, id, id);
+                free(key);
+            }
+            return r;
+        }
+        return strdup("({ VusString* _vgv = vus_string_new(\"\"); _vgv; })");
     }
     if (strcmp(call->func_name, "输入") == 0) {
         if (call->args && call->args->count > 0) {
@@ -3634,6 +3760,7 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config) {
     g_uses_gui = 0; /* 每次生成前重置 GUI 使用标记 */
     g_uses_vua = 0; /* 每次生成前重置 VUA 使用标记 */
     g_vua_bind_count = 0;
+    g_vua_op_count = 0;
     s_global_count = 0; /* 每次生成前重置全局变量名集合 */
     if (g_vua_premain) { free(g_vua_premain->data); free(g_vua_premain); g_vua_premain = NULL; }
     if (g_vua_fwd) { free(g_vua_fwd->data); free(g_vua_fwd); g_vua_fwd = NULL; }

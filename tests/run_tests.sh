@@ -35,9 +35,10 @@ for test_file in "${TEST_DIR}/test_"*.vus; do
     fi
 
     test_name="$(basename "$test_file")"
-    # 专项测试不在此跑：由下方 C 单测段覆盖（driver_vua_global.c 验证事件函数内全局变量）
-    if [ "$test_name" = "test_vua_event_global.vus" ]; then
-        echo "跳过专项: ${test_name}（由 driver_vua_global C 单测覆盖）"
+    # 专项测试不在此跑：由下方 C 单测段覆盖（driver_vua_global.c 验证事件函数内全局变量，
+    # vua_api_ext.c 验证 界面_触发/按ID触发/解绑/全局置/全局取——vua.c 需显式链接）
+    if [ "$test_name" = "test_vua_event_global.vus" ] || [ "$test_name" = "vua_api_ext.vus" ]; then
+        echo "跳过专项: ${test_name}（由 C 单测段覆盖）"
         continue
     fi
     printf "运行测试: %-30s" "$test_name"
@@ -124,6 +125,33 @@ else
     echo "  ❌ driver_vua_global 失败（手工: bash -x run_tests.sh 定位）"
     FAIL=$((FAIL + 1))
     FAILED_FILES="$FAILED_FILES driver_vua_global(C)"
+fi
+
+# ---- 界面_* 扩展接线（vua_api_ext：界面_触发/按ID触发/解绑/全局置/全局取）----
+echo ""
+echo "运行 VUA 界面_* 扩展接线测试: vua_api_ext（触发/按ID触发/解绑/全局置/全局取）"
+VUA_API_C="$TEST_DIR/构建/vua_api_ext.c"
+if ( "$VUS" build --c-only vua_api_ext.vus >/dev/null 2>&1 ) && [ -f "$VUA_API_C" ] \
+   && gcc -I../rt "$VUA_API_C" ../rt/vua.c ../build/libvus_rt.a \
+        -o /tmp/vus_vua_api_ext -lm -ldl -lpthread 2>/dev/null \
+   && /tmp/vus_vua_api_ext >/tmp/vus_vua_api_ext.out 2>&1; then
+    if grep -q "全局取=VUS" /tmp/vus_vua_api_ext.out \
+       && grep -q "你好，世界" /tmp/vus_vua_api_ext.out \
+       && grep -q "无参回调" /tmp/vus_vua_api_ext.out \
+       && grep -q "事件未绑定：无参" /tmp/vus_vua_api_ext.out \
+       && [ "$(grep -c "\[事件\] 按钮甲" /tmp/vus_vua_api_ext.out)" = "2" ]; then
+        echo "  ✅ vua_api_ext 通过"
+        PASS=$((PASS + 1))
+    else
+        echo "  ❌ vua_api_ext 输出断言失败（重跑: /tmp/vus_vua_api_ext）"
+        sed -n '1,40p' /tmp/vus_vua_api_ext.out
+        FAIL=$((FAIL + 1))
+        FAILED_FILES="$FAILED_FILES vua_api_ext(C)"
+    fi
+else
+    echo "  ❌ vua_api_ext 编译/运行失败（手工: bash -x run_tests.sh 定位）"
+    FAIL=$((FAIL + 1))
+    FAILED_FILES="$FAILED_FILES vua_api_ext(C)"
 fi
 
 echo ""
