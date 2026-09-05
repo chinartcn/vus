@@ -273,6 +273,7 @@ static void gen_string_escape(const char *input, char *output, size_t out_size) 
 
 /* 返回 malloc 分配的字符串，调用方需 free */
 static char *gen_expr(GenBuf *buf, VusAstNode *node);
+static void gen_function_impl(GenBuf *buf, VusAstFunctionDef *func, const char *c_sym);
 static GenStructInfo *s_gen_structs = NULL; /* 结构体类型表，用于成员访问 */
 static int g_uses_gui = 0; /* 是否在代码中使用了 GuiLite 图形内建函数（决定链接参数） */
 static int g_uses_png = 0; /* 是否使用 图形_背景图（决定追加 -lpng -lz 链接库） */
@@ -301,6 +302,818 @@ static int gen_is_global_name(const char *name) {
     for (int i = 0; i < s_global_count; i++)
         if (s_global_names[i] && strcmp(s_global_names[i], name) == 0) return 1;
     return 0;
+}
+
+/* ============ 词法作用域（块级）生成 ============
+ * 取代「函数顶收集式」（gen_collect_locals）：每个 C 块（函数体/if/循环/while/
+ * 尝试体）在生成语句前做一次本块预扫描，把「本块首次出现且外层无同名符号」的
+ * 局部名在该 C 块顶部集中声明（内层符号加 _sN 后缀 → 天然遮蔽，C 块作用域保证
+ * 块结束后外层恢复可见）。为兼容既有语义：被多个块使用、或在块外也被使用的名字
+ * 预先提升为函数级符号（函数顶声明，全函数唯一），保持「分支内赋值后块外使用」
+ * 等既有写法不受影响（见 scope_classify_body）。全局名（s_global_names）恒不遮蔽。 */
+#define VUS_MAX_SCOPE_SYMS 1024
+#define VUS_MAX_SCOPE_DEPTH 64
+
+typedef struct {
+    const char *name;          /* 源名字（借用 AST 字符串，生成期有效） */
+    char        cname[300];    /* 生成的 C 符号（含 vus_ 前缀） */
+} GenScopeSym;
+
+typedef struct {
+    GenScopeSym syms[VUS_MAX_SCOPE_SYMS];
+    int         count;
+} GenScope;
+
+static GenScope s_scope_stk[VUS_MAX_SCOPE_DEPTH];
+static int      s_scope_depth = 0;
+static long long s_shadow_seq = 1;  /* 块级符号唯一后缀 */
+static VusAstFunctionDef *g_cur_func = NULL; /* 当前生成的函数（参数判定用） */
+
+/* 局部名分类：记录每个局部名的使用块与提升判定 */
+typedef struct {
+    const char *name;
+    int  first_region;   /* 首次出现的块编号；-1=未出现 */
+    int  hoisted;        /* 需提升为函数级 */
+    int  assigned;       /* 是否被赋值（被赋值才允许声明；纯读取不提升 → 保持 undefined 错误） */
+} GenNameReg;
+
+static const char *s_hoisted[512];
+static int         s_hoisted_count = 0;
+static GenNameReg  s_namereg[1024];
+static int         s_namereg_count = 0;
+static int         s_region_seq = 1;  /* 块编号生成器（0=函数体） */
+
+static int gen_is_param_name(VusAstFunctionDef *func, const char *name); /* 前向声明 */
+
+static void scope_reset(void) { s_scope_depth = 0; s_shadow_seq = 1; g_cur_func = NULL;
+                                s_hoisted_count = 0; s_namereg_count = 0; s_region_seq = 1; }
+static void scope_push(void) { if (s_scope_depth < VUS_MAX_SCOPE_DEPTH) s_scope_depth++; }
+static void scope_pop(void)  { if (s_scope_depth > 0) s_scope_depth--; }
+
+/* 自内向外查找名字；返回其符号项或 NULL */
+static GenScopeSym *scope_find(const char *name) {
+    for (int d = s_scope_depth - 1; d >= 0; d--)
+        for (int i = s_scope_stk[d].count - 1; i >= 0; i--)
+            if (s_scope_stk[d].syms[i].name && strcmp(s_scope_stk[d].syms[i].name, name) == 0)
+                return &s_scope_stk[d].syms[i];
+    return NULL;
+}
+
+/* 只查找最内层作用域 */
+static GenScopeSym *scope_find_current(const char *name) {
+    if (s_scope_depth <= 0) return NULL;
+    GenScope *sc = &s_scope_stk[s_scope_depth - 1];
+    for (int i = sc->count - 1; i >= 0; i--)
+        if (sc->syms[i].name && strcmp(sc->syms[i].name, name) == 0)
+            return &sc->syms[i];
+    return NULL;
+}
+
+/* 在当前作用域登记名字；emit_decl=1 时同步生成 `VusString* <cname> = NULL;`。
+ * 函数体最外层（depth==1）符号保持 vus_<san>（向后兼容）；内层块加 _sN 后缀。 */
+static const char *scope_declare(GenBuf *buf, const char *name, int emit_decl) {
+    if (!name) return NULL;
+    GenScopeSym *cur = scope_find_current(name);
+    if (cur) return cur->cname;
+    if (s_scope_depth <= 0) return NULL;
+    GenScope *sc = &s_scope_stk[s_scope_depth - 1];
+    if (sc->count >= VUS_MAX_SCOPE_SYMS) return NULL;
+    GenScopeSym *sym = &sc->syms[sc->count];
+    sym->name = name;
+    char san[256];
+    gen_sanitize_name(name, san, sizeof(san));
+    if (s_scope_depth == 1) {
+        snprintf(sym->cname, sizeof(sym->cname), "vus_%s", san);
+    } else {
+        snprintf(sym->cname, sizeof(sym->cname), "vus_%s_s%lld", san, s_shadow_seq++);
+    }
+    sc->count++;
+    if (emit_decl) {
+        char decl[360];
+        snprintf(decl, sizeof(decl), "VusString* %s = NULL;", sym->cname);
+        gen_emit_line(buf, decl);
+    }
+    return sym->cname;
+}
+
+/* 以指定 C 符号名登记（用于参数、循环变量等已手工声明符号） */
+static const char *scope_register(GenBuf *buf, const char *name, const char *cname) {
+    (void)buf;
+    if (!name || !cname) return NULL;
+    GenScopeSym *cur = scope_find_current(name);
+    if (cur) return cur->cname;
+    if (s_scope_depth <= 0) return NULL;
+    GenScope *sc = &s_scope_stk[s_scope_depth - 1];
+    if (sc->count >= VUS_MAX_SCOPE_SYMS) return NULL;
+    GenScopeSym *sym = &sc->syms[sc->count];
+    sym->name = name;
+    snprintf(sym->cname, sizeof(sym->cname), "%s", cname);
+    sc->count++;
+    return sym->cname;
+}
+
+/* 块预扫描：本块内首次赋值且外层无同名符号的局部名 → 声明到当前块顶 */
+static void gen_block_prescan(GenBuf *buf, VusAstList *body) {
+    if (!body) return;
+    for (size_t i = 0; i < body->count; i++) {
+        VusAstNode *node = body->items[i];
+        if (node->type == VUS_AST_ASSIGN) {
+            VusAstAssign *a = (VusAstAssign *)node;
+            if (!a->is_local) continue;
+            if (gen_is_param_name(g_cur_func, a->target)) continue;
+            if (gen_is_global_name(a->target)) continue;
+            if (scope_find(a->target)) continue;
+            scope_declare(buf, a->target, 1);
+        } else if (node->type == VUS_AST_MULTI_ASSIGN) {
+            VusAstMultiAssign *ma = (VusAstMultiAssign *)node;
+            if (ma->is_local && ma->targets)
+                for (size_t j = 0; j < ma->targets->count; j++) {
+                    const char *nm = ((VusAstIdentifier *)ma->targets->items[j])->name;
+                    if (gen_is_param_name(g_cur_func, nm) || gen_is_global_name(nm)) continue;
+                    if (scope_find(nm)) continue;
+                    scope_declare(buf, nm, 1);
+                }
+        }
+    }
+}
+
+/* ============ 泛型真实实例化（单态化） ============
+ * 泛型函数定义不再直接发射符号 vus_<名>，而是按 (函数, 类型实参列表) 单态化为
+ * 独立 C 符号 vus_<名>_<实参1>_<实参2>...：
+ *  - 预发现阶段（gen_inst_discover + gen_inst_collect_*）闭包收集所有实际被调用的
+ *    实例（含泛型体内按类型映射解析后的显式实例化、递归/互递归、线程协程实参内嵌），
+ *  - 每个实例在函数区之前发出前向声明（任意调用点先声明后使用），函数体统一
+ *    追加在 main 之后，避免发现/发射顺序耦合，
+ *  - 调用点经 gen_inst_find 查表后改指实例符号。
+ * 附带强校验：调用泛型函数时类型实参个数必须与其声明个数相等（编译错误）。 */
+
+typedef struct {
+    const char *param;      /* 类型形参名（AST 字符串） */
+    const char *concrete;   /* 该实例的具体类型实参名（键解析后） */
+} GenTMapEntry;
+
+typedef struct {
+    VusAstFunctionDef *func;  /* 泛型函数定义 */
+    char key[300];            /* 类型实参连接键（"," 分隔原始名）；空串 = 无实参实例 */
+    char sym[300];            /* 实例 C 符号：vus_<san名>[_<san实参>...] */
+    int  fwd_done;            /* 前向声明已发出 */
+    int  emitted;             /* 函数体已生成 */
+    int  inspect;             /* 发现阶段已闭包展开 */
+} GenGenericInst;
+
+static VusAstFunctionDef *s_generic_defs[64];   /* 程序中定义的泛型函数 */
+static int      s_generic_def_count = 0;
+static GenGenericInst s_gen_insts[192];
+static int      s_gen_inst_count = 0;
+static GenBuf  *g_inst_fwd = NULL;    /* 实例前向声明（组装时置于函数区之前） */
+static GenBuf  *g_inst_body = NULL;   /* 实例函数体（组装时置于 main 之后） */
+static GenTMapEntry s_tmap[32];       /* 当前实例/发现期间的 类型形参→具体类型 映射 */
+static int      s_tmap_count = 0;
+
+static char s_gen_error[512];   /* 生成期编译错误（类型实参个数/注解校验等） */
+static int  s_gen_has_error = 0;
+
+static void gen_error(const char *fmt, ...) {
+    if (s_gen_has_error) return;   /* 保留第一条错误 */
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(s_gen_error, sizeof(s_gen_error), fmt, ap);
+    va_end(ap);
+    s_gen_has_error = 1;
+}
+
+static VusAstFunctionDef *gen_find_generic_def(const char *name) {
+    if (!name) return NULL;
+    for (int i = 0; i < s_generic_def_count; i++)
+        if (strcmp(s_generic_defs[i]->name, name) == 0) return s_generic_defs[i];
+    return NULL;
+}
+
+/* 类型形参 T 在 tmap 中 → 具体类型实参名；否则原样返回 */
+static const char *gen_tmap_resolve(const char *name) {
+    for (int i = 0; i < s_tmap_count; i++)
+        if (strcmp(s_tmap[i].param, name) == 0) return s_tmap[i].concrete;
+    return name;
+}
+
+/* 取调用点第 idx 个类型实参的名字（Param 节点，已按当前 tmap 解析） */
+static const char *gen_call_type_arg_name(VusAstCall *call, size_t idx) {
+    if (!call->type_args || idx >= call->type_args->count) return NULL;
+    VusAstNode *pn = call->type_args->items[idx];
+    if (pn->type != VUS_AST_PARAM) return NULL;
+    return gen_tmap_resolve(((VusAstParam *)pn)->name);
+}
+
+/* 由调用点计算实例键：解析后的实参名以 "," 连接；返回实参个数 */
+static size_t gen_inst_key_of_call(VusAstCall *call, char *out_key, size_t keysz) {
+    size_t nta = call->type_args ? call->type_args->count : 0;
+    if (out_key && keysz > 0) out_key[0] = '\0';
+    for (size_t i = 0; i < nta && out_key && keysz > 0; i++) {
+        const char *cn = gen_call_type_arg_name(call, i);
+        if (!cn) cn = "";
+        size_t used = strlen(out_key);
+        snprintf(out_key + used, keysz - used, "%s%s", i > 0 ? "," : "", cn);
+    }
+    return nta;
+}
+
+static GenGenericInst *gen_inst_find(VusAstFunctionDef *gdef, const char *key) {
+    for (int i = 0; i < s_gen_inst_count; i++)
+        if (s_gen_insts[i].func == gdef && strcmp(s_gen_insts[i].key, key) == 0)
+            return &s_gen_insts[i];
+    return NULL;
+}
+
+/* 登记实例（去重）。首次出现：建立符号名 vus_<san名>[_san实参...]。 */
+static GenGenericInst *gen_inst_ensure(VusAstFunctionDef *gdef, const char *key) {
+    GenGenericInst *e = gen_inst_find(gdef, key);
+    if (e) return e;
+    if (s_gen_inst_count >= (int)(sizeof(s_gen_insts) / sizeof(s_gen_insts[0]))) {
+        gen_error("泛型实例化组合数超过上限(%d)，请简化泛型调用", (int)(sizeof(s_gen_insts) / sizeof(s_gen_insts[0])));
+        return NULL;
+    }
+    e = &s_gen_insts[s_gen_inst_count++];
+    e->func = gdef;
+    snprintf(e->key, sizeof(e->key), "%s", key);
+    e->fwd_done = 0;
+    e->emitted = 0;
+    e->inspect = 0;
+    /* 符号名：vus_<san名> 后接每个实参的 "_<san名>" */
+    char san[256];
+    gen_sanitize_name(gdef->name, san, sizeof(san));
+    snprintf(e->sym, sizeof(e->sym), "vus_%s", san);
+    char raw[300];
+    snprintf(raw, sizeof(raw), "%s", key);
+    char *save = NULL;
+    for (char *tok = strtok_r(raw, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+        char ts[256];
+        gen_sanitize_name(tok, ts, sizeof(ts));
+        size_t used = strlen(e->sym);
+        snprintf(e->sym + used, sizeof(e->sym) - used, "_%s", ts);
+    }
+    return e;
+}
+
+/* 校验泛型函数（带 type_params）的形参注解：只能引用内建类型关键字、
+ * 已声明的类型形参或历史别名 string/number，否则编译错误。
+ * 边界（如实说明）：泛型体内暂未建立自定义类型登记表，因此自定义结构类型名
+ * 的注解目前在泛型函数中也会被拒绝，直至引入类型登记。 */
+static int gen_ann_is_type_keyword(const char *an) {
+    return strcmp(an, "int") == 0 || strcmp(an, "float") == 0 ||
+           strcmp(an, "str") == 0 || strcmp(an, "bool") == 0 ||
+           strcmp(an, "list") == 0 || strcmp(an, "dict") == 0 ||
+           strcmp(an, "整型") == 0 || strcmp(an, "浮点型") == 0 ||
+           strcmp(an, "字符串") == 0 || strcmp(an, "布尔型") == 0;
+}
+
+static int gen_ann_is_declared_param(VusAstFunctionDef *fd, const char *an) {
+    if (!fd->type_params) return 0;
+    for (size_t i = 0; i < fd->type_params->count; i++) {
+        VusAstNode *pn = fd->type_params->items[i];
+        if (pn->type == VUS_AST_PARAM &&
+            strcmp(((VusAstParam *)pn)->name, an) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+static const char *gen_param_ann(VusAstNode *pn) {
+    if (pn->type == VUS_AST_PARAM) return ((VusAstParam *)pn)->type_annotation;
+    if (pn->type == VUS_AST_PARAM_DEFAULT) return ((VusAstParamDefault *)pn)->type_annotation;
+    return NULL;
+}
+
+static const char *gen_param_name2(VusAstNode *pn) {
+    if (pn->type == VUS_AST_PARAM) return ((VusAstParam *)pn)->name;
+    if (pn->type == VUS_AST_PARAM_DEFAULT) return ((VusAstParamDefault *)pn)->name;
+    return NULL;
+}
+
+/* 校验单个注解文本：仅允许内建类型关键字、已声明的类型形参或历史别名 */
+static void gen_ann_check(VusAstFunctionDef *fd, int line, const char *where,
+                          const char *name, const char *ann) {
+    if (gen_ann_is_type_keyword(ann)) return;
+    if (gen_ann_is_declared_param(fd, ann)) return;
+    if (strcmp(ann, "string") == 0 || strcmp(ann, "number") == 0) return; /* 历史别名 */
+    gen_error("第 %d 行: 泛型函数 '%s' 的%s '%s' 注解引用了未声明的类型 '%s'"
+              "（只能引用已声明的类型形参或内建类型关键字）",
+              line, fd->name, where, name ? name : "", ann);
+}
+
+static void gen_validate_ann_stmt(VusAstFunctionDef *fd, VusAstNode *node);
+
+static void gen_validate_generic_annotations(VusAstFunctionDef *fd) {
+    /* 形参/默认值参数注解 */
+    if (fd->params) {
+        for (size_t i = 0; i < fd->params->count; i++) {
+            VusAstNode *pn = fd->params->items[i];
+            const char *ann = gen_param_ann(pn);
+            if (!ann || !ann[0]) continue;
+            gen_ann_check(fd, fd->line, "形参", gen_param_name2(pn), ann);
+        }
+    }
+    /* 函数体内语句级变量注解 */
+    if (fd->body)
+        for (size_t i = 0; i < fd->body->count; i++)
+            gen_validate_ann_stmt(fd, fd->body->items[i]);
+}
+
+static void gen_validate_ann_stmt(VusAstFunctionDef *fd, VusAstNode *node) {
+    if (!node) return;
+    switch (node->type) {
+    case VUS_AST_ASSIGN: {
+        VusAstAssign *a = (VusAstAssign *)node;
+        if (a->type_annotation && a->type_annotation[0])
+            gen_ann_check(fd, a->line, "局部变量", a->target, a->type_annotation);
+        break;
+    }
+    case VUS_AST_IF: {
+        VusAstIf *f = (VusAstIf *)node;
+        if (f->then_body)
+            for (size_t i = 0; i < f->then_body->count; i++) gen_validate_ann_stmt(fd, f->then_body->items[i]);
+        if (f->elif_bodies)
+            for (size_t i = 0; i < f->elif_bodies->count; i++) {
+                VusAstList *b = (VusAstList *)f->elif_bodies->items[i];
+                if (b) for (size_t j = 0; j < b->count; j++) gen_validate_ann_stmt(fd, b->items[j]);
+            }
+        if (f->else_body)
+            for (size_t i = 0; i < f->else_body->count; i++) gen_validate_ann_stmt(fd, f->else_body->items[i]);
+        break;
+    }
+    case VUS_AST_FOR_RANGE: {
+        VusAstForRange *fr = (VusAstForRange *)node;
+        if (fr->body)
+            for (size_t i = 0; i < fr->body->count; i++) gen_validate_ann_stmt(fd, fr->body->items[i]);
+        break;
+    }
+    case VUS_AST_FOR_EACH: {
+        VusAstForEach *fe = (VusAstForEach *)node;
+        if (fe->body)
+            for (size_t i = 0; i < fe->body->count; i++) gen_validate_ann_stmt(fd, fe->body->items[i]);
+        break;
+    }
+    case VUS_AST_WHILE: {
+        VusAstWhile *w = (VusAstWhile *)node;
+        if (w->body)
+            for (size_t i = 0; i < w->body->count; i++) gen_validate_ann_stmt(fd, w->body->items[i]);
+        break;
+    }
+    case VUS_AST_TRY: {
+        VusAstTry *t = (VusAstTry *)node;
+        if (t->try_body)
+            for (size_t i = 0; i < t->try_body->count; i++) gen_validate_ann_stmt(fd, t->try_body->items[i]);
+        if (t->except_bodies)
+            for (size_t i = 0; i < t->except_bodies->count; i++) {
+                VusAstList *b = (VusAstList *)t->except_bodies->items[i];
+                if (b) for (size_t j = 0; j < b->count; j++) gen_validate_ann_stmt(fd, b->items[j]);
+            }
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+/* ============ 泛型实例调用点发现（闭包收集） ============ */
+
+static void gen_inst_collect_expr(VusAstNode *node);
+static void gen_inst_collect_stmt(VusAstNode *node);
+
+static void gen_inst_seed_call(VusAstCall *call) {
+    if (!call) return;
+    VusAstFunctionDef *gdef = gen_find_generic_def(call->func_name);
+    if (gdef) {
+        char key[300];
+        size_t nta = gen_inst_key_of_call(call, key, sizeof(key));
+        size_t ntp = gdef->type_params ? gdef->type_params->count : 0;
+        if (nta != ntp) {
+            gen_error("第 %d 行: 泛型函数 '%s' 声明 %zu 个类型形参，调用提供了 %zu 个类型实参",
+                      call->line, call->func_name, ntp, nta);
+            return;   /* 个数不符：拒绝实例化 */
+        }
+        gen_inst_ensure(gdef, key);
+    }
+    /* 实参表达式内可能还嵌有泛型调用（如 双值<int>(标识<int>(1), 2)） */
+    if (call->args)
+        for (size_t i = 0; i < call->args->count; i++)
+            gen_inst_collect_expr(call->args->items[i]);
+}
+
+static void gen_inst_collect_expr(VusAstNode *node) {
+    if (!node) return;
+    switch (node->type) {
+    case VUS_AST_CALL:
+        gen_inst_seed_call((VusAstCall *)node);
+        break;
+    case VUS_AST_BINARY_OP: {
+        VusAstBinaryOp *b = (VusAstBinaryOp *)node;
+        gen_inst_collect_expr(b->left);
+        gen_inst_collect_expr(b->right);
+        break;
+    }
+    case VUS_AST_UNARY_OP:
+        gen_inst_collect_expr(((VusAstUnaryOp *)node)->operand);
+        break;
+    case VUS_AST_STRUCT_INSTANTIATE: {
+        VusAstStructInst *si = (VusAstStructInst *)node;
+        if (si->args)
+            for (size_t i = 0; i < si->args->count; i++)
+                gen_inst_collect_expr(si->args->items[i]);
+        break;
+    }
+    case VUS_AST_THREAD_CREATE:
+        gen_inst_collect_expr(((VusAstThreadCreate *)node)->func);
+        gen_inst_collect_expr(((VusAstThreadCreate *)node)->arg);
+        break;
+    case VUS_AST_CORO_CREATE:
+        gen_inst_collect_expr(((VusAstCoroCreate *)node)->func);
+        gen_inst_collect_expr(((VusAstCoroCreate *)node)->arg);
+        break;
+    case VUS_AST_THREAD_JOIN:
+        gen_inst_collect_expr(((VusAstThreadJoin *)node)->thread);
+        break;
+    case VUS_AST_CORO_RESUME:
+        gen_inst_collect_expr(((VusAstCoroResume *)node)->coro);
+        break;
+    case VUS_AST_AWAIT:
+        gen_inst_collect_expr(((VusAstAwait *)node)->coro);
+        break;
+    case VUS_AST_ACCESS:
+        gen_inst_collect_expr(((VusAstAccess *)node)->object);
+        break;
+    case VUS_AST_SUBSCRIPT: {
+        VusAstSubscript *sub = (VusAstSubscript *)node;
+        gen_inst_collect_expr(sub->object);
+        gen_inst_collect_expr(sub->index);
+        break;
+    }
+    case VUS_AST_LIST_LITERAL: {
+        VusAstListLiteral *ll = (VusAstListLiteral *)node;
+        if (ll->items)
+            for (size_t i = 0; i < ll->items->count; i++)
+                gen_inst_collect_expr(ll->items->items[i]);
+        break;
+    }
+    case VUS_AST_DICT_LITERAL: {
+        VusAstDictLiteral *dl = (VusAstDictLiteral *)node;
+        if (dl->keys)
+            for (size_t i = 0; i < dl->keys->count; i++)
+                gen_inst_collect_expr(dl->keys->items[i]);
+        if (dl->values)
+            for (size_t i = 0; i < dl->values->count; i++)
+                gen_inst_collect_expr(dl->values->items[i]);
+        break;
+    }
+    default:
+        break;   /* 标识符/字面量等无调用点 */
+    }
+}
+
+static void gen_inst_collect_stmt(VusAstNode *node) {
+    if (!node) return;
+    switch (node->type) {
+    case VUS_AST_ASSIGN:
+        gen_inst_collect_expr(((VusAstAssign *)node)->value);
+        break;
+    case VUS_AST_MULTI_ASSIGN:
+        gen_inst_collect_expr(((VusAstMultiAssign *)node)->value);
+        break;
+    case VUS_AST_EXPR_STMT:
+        gen_inst_collect_expr(((VusAstExprStmt *)node)->expr);
+        break;
+    case VUS_AST_IF: {
+        VusAstIf *f = (VusAstIf *)node;
+        gen_inst_collect_expr(f->condition);
+        if (f->then_body)
+            for (size_t i = 0; i < f->then_body->count; i++) gen_inst_collect_stmt(f->then_body->items[i]);
+        if (f->elif_bodies)
+            for (size_t i = 0; i < f->elif_bodies->count; i++) {
+                VusAstList *b = (VusAstList *)f->elif_bodies->items[i];
+                if (b) for (size_t j = 0; j < b->count; j++) gen_inst_collect_stmt(b->items[j]);
+            }
+        if (f->else_body)
+            for (size_t i = 0; i < f->else_body->count; i++) gen_inst_collect_stmt(f->else_body->items[i]);
+        break;
+    }
+    case VUS_AST_FOR_RANGE: {
+        VusAstForRange *fr = (VusAstForRange *)node;
+        gen_inst_collect_expr(fr->start);
+        gen_inst_collect_expr(fr->end);
+        if (fr->body)
+            for (size_t i = 0; i < fr->body->count; i++) gen_inst_collect_stmt(fr->body->items[i]);
+        break;
+    }
+    case VUS_AST_FOR_EACH: {
+        VusAstForEach *fe = (VusAstForEach *)node;
+        gen_inst_collect_expr(fe->iterable);
+        if (fe->body)
+            for (size_t i = 0; i < fe->body->count; i++) gen_inst_collect_stmt(fe->body->items[i]);
+        break;
+    }
+    case VUS_AST_WHILE: {
+        VusAstWhile *w = (VusAstWhile *)node;
+        gen_inst_collect_expr(w->condition);
+        if (w->body)
+            for (size_t i = 0; i < w->body->count; i++) gen_inst_collect_stmt(w->body->items[i]);
+        break;
+    }
+    case VUS_AST_TRY: {
+        VusAstTry *t = (VusAstTry *)node;
+        if (t->try_body)
+            for (size_t i = 0; i < t->try_body->count; i++) gen_inst_collect_stmt(t->try_body->items[i]);
+        if (t->except_bodies)
+            for (size_t i = 0; i < t->except_bodies->count; i++) {
+                VusAstList *b = (VusAstList *)t->except_bodies->items[i];
+                if (b) for (size_t j = 0; j < b->count; j++) gen_inst_collect_stmt(b->items[j]);
+            }
+        break;
+    }
+    case VUS_AST_RETURN:
+        gen_inst_collect_expr(((VusAstReturn *)node)->value);
+        break;
+    case VUS_AST_RETURN_MULTI: {
+        VusAstReturnMulti *rm = (VusAstReturnMulti *)node;
+        if (rm->values)
+            for (size_t i = 0; i < rm->values->count; i++) gen_inst_collect_expr(rm->values->items[i]);
+        break;
+    }
+    case VUS_AST_THROW:
+        gen_inst_collect_expr(((VusAstThrow *)node)->value);
+        break;
+    default:
+        break;   /* GLOBAL / BREAK / CONTINUE / 定义 / 结构体 等无调用点 */
+    }
+}
+
+/* 以指定类型映射走一遍泛型体：闭包展开其中的显式实例化 */
+static void gen_inst_walk_body(VusAstFunctionDef *func, const char *key) {
+    char copy[300];
+    snprintf(copy, sizeof(copy), "%s", key ? key : "");
+    const char *conc[32];
+    size_t nc = 0;
+    char *save = NULL;
+    for (char *tok = strtok_r(copy, ",", &save); tok && nc < 32; tok = strtok_r(NULL, ",", &save))
+        conc[nc++] = tok;
+    s_tmap_count = 0;
+    size_t ntp = func->type_params ? func->type_params->count : 0;
+    if (ntp > 32) ntp = 32;
+    for (size_t i = 0; i < ntp; i++) {
+        VusAstNode *pn = func->type_params->items[i];
+        const char *pname = (pn->type == VUS_AST_PARAM) ? ((VusAstParam *)pn)->name : "";
+        s_tmap[s_tmap_count].param = pname;
+        s_tmap[s_tmap_count].concrete = (i < nc) ? conc[i] : pname;
+        s_tmap_count++;
+    }
+    if (func->body)
+        for (size_t i = 0; i < func->body->count; i++) gen_inst_collect_stmt(func->body->items[i]);
+    s_tmap_count = 0;
+}
+
+/* 预发现主流程：顶层语句（main 执行体）→ 非泛型函数体 → 闭包展开泛型实例体 */
+static void gen_inst_discover(VusAstProgram *program) {
+    /* 1) 顶层语句 */
+    if (program->statements)
+        for (size_t i = 0; i < program->statements->count; i++) {
+            VusAstNode *node = program->statements->items[i];
+            if (node->type != VUS_AST_FUNCTION_DEF && node->type != VUS_AST_STRUCT_DEF)
+                gen_inst_collect_stmt(node);
+        }
+    /* 2) 非泛型函数体（空类型映射） */
+    if (program->statements)
+        for (size_t i = 0; i < program->statements->count; i++) {
+            VusAstNode *node = program->statements->items[i];
+            if (node->type == VUS_AST_FUNCTION_DEF) {
+                VusAstFunctionDef *fd = (VusAstFunctionDef *)node;
+                if (!(fd->type_params && fd->type_params->count > 0))
+                    gen_inst_walk_body(fd, "");
+            }
+        }
+    /* 3) 闭包：逐一展开未检查实例的泛型体（迭代直到不动点） */
+    int progressed = 1;
+    while (progressed) {
+        progressed = 0;
+        for (int i = 0; i < s_gen_inst_count; i++) {
+            if (s_gen_insts[i].inspect) continue;
+            s_gen_insts[i].inspect = 1;
+            progressed = 1;
+            gen_inst_walk_body(s_gen_insts[i].func, s_gen_insts[i].key);
+        }
+    }
+}
+
+/* 发射所有实例前向声明（在函数区之前，任意调用点先声明后使用） */
+static void gen_inst_emit_fwds(GenBuf *buf) {
+    for (int i = 0; i < s_gen_inst_count; i++) {
+        if (s_gen_insts[i].fwd_done) continue;
+        gen_emit_linef(buf, "void %s(void* _args);", s_gen_insts[i].sym);
+        s_gen_insts[i].fwd_done = 1;
+    }
+}
+
+/* 生成一个泛型实例的 C 函数体（写入 g_inst_body） */
+static void gen_inst_emit_one(GenBuf *buf, GenGenericInst *inst) {
+    char copy[300];
+    snprintf(copy, sizeof(copy), "%s", inst->key);
+    const char *conc[32];
+    size_t nc = 0;
+    char *save = NULL;
+    for (char *tok = strtok_r(copy, ",", &save); tok && nc < 32; tok = strtok_r(NULL, ",", &save))
+        conc[nc++] = tok;
+    s_tmap_count = 0;
+    VusAstFunctionDef *func = inst->func;
+    size_t ntp = func->type_params ? func->type_params->count : 0;
+    if (ntp > 32) ntp = 32;
+    for (size_t i = 0; i < ntp; i++) {
+        VusAstNode *pn = func->type_params->items[i];
+        const char *pname = (pn->type == VUS_AST_PARAM) ? ((VusAstParam *)pn)->name : "";
+        s_tmap[s_tmap_count].param = pname;
+        s_tmap[s_tmap_count].concrete = (i < nc) ? conc[i] : pname;
+        s_tmap_count++;
+    }
+    gen_emit_linef(buf, "/* VUS generic instance: %s<%s> → %s */",
+                   func->name, inst->key[0] ? inst->key : "-", inst->sym);
+    gen_function_impl(buf, func, inst->sym);
+    s_tmap_count = 0;
+}
+
+/* 发射所有实例函数体（置于 main 之后；前置声明已齐） */
+static void gen_inst_emit_bodies(GenBuf *buf) {
+    for (int i = 0; i < s_gen_inst_count; i++) {
+        if (s_gen_insts[i].emitted) continue;
+        gen_inst_emit_one(buf, &s_gen_insts[i]);
+        s_gen_insts[i].emitted = 1;
+    }
+}
+
+/* ============ 局部名分类遍历（判定 hoist） ============
+ * region 0 = 函数体顶层；嵌套块各自分配唯一 region。
+ * 规则：被赋值且（region==0 出现过 或 出现在 ≥2 个不同 region）→ 提升为函数级；
+ * 否则仅出现在单一嵌套块 → 块级局部（声明留在块内）。读数跨块也触发提升，
+ * 保证「分支内赋值、块外读取」的既有写法保持函数级语义。 */
+static void scope_classify_expr(VusAstNode *node, int region);
+
+static GenNameReg *namereg_find(const char *name) {
+    for (int i = 0; i < s_namereg_count; i++)
+        if (strcmp(s_namereg[i].name, name) == 0) return &s_namereg[i];
+    return NULL;
+}
+
+static void namereg_note(const char *name, int region, int is_assign) {
+    GenNameReg *r = namereg_find(name);
+    if (!r) {
+        if (s_namereg_count >= 1024) return;
+        r = &s_namereg[s_namereg_count++];
+        r->name = name;
+        r->first_region = -1;
+        r->hoisted = 0;
+        r->assigned = 0;
+    }
+    if (is_assign) r->assigned = 1;
+    if (region == 0) { r->hoisted = 1; return; }
+    if (r->first_region == -1) { r->first_region = region; return; }
+    if (r->first_region != region) r->hoisted = 1;
+}
+
+static void scope_classify_expr(VusAstNode *node, int region) {
+    if (!node) return;
+    switch (node->type) {
+    case VUS_AST_IDENTIFIER: {
+        VusAstIdentifier *idn = (VusAstIdentifier *)node;
+        if (!gen_is_param_name(g_cur_func, idn->name) && !gen_is_global_name(idn->name))
+            namereg_note(idn->name, region, 0);
+        break;
+    }
+    case VUS_AST_BINARY_OP: {
+        VusAstBinaryOp *b = (VusAstBinaryOp *)node;
+        scope_classify_expr(b->left, region);
+        scope_classify_expr(b->right, region);
+        break;
+    }
+    case VUS_AST_UNARY_OP:
+        scope_classify_expr(((VusAstUnaryOp *)node)->operand, region);
+        break;
+    case VUS_AST_CALL: {
+        VusAstCall *c = (VusAstCall *)node;
+        if (c->args)
+            for (size_t i = 0; i < c->args->count; i++) scope_classify_expr(c->args->items[i], region);
+        break;
+    }
+    case VUS_AST_SUBSCRIPT: {
+        VusAstSubscript *s = (VusAstSubscript *)node;
+        scope_classify_expr(s->object, region);
+        scope_classify_expr(s->index, region);
+        break;
+    }
+    case VUS_AST_ACCESS:
+        scope_classify_expr(((VusAstAccess *)node)->object, region);
+        break;
+    case VUS_AST_LIST_LITERAL: {
+        VusAstListLiteral *l = (VusAstListLiteral *)node;
+        if (l->items)
+            for (size_t i = 0; i < l->items->count; i++) scope_classify_expr(l->items->items[i], region);
+        break;
+    }
+    case VUS_AST_DICT_LITERAL: {
+        VusAstDictLiteral *d = (VusAstDictLiteral *)node;
+        if (d->keys)
+            for (size_t i = 0; i < d->keys->count; i++) scope_classify_expr(d->keys->items[i], region);
+        if (d->values)
+            for (size_t i = 0; i < d->values->count; i++) scope_classify_expr(d->values->items[i], region);
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+static void scope_classify_body(VusAstList *body, int region);
+
+static void scope_classify_stmt(VusAstNode *node, int region) {
+    if (!node) return;
+    switch (node->type) {
+    case VUS_AST_ASSIGN: {
+        VusAstAssign *a = (VusAstAssign *)node;
+        if (a->is_local && !gen_is_param_name(g_cur_func, a->target) && !gen_is_global_name(a->target))
+            namereg_note(a->target, region, 1);
+        scope_classify_expr(a->value, region);
+        break;
+    }
+    case VUS_AST_MULTI_ASSIGN: {
+        VusAstMultiAssign *ma = (VusAstMultiAssign *)node;
+        if (ma->is_local && ma->targets)
+            for (size_t i = 0; i < ma->targets->count; i++) {
+                const char *nm = ((VusAstIdentifier *)ma->targets->items[i])->name;
+                if (!gen_is_param_name(g_cur_func, nm) && !gen_is_global_name(nm))
+                    namereg_note(nm, region, 1);
+            }
+        scope_classify_expr(ma->value, region);
+        break;
+    }
+    case VUS_AST_EXPR_STMT:
+        scope_classify_expr(((VusAstExprStmt *)node)->expr, region);
+        break;
+    case VUS_AST_IF: {
+        VusAstIf *f = (VusAstIf *)node;
+        scope_classify_expr(f->condition, region);
+        if (f->then_body) scope_classify_body(f->then_body, s_region_seq++);
+        if (f->elif_bodies)
+            for (size_t i = 0; i < f->elif_bodies->count; i++) {
+                VusAstList *b = (VusAstList *)f->elif_bodies->items[i];
+                if (b) scope_classify_body(b, s_region_seq++);
+            }
+        if (f->else_body) scope_classify_body(f->else_body, s_region_seq++);
+        break;
+    }
+    case VUS_AST_FOR_RANGE: {
+        VusAstForRange *fr = (VusAstForRange *)node;
+        scope_classify_expr(fr->start, region);
+        scope_classify_expr(fr->end, region);
+        if (fr->body) scope_classify_body(fr->body, s_region_seq++);
+        break;
+    }
+    case VUS_AST_FOR_EACH: {
+        VusAstForEach *fe = (VusAstForEach *)node;
+        scope_classify_expr(fe->iterable, region);
+        if (fe->body) scope_classify_body(fe->body, s_region_seq++);
+        break;
+    }
+    case VUS_AST_WHILE: {
+        VusAstWhile *w = (VusAstWhile *)node;
+        scope_classify_expr(w->condition, region);
+        if (w->body) scope_classify_body(w->body, s_region_seq++);
+        break;
+    }
+    case VUS_AST_TRY: {
+        VusAstTry *t = (VusAstTry *)node;
+        if (t->try_body) scope_classify_body(t->try_body, s_region_seq++);
+        if (t->except_bodies)
+            for (size_t i = 0; i < t->except_bodies->count; i++) {
+                VusAstList *b = (VusAstList *)t->except_bodies->items[i];
+                if (b) scope_classify_body(b, s_region_seq++);
+            }
+        break;
+    }
+    case VUS_AST_RETURN:
+        if (((VusAstReturn *)node)->value)
+            scope_classify_expr(((VusAstReturn *)node)->value, region);
+        break;
+    case VUS_AST_RETURN_MULTI: {
+        VusAstReturnMulti *rm = (VusAstReturnMulti *)node;
+        if (rm->values)
+            for (size_t i = 0; i < rm->values->count; i++) scope_classify_expr(rm->values->items[i], region);
+        break;
+    }
+    case VUS_AST_THROW:
+        scope_classify_expr(((VusAstThrow *)node)->value, region);
+        break;
+    default:
+        break;
+    }
+}
+
+static void scope_classify_body(VusAstList *body, int region) {
+    if (!body) return;
+    for (size_t i = 0; i < body->count; i++) scope_classify_stmt(body->items[i], region);
 }
 
 /* ---- 顶层文件级变量收集（递归进入顶层控制流子块）----
@@ -3047,7 +3860,28 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
 
     /* 普通函数调用 */
     char san[256];
-    gen_sanitize_name(call->func_name, san, sizeof(san));
+    VusAstFunctionDef *gdef = gen_find_generic_def(call->func_name);
+    if (gdef) {
+        /* 泛型函数调用：改指实例符号（由预发现阶段建立）。
+         * 实参个数强制校验：与声明不符 → 编译错误。 */
+        char key[300];
+        size_t nta = gen_inst_key_of_call(call, key, sizeof(key));
+        size_t ntp = gdef->type_params ? gdef->type_params->count : 0;
+        if (nta != ntp) {
+            gen_error("第 %d 行: 泛型函数 '%s' 声明 %zu 个类型形参，调用提供了 %zu 个类型实参",
+                      call->line, call->func_name, ntp, nta);
+            return strdup("vus_string_new(\"\")");   /* 生成期报错，整段代码将被丢弃 */
+        }
+        GenGenericInst *inst = gen_inst_find(gdef, key);
+        if (!inst) {
+            gen_error("第 %d 行: 泛型函数 '%s' 实例 <%s> 未在预发现阶段登记（编译器内部不一致）",
+                      call->line, call->func_name, key);
+            return strdup("vus_string_new(\"\")");
+        }
+        snprintf(san, sizeof(san), "%s", inst->sym + 4); /* 去掉 "vus_" 前缀，复用下方拼装 */
+    } else {
+        gen_sanitize_name(call->func_name, san, sizeof(san));
+    }
 
     /* 构建参数数组 */
     size_t nargs = call->args ? call->args->count : 0;
@@ -3100,7 +3934,15 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
 static char *gen_expr_identifier(GenBuf *buf, VusAstIdentifier *ident) {
     (void)buf;
     char san[256];
+    GenScopeSym *sym = scope_find(ident->name);
+    if (sym) {
+        size_t sz = strlen(sym->cname) + 16;
+        char *result = (char *)malloc(sz);
+        snprintf(result, sz, "%s", sym->cname);
+        return result;
+    }
     gen_sanitize_name(ident->name, san, sizeof(san));
+    /* 未命中作用域：按全局符号引用（顶层全局；未定义名保持旧行为 → C 层 undeclared） */
     size_t sz = strlen(san) + 16;
     char *result = (char *)malloc(sz);
     snprintf(result, sz, "vus_%s", san);
@@ -3329,14 +4171,31 @@ static char *gen_expr(GenBuf *buf, VusAstNode *node) {
 static void gen_statement(GenBuf *buf, VusAstNode *node);
 
 static void gen_stmt_assign(GenBuf *buf, VusAstAssign *assign) {
-    char san[256];
-    gen_sanitize_name(assign->target, san, sizeof(san));
-
     char *val = gen_expr(buf, assign->value);
+    char gsan[300];
 
-    /* 局部/全局变量统一走 vus_var_set 引用计数热路径（语义：ref 新值 + unref 旧值） */
-    gen_emit_linef(buf, "vus_var_set(&vus_%s, %s);", san, val);
+    /* 顶层全局赋值，或函数内对全局名的赋值：一律写文件级符号（全局名不遮蔽） */
+    if (!assign->is_local || gen_is_global_name(assign->target)) {
+        gen_sanitize_name(assign->target, gsan, sizeof(gsan));
+        gen_emit_linef(buf, "vus_var_set(&vus_%s, %s);", gsan, val);
+        free(val);
+        return;
+    }
 
+    /* 函数内局部：作用域解析（块预扫描已声明），未命中时防御性就地声明 */
+    const char *cname = NULL;
+    GenScopeSym *sym = scope_find(assign->target);
+    if (sym) {
+        cname = sym->cname;
+    } else {
+        cname = scope_declare(buf, assign->target, 1);
+    }
+    if (cname) {
+        gen_emit_linef(buf, "vus_var_set(&%s, %s);", cname, val);
+    } else {
+        gen_sanitize_name(assign->target, gsan, sizeof(gsan));
+        gen_emit_linef(buf, "vus_var_set(&vus_%s, %s);", gsan, val);
+    }
     free(val);
 }
 
@@ -3352,6 +4211,8 @@ static void gen_stmt_if(GenBuf *buf, VusAstIf *if_stmt) {
     gen_emit_linef(buf, "if (%s) {", cond);
     free(cond);
     buf->indent++;
+    scope_push(); /* 词法作用域：then 分支独立块 */
+    gen_block_prescan(buf, if_stmt->then_body);
 
     if (if_stmt->then_body) {
         for (size_t i = 0; i < if_stmt->then_body->count; i++) {
@@ -3359,6 +4220,7 @@ static void gen_stmt_if(GenBuf *buf, VusAstIf *if_stmt) {
         }
     }
 
+    scope_pop();
     buf->indent--;
     gen_emit_line(buf, "}");
 
@@ -3369,15 +4231,16 @@ static void gen_stmt_if(GenBuf *buf, VusAstIf *if_stmt) {
             gen_emit_linef(buf, "else if (%s) {", econd);
             free(econd);
             buf->indent++;
-            if (if_stmt->elif_bodies && i < if_stmt->elif_bodies->count) {
-                /* elif_bodies 存储的是 VusAstList* 指针（每个 elif 的语句体） */
-                VusAstList *body = (VusAstList *)if_stmt->elif_bodies->items[i];
-                if (body) {
-                    for (size_t j = 0; j < body->count; j++) {
-                        gen_statement(buf, body->items[j]);
-                    }
+            scope_push();
+            VusAstList *body = (if_stmt->elif_bodies && i < if_stmt->elif_bodies->count)
+                ? (VusAstList *)if_stmt->elif_bodies->items[i] : NULL;
+            gen_block_prescan(buf, body);
+            if (body) {
+                for (size_t j = 0; j < body->count; j++) {
+                    gen_statement(buf, body->items[j]);
                 }
             }
+            scope_pop();
             buf->indent--;
             gen_emit_line(buf, "}");
         }
@@ -3387,9 +4250,12 @@ static void gen_stmt_if(GenBuf *buf, VusAstIf *if_stmt) {
     if (if_stmt->else_body && if_stmt->else_body->count > 0) {
         gen_emit_line(buf, "else {");
         buf->indent++;
+        scope_push();
+        gen_block_prescan(buf, if_stmt->else_body);
         for (size_t i = 0; i < if_stmt->else_body->count; i++) {
             gen_statement(buf, if_stmt->else_body->items[i]);
         }
+        scope_pop();
         buf->indent--;
         gen_emit_line(buf, "}");
     }
@@ -3404,11 +4270,17 @@ static void gen_stmt_for_range(GenBuf *buf, VusAstForRange *fr) {
 
     gen_emit_linef(buf, "{");
     buf->indent++;
+    scope_push(); /* 循环变量作用域 */
+    char vfull[300];
+    snprintf(vfull, sizeof(vfull), "vus_%s", san);
+    scope_register(buf, fr->var_name, vfull);
     gen_emit_linef(buf, "VusString* vus_%s = NULL;", san);
     gen_emit_linef(buf, "int64_t _start = vus_to_int(%s, &_err);", start);
     gen_emit_linef(buf, "int64_t _end = vus_to_int(%s, &_err);", end);
     gen_emit_linef(buf, "for (int64_t _i = _start; _i <= _end; _i++) {");
     buf->indent++;
+    scope_push(); /* 循环体作用域 */
+    gen_block_prescan(buf, fr->body);
     /* 只构造一次循环值：vus_var_set 完成新旧引用交接，_tmp 归还 */
     gen_emit_linef(buf, "{ VusString* _tmp = vus_to_string(_i); vus_var_set(&vus_%s, _tmp); vus_unref(_tmp); }", san);
 
@@ -3418,8 +4290,10 @@ static void gen_stmt_for_range(GenBuf *buf, VusAstForRange *fr) {
         }
     }
 
+    scope_pop();
     buf->indent--;
     gen_emit_line(buf, "}");
+    scope_pop();
     buf->indent--;
     gen_emit_line(buf, "}");
 
@@ -3435,6 +4309,10 @@ static void gen_stmt_for_each(GenBuf *buf, VusAstForEach *fe) {
 
     gen_emit_linef(buf, "{");
     buf->indent++;
+    scope_push(); /* 循环变量作用域 */
+    char vfull[300];
+    snprintf(vfull, sizeof(vfull), "vus_%s", san);
+    scope_register(buf, fe->var_name, vfull);
     gen_emit_linef(buf, "VusString* vus_%s = NULL;", san);
     /* 先对可迭代对象求值一次，再按容器类型分派：
      *  - 字典容器(VusObject* TYPE_DICT)：vus_dict_keys_of 取键列表遍历（键），
@@ -3447,6 +4325,8 @@ static void gen_stmt_for_each(GenBuf *buf, VusAstForEach *fe) {
         "VusList* _list = _kl ? _kl : (vus_is_object(_it) ? ((VusObject*)_it)->u.list : (VusList*)_it);");
     gen_emit_linef(buf, "for (int _i = 0; _i < vus_list_len(_list); _i++) {");
     buf->indent++;
+    scope_push(); /* 循环体作用域 */
+    gen_block_prescan(buf, fe->body);
     /* 取一次元素：vus_var_set 交接新旧引用 */
     gen_emit_linef(buf, "{ VusString* _tmp = (VusString*)vus_list_get(_list, _i); vus_var_set(&vus_%s, _tmp); }", san);
 
@@ -3456,10 +4336,12 @@ static void gen_stmt_for_each(GenBuf *buf, VusAstForEach *fe) {
         }
     }
 
+    scope_pop();
     buf->indent--;
     gen_emit_line(buf, "}");
     /* 字典分支：归还 keys_of 新建的键列表（含其键副本引用） */
     gen_emit_line(buf, "if (_kl) vus_unref((void*)_kl);");
+    scope_pop();
     buf->indent--;
     gen_emit_line(buf, "}");
 
@@ -3472,6 +4354,8 @@ static void gen_stmt_while(GenBuf *buf, VusAstWhile *wl) {
     gen_emit_linef(buf, "while (%s) {", cond);
     free(cond);
     buf->indent++;
+    scope_push(); /* 词法作用域：循环体独立块 */
+    gen_block_prescan(buf, wl->body);
 
     if (wl->body) {
         for (size_t i = 0; i < wl->body->count; i++) {
@@ -3479,6 +4363,7 @@ static void gen_stmt_while(GenBuf *buf, VusAstWhile *wl) {
         }
     }
 
+    scope_pop();
     buf->indent--;
     gen_emit_line(buf, "}");
 }
@@ -3544,12 +4429,21 @@ static void gen_stmt_multi_assign(GenBuf *buf, VusAstMultiAssign *assign) {
     if (n > 0) {
         for (int i = 0; i < n; i++) {
             VusAstIdentifier *idn = (VusAstIdentifier*)assign->targets->items[i];
-            char san[256];
-            gen_sanitize_name(idn->name, san, sizeof(san));
+            char gsan[256];
+            const char *cname = NULL;
+            if (!assign->is_local || gen_is_global_name(idn->name)) {
+                gen_sanitize_name(idn->name, gsan, sizeof(gsan));
+            } else {
+                GenScopeSym *sym = scope_find(idn->name);
+                cname = sym ? sym->cname : scope_declare(buf, idn->name, 1);
+            }
             gen_emit_linef(buf, "VusString* _mval%d = (_mret && _mret->type==TYPE_LIST && _mret->u.list && vus_list_len(_mret->u.list) > %d) ? (VusString*)vus_list_get(_mret->u.list, %d) : NULL;",
                 i, i, i);
             gen_emit_linef(buf, "vus_ref(_mval%d);", i);
-            gen_emit_linef(buf, "vus_var_set(&vus_%s, _mval%d);", san, i);
+            if (cname)
+                gen_emit_linef(buf, "vus_var_set(&%s, _mval%d);", cname, i);
+            else
+                gen_emit_linef(buf, "vus_var_set(&vus_%s, _mval%d);", gsan, i);
             gen_emit_linef(buf, "vus_unref(_mval%d);", i);
         }
     }
@@ -3587,11 +4481,14 @@ static void gen_stmt_try(GenBuf *buf, VusAstTry *try_stmt) {
     gen_emit_line(buf, "/* try block */");
     gen_emit_line(buf, "do {");
     buf->indent++;
+    scope_push(); /* 词法作用域：try 体独立块 */
+    gen_block_prescan(buf, try_stmt->try_body);
     if (try_stmt->try_body) {
         for (size_t i = 0; i < try_stmt->try_body->count; i++) {
             gen_statement(buf, try_stmt->try_body->items[i]);
         }
     }
+    scope_pop();
     buf->indent--;
     gen_emit_line(buf, "} while(0);");
 
@@ -3625,9 +4522,12 @@ static void gen_stmt_try(GenBuf *buf, VusAstTry *try_stmt) {
             gen_emit_line(buf, "vus_error_free(_vus_err);");
             gen_emit_line(buf, "_vus_err = NULL;");
             gen_emit_line(buf, "_vus_caught = 1;");
+            scope_push(); /* 词法作用域：except 体独立块 */
+            gen_block_prescan(buf, body);
             for (size_t j = 0; j < body->count; j++) {
                 gen_statement(buf, body->items[j]);
             }
+            scope_pop();
             gen_emit_line(buf, "}");
             buf->indent--;
         }
@@ -3738,93 +4638,8 @@ static int gen_is_param_name(VusAstFunctionDef *func, const char *name) {
     return 0;
 }
 
-/* 递归扫描 AST 节点，收集局部变量名（排除函数参数） */
-static void gen_collect_locals(VusAstFunctionDef *func, VusAstNode *node, VusAstList *locals) {
-    if (!node) return;
-    if (node->type == VUS_AST_ASSIGN) {
-        VusAstAssign *assign = (VusAstAssign *)node;
-        if (assign->is_local) {
-            /* 参数名已在函数顶部声明，跳过，避免重复声明 */
-            if (gen_is_param_name(func, assign->target)) return;
-            /* 顶层全局变量：不收集为局部，否则函数内局部声明遮蔽文件级全局，
-             * 导致函数内（含事件函数）读写全局变量静默失效 */
-            if (gen_is_global_name(assign->target)) return;
-            /* 检查是否已收集 */
-            for (size_t i = 0; i < locals->count; i++) {
-                VusAstIdentifier *id = (VusAstIdentifier *)locals->items[i];
-                if (strcmp(id->name, assign->target) == 0) return;
-            }
-            VusAstIdentifier *id = vus_ast_ident_new(assign->target, 0, 0);
-            vus_ast_list_push(locals, (VusAstNode *)id);
-        }
-    } else if (node->type == VUS_AST_MULTI_ASSIGN) {
-        VusAstMultiAssign *ma = (VusAstMultiAssign *)node;
-        if (ma->is_local && ma->targets) {
-            for (size_t i = 0; i < ma->targets->count; i++) {
-                VusAstIdentifier *idn = (VusAstIdentifier *)ma->targets->items[i];
-                if (gen_is_param_name(func, idn->name) || gen_is_global_name(idn->name)) continue;
-                int found = 0;
-                for (size_t j = 0; j < locals->count; j++) {
-                    VusAstIdentifier *id = (VusAstIdentifier *)locals->items[j];
-                    if (strcmp(id->name, idn->name) == 0) { found = 1; break; }
-                }
-                if (!found) vus_ast_list_push(locals, (VusAstNode *)vus_ast_ident_new(idn->name, 0, 0));
-            }
-        }
-    } else if (node->type == VUS_AST_IF) {
-        VusAstIf *ifn = (VusAstIf *)node;
-        if (ifn->then_body) {
-            for (size_t i = 0; i < ifn->then_body->count; i++)
-                gen_collect_locals(func, ifn->then_body->items[i], locals);
-        }
-        if (ifn->elif_bodies) {
-            for (size_t i = 0; i < ifn->elif_bodies->count; i++) {
-                VusAstList *body = (VusAstList *)ifn->elif_bodies->items[i];
-                if (body) {
-                    for (size_t j = 0; j < body->count; j++)
-                        gen_collect_locals(func, body->items[j], locals);
-                }
-            }
-        }
-        if (ifn->else_body) {
-            for (size_t i = 0; i < ifn->else_body->count; i++)
-                gen_collect_locals(func, ifn->else_body->items[i], locals);
-        }
-    } else if (node->type == VUS_AST_FOR_RANGE) {
-        VusAstForRange *fr = (VusAstForRange *)node;
-        if (fr->body) {
-            for (size_t i = 0; i < fr->body->count; i++)
-                gen_collect_locals(func, fr->body->items[i], locals);
-        }
-    } else if (node->type == VUS_AST_FOR_EACH) {
-        VusAstForEach *fe = (VusAstForEach *)node;
-        if (fe->body) {
-            for (size_t i = 0; i < fe->body->count; i++)
-                gen_collect_locals(func, fe->body->items[i], locals);
-        }
-    } else if (node->type == VUS_AST_WHILE) {
-        VusAstWhile *wl = (VusAstWhile *)node;
-        if (wl->body) {
-            for (size_t i = 0; i < wl->body->count; i++)
-                gen_collect_locals(func, wl->body->items[i], locals);
-        }
-    } else if (node->type == VUS_AST_TRY) {
-        VusAstTry *tryn = (VusAstTry *)node;
-        if (tryn->try_body) {
-            for (size_t i = 0; i < tryn->try_body->count; i++)
-                gen_collect_locals(func, tryn->try_body->items[i], locals);
-        }
-        if (tryn->except_bodies) {
-            for (size_t i = 0; i < tryn->except_bodies->count; i++) {
-                VusAstList *body = (VusAstList *)tryn->except_bodies->items[i];
-                if (body) {
-                    for (size_t j = 0; j < body->count; j++)
-                        gen_collect_locals(func, body->items[j], locals);
-                }
-            }
-        }
-    }
-}
+/* 递归扫描已被词法作用域（gen_block_prescan + hoist 分类）取代，此函数移除。
+ * 局部声明位置：函数级提升名在函数顶声明，块级名在各 C 块顶就地声明。 */
 
 /* ============ 函数体特征扫描 ============
  * 预处理函数体：是否含「带值返回」（决定 _vus_result + 尾部搬移模板）、
@@ -3885,9 +4700,7 @@ static void gen_scan_block(VusAstList *body, int *has_ret, int *has_try) {
         gen_scan_node(body->items[i], has_ret, has_try);
 }
 
-static void gen_function(GenBuf *buf, VusAstFunctionDef *func) {
-    char san[256];
-    gen_sanitize_name(func->name, san, sizeof(san));
+static void gen_function_impl(GenBuf *buf, VusAstFunctionDef *func, const char *c_sym) {
 
     /* 函数注释 */
     gen_emit_linef(buf, "/* VUS function: %s */", func->name);
@@ -3909,9 +4722,15 @@ static void gen_function(GenBuf *buf, VusAstFunctionDef *func) {
         gen_emit_line(buf, tp_buf);
     }
 
-    /* 函数签名：void vus_xxx(void* _args) */
-    gen_emit_linef(buf, "void vus_%s(void* _args) {", san);
+    /* 函数签名：void vus_xxx(void* _args)（泛型实例 c_sym 为 vus_名_实参） */
+    gen_emit_linef(buf, "void %s(void* _args) {", c_sym);
     buf->indent++;
+
+    /* 词法作用域：进入函数体作用域（depth=1），登记参数符号 */
+    scope_reset();
+    g_cur_func = func;
+    s_shadow_seq = 1;
+    scope_push();
 
     /* 参数提取 */
     size_t nparams = func->params ? func->params->count : 0;
@@ -3925,12 +4744,18 @@ static void gen_function(GenBuf *buf, VusAstFunctionDef *func) {
                 gen_sanitize_name(param->name, psan, sizeof(psan));
                 gen_emit_linef(buf, "VusString* vus_%s = _vus_params[%zu];", psan, i + 1);
                 gen_emit_linef(buf, "vus_ref(vus_%s);", psan);
+                char pfull[300];
+                snprintf(pfull, sizeof(pfull), "vus_%s", psan);
+                scope_register(buf, param->name, pfull);
             } else if (pnode->type == VUS_AST_PARAM_DEFAULT) {
                 VusAstParamDefault *param = (VusAstParamDefault *)pnode;
                 char psan[256];
                 gen_sanitize_name(param->name, psan, sizeof(psan));
                 gen_emit_linef(buf, "VusString* vus_%s = _vus_params[%zu] ? _vus_params[%zu] : NULL;", psan, i + 1, i + 1);
                 gen_emit_linef(buf, "if (vus_%s) vus_ref(vus_%s);", psan, psan);
+                char pfull[300];
+                snprintf(pfull, sizeof(pfull), "vus_%s", psan);
+                scope_register(buf, param->name, pfull);
             }
         }
     }
@@ -3942,19 +4767,19 @@ static void gen_function(GenBuf *buf, VusAstFunctionDef *func) {
     gen_emit_line(buf, "int _err = 0;");
     if (has_try) gen_emit_line(buf, "VusError* _vus_err = NULL;");
 
-    /* 扫描函数体中的局部变量，在函数顶部声明 */
-    if (func->body) {
-        VusAstList *locals = vus_ast_list_new();
-        for (size_t i = 0; i < func->body->count; i++) {
-            gen_collect_locals(func, func->body->items[i], locals);
-        }
-        for (size_t i = 0; i < locals->count; i++) {
-            VusAstIdentifier *id = (VusAstIdentifier *)locals->items[i];
-            char lsan[256];
-            gen_sanitize_name(id->name, lsan, sizeof(lsan));
-            gen_emit_linef(buf, "VusString* vus_%s = NULL;", lsan);
-        }
-        vus_ast_list_free(locals);
+    /* 词法作用域：局部名分类 → 提升函数级者函数顶声明（取代旧的 gen_collect_locals
+     * 全量收集）。其余块级局部由各块的 gen_block_prescan 就地声明。 */
+    s_hoisted_count = 0;
+    s_namereg_count = 0;
+    s_region_seq = 1;
+    scope_classify_body(func->body, 0);
+    for (int i = 0; i < s_namereg_count; i++)
+        if (s_namereg[i].assigned && s_namereg[i].hoisted && s_hoisted_count < 512)
+            s_hoisted[s_hoisted_count++] = s_namereg[i].name;
+    for (int i = 0; i < s_hoisted_count; i++) {
+        if (gen_is_param_name(func, s_hoisted[i])) continue;
+        if (gen_is_global_name(s_hoisted[i])) continue;
+        scope_declare(buf, s_hoisted[i], 1);
     }
 
     /* 栈追踪：记录函数调用 */
@@ -3976,8 +4801,20 @@ static void gen_function(GenBuf *buf, VusAstFunctionDef *func) {
         gen_emit_line(buf, "vus_var_set(&((VusString**)_args)[0], _vus_result);");
     }
 
+    scope_pop();
+    g_cur_func = NULL;
+
     buf->indent--;
     gen_emit_line(buf, "}\n");
+}
+
+/* 非泛型函数入口：发射常规符号 vus_<san名> */
+static void gen_function(GenBuf *buf, VusAstFunctionDef *func) {
+    char san[256];
+    gen_sanitize_name(func->name, san, sizeof(san));
+    char sym[300];
+    snprintf(sym, sizeof(sym), "vus_%s", san);
+    gen_function_impl(buf, func, sym);
 }
 
 /* ============ 结构体代码生成 ============ */
@@ -4084,11 +4921,56 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config) {
 
     g_uses_gui = 0; /* 每次生成前重置 GUI 使用标记 */
     g_uses_vua = 0; /* 每次生成前重置 VUA 使用标记 */
+    scope_reset();  /* 每次生成前重置词法作用域状态 */
     g_vua_bind_count = 0;
     g_vua_op_count = 0;
     s_global_count = 0; /* 每次生成前重置全局变量名集合 */
     if (g_vua_premain) { free(g_vua_premain->data); free(g_vua_premain); g_vua_premain = NULL; }
     if (g_vua_fwd) { free(g_vua_fwd->data); free(g_vua_fwd); g_vua_fwd = NULL; }
+
+    /* 泛型单态化状态重置 */
+    s_generic_def_count = 0;
+    s_gen_inst_count = 0;
+    s_tmap_count = 0;
+    s_gen_has_error = 0;
+    s_gen_error[0] = '\0';
+    if (g_inst_fwd) { free(g_inst_fwd->data); free(g_inst_fwd); g_inst_fwd = NULL; }
+    if (g_inst_body) { free(g_inst_body->data); free(g_inst_body); g_inst_body = NULL; }
+
+    /* 登记泛型函数定义（type_params 非空者），并做注解强校验：
+     * 泛型形参注解只能引用内建类型关键字或已声明的类型形参。 */
+    if (program->statements) {
+        for (size_t i = 0; i < program->statements->count; i++) {
+            VusAstNode *node = program->statements->items[i];
+            if (node->type == VUS_AST_FUNCTION_DEF) {
+                VusAstFunctionDef *fd = (VusAstFunctionDef *)node;
+                if (fd->type_params && fd->type_params->count > 0) {
+                    if (s_generic_def_count < 64) s_generic_defs[s_generic_def_count++] = fd;
+                    gen_validate_generic_annotations(fd);
+                }
+            }
+        }
+    }
+    if (s_gen_has_error) {
+        fprintf(stderr, "[vus] 类型校验错误: %s\n", s_gen_error);
+        return NULL;
+    }
+
+    /* 预发现：闭包收集所有实际被调用的泛型实例（含类型实参个数校验） */
+    g_inst_fwd = gen_buf_new();
+    g_inst_body = gen_buf_new();
+    if (!g_inst_fwd || !g_inst_body) {
+        if (g_inst_fwd) { free(g_inst_fwd->data); free(g_inst_fwd); }
+        if (g_inst_body) { free(g_inst_body->data); free(g_inst_body); }
+        return NULL;
+    }
+    gen_inst_discover(program);
+    if (s_gen_has_error) {
+        fprintf(stderr, "[vus] 类型校验错误: %s\n", s_gen_error);
+        free(g_inst_fwd->data); free(g_inst_fwd); g_inst_fwd = NULL;
+        free(g_inst_body->data); free(g_inst_body); g_inst_body = NULL;
+        return NULL;
+    }
 
     GenBuf *buf = gen_buf_new();
     if (!buf) return NULL;
@@ -4126,6 +5008,10 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config) {
     gen_emit(buf, "    vus_coro_store_result(_vus_args[0]);\n");
     gen_emit(buf, "    return _vus_args[0];\n");
     gen_emit(buf, "}\n\n");
+
+    /* 泛型实例前向声明：置于所有函数定义之前，保证任意调用点先声明后使用 */
+    gen_inst_emit_fwds(buf);
+    gen_emit(buf, "\n");
 
     /* 全局变量声明（去重，递归含顶层控制流块内赋值，修复反馈 1.1） */
     if (program->statements) {
@@ -4180,12 +5066,14 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config) {
         }
     }
 
-    /* 函数定义 */
+    /* 函数定义（泛型函数不加这里发出：其实例函数体统一追加在 main 之后） */
     if (program->statements) {
         for (size_t i = 0; i < program->statements->count; i++) {
             VusAstNode *node = program->statements->items[i];
             if (node->type == VUS_AST_FUNCTION_DEF) {
-                gen_function(buf, (VusAstFunctionDef *)node);
+                VusAstFunctionDef *fd = (VusAstFunctionDef *)node;
+                if (fd->type_params && fd->type_params->count > 0) continue;
+                gen_function(buf, fd);
             }
         }
     }
@@ -4193,6 +5081,19 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config) {
     /* 主函数（vusx 插件等库式编译时跳过，避免与宿主程序 main 冲突） */
     if (!config->omit_main)
         gen_main_function(buf, program, config->debug);
+
+    /* 泛型实例函数体（前向声明已提前发出，故可置于 main 之后） */
+    gen_inst_emit_bodies(buf);
+
+    /* 生成阶段兜底：若代码生成期出现校验错误（理论仅内部不一致触发），放弃结果 */
+    if (s_gen_has_error) {
+        fprintf(stderr, "[vus] 类型校验错误: %s\n", s_gen_error);
+        if (g_inst_fwd) { free(g_inst_fwd->data); free(g_inst_fwd); g_inst_fwd = NULL; }
+        if (g_inst_body) { free(g_inst_body->data); free(g_inst_body); g_inst_body = NULL; }
+        free(buf->data);
+        free(buf);
+        return NULL;
+    }
 
     char *result = strdup(buf->data);
 
@@ -4240,6 +5141,10 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config) {
     /* 释放 VUA 绑定包装缓冲（其内容已并入 result，此处仅回收内存） */
     if (g_vua_premain) { free(g_vua_premain->data); free(g_vua_premain); g_vua_premain = NULL; }
     if (g_vua_fwd) { free(g_vua_fwd->data); free(g_vua_fwd); g_vua_fwd = NULL; }
+
+    /* 释放泛型实例缓冲（其内容已并入 buf/result，此处仅回收内存） */
+    if (g_inst_fwd) { free(g_inst_fwd->data); free(g_inst_fwd); g_inst_fwd = NULL; }
+    if (g_inst_body) { free(g_inst_body->data); free(g_inst_body); g_inst_body = NULL; }
 
     /* 清理结构体类型表 */
     gen_struct_free(s_gen_structs);
