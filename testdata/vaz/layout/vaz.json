@@ -1,0 +1,11 @@
+{
+  "名称": "布局模板包",
+  "版本": "0.2.0",
+  "描述": ".vaz 布局模板：侧边栏/顶栏/宫格/分组列表。结构占位符（{菜单}/{内容}…数组整体注入）+ 模板默认参数",
+  "控件": [
+    "controls/sidebar.json",
+    "controls/topbar.json",
+    "controls/gridnav.json",
+    "controls/groups.json"
+  ]
+}

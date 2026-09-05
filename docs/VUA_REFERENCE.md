@@ -151,15 +151,17 @@ VUS 现有两套互不借用、边界清晰的 UI 机制，**不要混谈**：
 
 > 输入控件的「变化」仅指**值确认**（失焦/提交）时的事件；变量的实际写入时机见第四节规则 8。
 
-> **实现状态**：当前 APK 内置控件表（`testdata/vua_controls.json`）已登记 `界面/列/行/卡片/文本/按钮/输入框/复选框/开关/滑块/下拉/图片/列表/网页/课表`；`VuaRenderer.java` 使用 Android SDK 标准 View（`TextView/Button/EditText/CheckBox/Switch/SeekBar/Spinner/ImageView/LinearLayout/TableLayout/ListView/WebView` 等）逐 `type` 建控件；其中 `列表` 用 ListView + Adapter（`convertView` 复用，只渲染可视区，长列表不卡），`网页` 用 WebView（`url`/`html`/`内容`(Markdown) 三种输入，JS 经 `window.vus.onEvent` 回接 `vuaTrigger`）。控件表之外的 `type` 按"扩展控件"处理——需要先在控件表登记、并由 Java 侧或 `.vaz` 展开提供实现。
+> **实现状态**：当前 APK 内置控件表（`testdata/vua_controls.json`）已登记 `界面/列/行/卡片/文本/按钮/输入框/复选框/开关/滑块/下拉/图标/图片/列表/网页/课表`；`VuaRenderer.java` 使用 Android SDK 标准 View（`TextView/Button/EditText/CheckBox/Switch/SeekBar/Spinner/ImageView/LinearLayout/TableLayout/ListView/WebView` 等）逐 `type` 建控件；其中 `列表` 用 ListView + Adapter（`convertView` 复用，只渲染可视区，长列表不卡；数据项对象带非空 `节标题` 字段渲染为分组头行，如 `分组列表` 布局模板所用），`网页` 用 WebView（`url`/`html`/`内容`(Markdown) 三种输入，JS 经 `window.vus.onEvent` 回接 `vuaTrigger`）。控件表之外的 `type` 按"扩展控件"处理——需要先在控件表登记、并由 Java 侧或 `.vaz` 展开提供实现。
+>
+> **资源加载**：`MainActivity.extractAssets` 把 assets 里**全部文件**（不限扩展名：`.vua/.json/.png/.jpg/.webp/.svg/.gif/.ttf/.otf/.zip` 等）释放到应用 `filesDir`，作为本地资源根。`文件_上传`/`文件_读取` 与控件引用资源的相对路径均相对该目录解析。**图标包 = 一组命名 png + 名称索引**：`图标` 控件（见下）按 `名称` 查找 `filesDir` 下的位图文件，缺图时渲染占位文本兜底。**图片格式边界**：位图解码走 Android `BitmapFactory`，支持 png/jpg/webp（含动图首帧）与 gif **静态首帧**；**svg 未接入**（桌面 `rt/nanosvg` 有、APK 暂无），矢量/动图方案不在当前范围。
 
 ### 3) 展示控件
 
 | `type`（中文） | 作用 |
 |--------|------|
-| `文本` | 文本 |
+| `文本` | 文本（`内容` / `样式`；**`字体`**(或 `font`) 可指定 filesDir 下 `.ttf/.otf` 相对路径，加载失败静默回退系统字体） |
 | `图片` | 图片 |
-| `图标` | 图标 |
+| `图标` | 图标（`名称`/`src` 指向 filesDir 下的 png/jpg/webp 位图，`宽`/`高` 控制尺寸，`标签` 做无障碍描述；缺图渲染占位文本） |
 | `指标` | 大号数值/指标 |
 | `角标` | 角标/状态 |
 | `列表` | 列表 |

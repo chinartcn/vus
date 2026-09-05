@@ -32,6 +32,7 @@ typedef struct {
     char enname[64];         /* 英文名（页面 type 匹配用） */
     char file[512];          /* 来源文件（错误提示用） */
     yyjson_mut_val *tpl;     /* 模板子树（属于模板 doc） */
+    yyjson_mut_val *def;     /* "默认"/"defaults" 缺省参数（属于模板 doc），调用方未传时使用 */
 } VazCtrl;
 
 /* 文本缓冲区：轻量动态拼接 */
@@ -115,7 +116,7 @@ static int vaz_register_ctrl(VazCtrl *ctrls, int *count,
     if (!root || !yyjson_mut_is_obj(root)) return -1;
 
     const char *cn = NULL, *en = NULL;
-    yyjson_mut_val *tpl = NULL;
+    yyjson_mut_val *tpl = NULL, *def = NULL;
     size_t idx, max;
     yyjson_mut_val *key, *val;
     yyjson_mut_obj_foreach(root, idx, max, key, val) {
@@ -124,9 +125,11 @@ static int vaz_register_ctrl(VazCtrl *ctrls, int *count,
         if (strcmp(ks, "中文名") == 0 || strcmp(ks, "名称") == 0) cn = yyjson_mut_get_str(val);
         else if (strcmp(ks, "英文名") == 0 || strcmp(ks, "name") == 0) en = yyjson_mut_get_str(val);
         else if (strcmp(ks, "模板") == 0) tpl = val;
+        else if (strcmp(ks, "默认") == 0 || strcmp(ks, "defaults") == 0) def = val;
     }
     if (!tpl) tpl = root;      /* 无 "模板" 字段时整文件即模板 */
     if (!cn && !en) return -1; /* 至少一个名字 */
+    yyjson_mut_val *defv = (def && yyjson_mut_is_obj(def)) ? def : NULL;
 
     if (cn) {
         VazCtrl *c = &ctrls[*count];
@@ -134,6 +137,7 @@ static int vaz_register_ctrl(VazCtrl *ctrls, int *count,
         c->enname[0] = '\0';
         snprintf(c->file, sizeof(c->file), "%s", file);
         c->tpl = tpl;
+        c->def = defv;
         (*count)++;
     }
     if (en) {
@@ -145,6 +149,7 @@ static int vaz_register_ctrl(VazCtrl *ctrls, int *count,
             snprintf(c->enname, sizeof(c->enname), "%s", en);
             snprintf(c->file, sizeof(c->file), "%s", file);
             c->tpl = tpl;
+            c->def = defv;
             (*count)++;
         }
     }
@@ -275,13 +280,15 @@ static int vaz_fill_str(yyjson_mut_doc *doc, yyjson_mut_val *obj, const char *ke
 static void vaz_fill_params(yyjson_mut_doc *doc, yyjson_mut_val *node,
                             yyjson_mut_val *params) {
     if (!node) return;
-    /* 数组：递归到每个元素；字符串元素支持整值占位替换 */
+    /* 数组：元素级占位替换。整值占位 {x} 且参数为数组时整体展平插入（splice），
+     * 支撑布局模板在"子组件"位置注入一组节点（{菜单}/{内容}，见文档 §3.2）；
+     * 参数为对象/标量时单元素替换；字符串部分占位拼接替换。 */
     if (yyjson_mut_is_arr(node)) {
-        size_t idx, max;
-        yyjson_mut_val *child;
-        yyjson_mut_arr_foreach(node, idx, max, child) {
-            if (!child) continue;
-            if (yyjson_mut_is_str(child)) {
+        size_t n = yyjson_mut_arr_size(node);
+        size_t i = 0;
+        while (i < n) {
+            yyjson_mut_val *child = yyjson_mut_arr_get(node, i);
+            if (child && yyjson_mut_is_str(child)) {
                 const char *s = yyjson_mut_get_str(child);
                 const char *vstart; size_t vlen; int whole;
                 if (find_placeholder(s, &vstart, &vlen, &whole)) {
@@ -292,21 +299,35 @@ static void vaz_fill_params(yyjson_mut_doc *doc, yyjson_mut_val *node,
                         yyjson_mut_val *pval = yyjson_mut_obj_get(params, pname);
                         if (pval) {
                             if (whole) {
-                                yyjson_mut_arr_replace(node, idx, yyjson_mut_val_mut_copy(doc, pval));
+                                if (yyjson_mut_is_arr(pval)) {
+                                    size_t k, kmax = yyjson_mut_arr_size(pval);
+                                    yyjson_mut_arr_remove(node, i);  /* 甩掉占位串 */
+                                    for (k = 0; k < kmax; k++) {
+                                        yyjson_mut_val *e = yyjson_mut_arr_get(pval, k);
+                                        yyjson_mut_arr_insert(node,
+                                                              yyjson_mut_val_mut_copy(doc, e),
+                                                              i + k);
+                                    }
+                                    n = yyjson_mut_arr_size(node);
+                                    i += kmax;
+                                    continue;
+                                }
+                                yyjson_mut_arr_replace(node, i, yyjson_mut_val_mut_copy(doc, pval));
                             } else if (yyjson_mut_is_str(pval)) {
                                 /* 部分占位：拼接替换（{"变量"}=1 → 星级=1） */
                                 char *joined = vaz_subst(s, pname, vlen, yyjson_mut_get_str(pval));
                                 if (joined) {
-                                    yyjson_mut_arr_replace(node, idx, yyjson_mut_strcpy(doc, joined));
+                                    yyjson_mut_arr_replace(node, i, yyjson_mut_strcpy(doc, joined));
                                     free(joined);
                                 }
                             }
                         }
                     }
                 }
-            } else {
+            } else if (child) {
                 vaz_fill_params(doc, child, params);
             }
+            i++;
         }
         return;
     }
@@ -360,7 +381,22 @@ static void vaz_expand_children(yyjson_mut_doc *doc, yyjson_mut_val *parent_obj,
             if (c) {
                 /* 命中模板：用页面节点作参数实例化，替换当前位置 */
                 yyjson_mut_val *repl = yyjson_mut_val_mut_copy(doc, c->tpl);
-                vaz_fill_params(doc, repl, child);
+                yyjson_mut_val *params = child;
+                /* 模板声明"默认"缺省参数：调用方键优先覆盖，未传字段用默认值
+                 * （布局模板"宽度/菜单/内容"等，见文档 §3.2） */
+                if (c->def) {
+                    yyjson_mut_val *merged = yyjson_mut_val_mut_copy(doc, c->def);
+                    size_t dk, dm;
+                    yyjson_mut_val *k2, *v2;
+                    yyjson_mut_obj_foreach(child, dk, dm, k2, v2) {
+                        if (!k2) continue;
+                        yyjson_mut_obj_put(merged,
+                            yyjson_mut_strcpy(doc, yyjson_mut_get_str(k2)),
+                            yyjson_mut_val_mut_copy(doc, v2));
+                    }
+                    params = merged;
+                }
+                vaz_fill_params(doc, repl, params);
                 vaz_expand_into(doc, repl, ctrls, ctrl_count);  /* 模板可能嵌套自定义控件 */
                 yyjson_mut_val *old = yyjson_mut_arr_remove(arr, i);
                 if (old && repl) {
