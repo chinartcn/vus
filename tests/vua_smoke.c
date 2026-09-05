@@ -183,6 +183,33 @@ int main(void) {
     CHECK(s4 != NULL, "未知类型应透传加载（防白屏降级）");
     if (s4) vua_screen_free(s4);
 
+    printf("== E: 侧边栏抽屉控件（已登记 type，菜单/内容/宽度/侧 透传）==\n");
+    err.code = 0;
+    vua_control_table_load(
+        "{\"控件表\":{\"侧边栏\":{\"字段\":{\"菜单\":{},\"内容\":{},\"事件\":{},\"宽度\":{},\"侧\":{}}}}}",
+        &err);
+    CHECK(err.code == 0, "侧边栏控件表加载");
+    const char *vua5 = "{"
+        "\"type\":\"界面\",\"子组件\":[{"
+        "\"type\":\"侧边栏\",\"id\":\"nav\",\"菜单\":[\"概览\",\"文档\"],"
+        "\"内容\":[{\"type\":\"文本\",\"内容\":\"主区\"}],"
+        "\"宽度\":240,\"侧\":\"右\",\"点击\":{\"事件名\":\"切页\"}"
+        "}]}";
+    VuaScreen *s5 = vua_screen_load(vua5, &err);
+    CHECK(s5 != NULL, "侧边栏屏加载成功");
+    if (s5) {
+        const char *rt5 = vua_screen_dump_rendertree(s5);
+        CHECK(rt5 != NULL, "侧边栏渲染树非空");
+        if (rt5) {
+            CHECK(strstr(rt5, "\"侧边栏\"") != 0, "渲染树含侧边栏节点");
+            CHECK(strstr(rt5, "\"菜单\"") != 0, "菜单透传");
+            CHECK(strstr(rt5, "\"宽度\"") != 0, "宽度透传");
+            CHECK(strstr(rt5, "\"侧\":\"右\"") != 0, "侧向透传");
+            CHECK(strstr(rt5, "\"event\":") != 0, "事件归一为 event");
+        }
+        vua_screen_free(s5);
+    }
+
     vua_rt_shutdown();
     printf("\n== %d 通过, %d 失败 ==\n", pass, fail);
     return fail ? 1 : 0;

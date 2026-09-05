@@ -19,6 +19,7 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.AbsListView;
@@ -26,6 +27,7 @@ import android.widget.BaseAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
@@ -234,6 +236,7 @@ public final class VuaRenderer {
             case "图标": case "icon":        { iconView(node, parent); return; }
             case "课表": case "table": case "grid": { classTable(node, parent); return; }
             case "列表": case "list": case "listview": { listView(node, parent); return; }
+            case "侧边栏": case "drawer": case "sidebar": { drawerView(node, parent); return; }
             case "网页": case "web": case "浏览器": { webView(node, parent); return; }
             default: {
                 // 未知/扩展 type：降级为一个文本框占位（严格原则下应报错，这里保证不崩）。
@@ -740,6 +743,152 @@ public final class VuaRenderer {
         int listH = Math.min(rows * rowH, maxH);
         parent.addView(lv, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, listH));
+    }
+
+    /* ---------- 新控件：侧边栏抽屉（DrawerLayout 语义，无第三方依赖手写） ----------
+     * 渲染树节点：
+     *   { type:"侧边栏",
+     *     "菜单":[ "首页" | {"标题":"..","副标题":".."} ],
+     *     "内容":[ 子组件... ],
+     *     "事件":{"事件名":"切页", 可带 收集变量/回调变量},
+     *     "宽度":240, "侧":"左"|"右" }
+     * 抽屉默认收起；「侧」边缘 20dp 水平向内拖动滑出，点击遮罩或菜单项后收起。
+     * 菜单项点击事件载荷与「列表」一致：{"下标":i,"值":"标题"}（+ 收集/回调变量）。 */
+    private void drawerView(final JSONObject node, final ViewGroup parent) throws Exception {
+        final String evName = eventName(node);
+        final String nodeId = node.optString("id", "");
+        final boolean left = !"右".equals(node.optString("侧", node.optString("side", "左")));
+        final int width = dp(node.optInt("宽度", node.optInt("width", 240)));
+        final JSONArray menu = node.optJSONArray("菜单");
+        final JSONArray content = node.optJSONArray("内容");
+
+        final FrameLayout host = new FrameLayout(ctx);
+        parent.addView(host, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        /* 主内容区：占满容器，抽屉滑出时被遮罩盖住（点击遮罩收起） */
+        final FrameLayout contentHost = new FrameLayout(ctx);
+        host.addView(contentHost, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        if (content != null) {
+            for (int i = 0; i < content.length(); i++) {
+                JSONObject c = content.optJSONObject(i);
+                if (c != null) buildInto(c, contentHost);
+            }
+        }
+
+        /* 遮罩：抽屉打开时盖住内容区并拦截点击 → 收起 */
+        final View scrim = new View(ctx);
+        scrim.setBackgroundColor(0x66000000);
+        scrim.setAlpha(0f);
+        scrim.setVisibility(View.GONE);
+        host.addView(scrim, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        /* 菜单面板：宽度由「宽度」决定，靠「侧」对齐；初始平移出屏（收起态） */
+        final LinearLayout panel = new LinearLayout(ctx);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setBackgroundColor(darkTheme ? 0xFF1E1E1E : 0xFFFFFFFF);
+        panel.setElevation(dp(8));
+        host.addView(panel, new FrameLayout.LayoutParams(width,
+                ViewGroup.LayoutParams.MATCH_PARENT, left ? Gravity.LEFT : Gravity.RIGHT));
+        final float closedTx = left ? -width : width;
+        panel.setTranslationX(closedTx);
+
+        /* 边缘滑出：左/右边缘 20dp 透明手柄，水平拖动带出面板（关闭时才在前台） */
+        final View handle = new View(ctx);
+        host.addView(handle, new FrameLayout.LayoutParams(
+                dp(20), ViewGroup.LayoutParams.MATCH_PARENT, left ? Gravity.LEFT : Gravity.RIGHT));
+
+        /* 开合动画：面板平移 + 遮罩淡显（ViewPropertyAnimator，SDK 自带） */
+        final Runnable doOpen = () -> {
+            if (Math.abs(panel.getTranslationX()) < 1f) return;   // 已开
+            panel.animate().translationX(0f).setDuration(180).start();
+            scrim.setVisibility(View.VISIBLE);
+            scrim.animate().alpha(0.55f).setDuration(180).start();
+            handle.setVisibility(View.GONE);
+        };
+        final Runnable doClose = () -> {
+            if (Math.abs(panel.getTranslationX()) < 1f) return;   // 已关
+            panel.animate().translationX(closedTx).setDuration(180).start();
+            scrim.animate().alpha(0f).setDuration(180)
+                    .withEndAction(() -> scrim.setVisibility(View.GONE)).start();
+            handle.setVisibility(View.VISIBLE);
+        };
+        scrim.setOnClickListener(v -> doClose.run());
+
+        /* 菜单项 → 行；点击事件载荷与列表一致（下标/值 + 收集/回调变量），触发后收起 */
+        if (menu != null) {
+            for (int i = 0; i < menu.length(); i++) {
+                final int pos = i;
+                Object it = menu.opt(i);
+                String title = it instanceof String ? (String) it : "";
+                if (it instanceof JSONObject) {
+                    JSONObject o = (JSONObject) it;
+                    title = o.optString("标题", o.optString("文字", o.optString("text", o.optString("title", ""))));
+                }
+                final String fTitle = title;
+                LinearLayout row = new LinearLayout(ctx);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                row.setGravity(Gravity.CENTER_VERTICAL);
+                row.setPadding(dp(16), dp(12), dp(16), dp(12));
+                row.setMinimumHeight(dp(48));
+                TextView rowTv = TextView(ctx);
+                rowTv.setText(title);
+                rowTv.setTextSize(15);
+                rowTv.setTextColor(darkTheme ? 0xFFE0E0E0 : 0xFF1A1F2E);
+                row.addView(rowTv);
+                row.setOnClickListener(v -> {
+                    StringBuilder vb = new StringBuilder("{");
+                    vb.append("\"下标\":").append(pos)
+                      .append(",\"值\":\"").append(escapeJs(fTitle)).append("\"");
+                    String base = collectVars(node);
+                    if (base.length() > 2) {
+                        vb.append(',').append(base.substring(1, base.length() - 1));
+                    }
+                    vb.append('}');
+                    if (evName != null) {
+                        VuaBridge.vuaTrigger(evName, vb.toString());
+                    } else if (!nodeId.isEmpty()) {
+                        VuaBridge.vuaTriggerById(nodeId, vb.toString());
+                    }
+                    doClose.run();
+                    refresh();
+                });
+                panel.addView(row, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            }
+        }
+
+        /* 手势：手柄捕获拖动，实时跟手、松手按过半判开合 */
+        final float[] downX = { 0f };
+        final boolean[] dragging = { false };
+        handle.setOnTouchListener((v, e) -> {
+            switch (e.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    downX[0] = e.getRawX();
+                    dragging[0] = true;
+                    return true;
+                case MotionEvent.ACTION_MOVE:
+                    if (!dragging[0]) return true;
+                    float dx = e.getRawX() - downX[0];
+                    float ntx = closedTx + dx;
+                    if (left) ntx = Math.max(-width, Math.min(0f, ntx));
+                    else      ntx = Math.min(width, Math.max(0f, ntx));
+                    panel.setTranslationX(ntx);
+                    float p = 1f - Math.abs(ntx) / (float) width;
+                    scrim.setAlpha(0.55f * p);
+                    scrim.setVisibility(p > 0.01f ? View.VISIBLE : View.GONE);
+                    return true;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    dragging[0] = false;
+                    if (Math.abs(panel.getTranslationX()) < width / 2f) doOpen.run();
+                    else doClose.run();
+                    return true;
+            }
+            return false;
+        });
     }
 
     /* ---------- 新控件：网页/富文本（WebView + JS 桥 + Markdown→HTML） ----------
