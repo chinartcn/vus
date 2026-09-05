@@ -342,6 +342,8 @@ static int         s_hoisted_count = 0;
 static GenNameReg  s_namereg[1024];
 static int         s_namereg_count = 0;
 static int         s_region_seq = 1;  /* 块编号生成器（0=函数体） */
+static int         s_lit_seq = 1;  /* R2：字面量 static 缓存唯一序号 */
+static long long   s_call_seq = 1; /* R1：调用点临时变量唯一序号 */
 
 static int gen_is_param_name(VusAstFunctionDef *func, const char *name); /* 前向声明 */
 
@@ -1264,11 +1266,58 @@ static char *gen_expr_access(GenBuf *buf, VusAstAccess *access) {
     return result;
 }
 
-/* gen_binary_concat: 字符串拼接 (..) */
+/* gen_binary_concat: 字符串拼接 (..)（2 段路径） */
 static char *gen_binary_concat(const char *left, const char *right) {
     size_t sz = strlen(left) + strlen(right) + 64;
     char *r = (char *)malloc(sz);
     snprintf(r, sz, "vus_string_concat(%s, %s)", left, right);
+    return r;
+}
+
+/* R3：把 「..」链展平为叶子表达式列表（每个叶子是 C 表达式字符串）。
+ * 对非 .. 节点直接 gen_expr；对 .. 节点递归展平左右两侧，段数 n = 叶子数。 */
+static void gen_concat_collect(GenBuf *buf, VusAstNode *node, char ***parts, int *n, int *cap) {
+    if (node && node->type == VUS_AST_BINARY_OP) {
+        VusAstBinaryOp *b = (VusAstBinaryOp *)node;
+        if (strcmp(b->op, "..") == 0) {
+            gen_concat_collect(buf, b->left, parts, n, cap);
+            gen_concat_collect(buf, b->right, parts, n, cap);
+            return;
+        }
+    }
+    if (*n >= *cap) { *cap *= 2; *parts = (char **)realloc(*parts, (size_t)(*cap) * sizeof(char *)); }
+    (*parts)[(*n)++] = gen_expr(buf, node);
+}
+
+static char *gen_concat_flatten(GenBuf *buf, VusAstNode *node, int *count) {
+    int cap = 8, n = 0;
+    char **parts = (char **)calloc((size_t)cap, sizeof(char *));
+    if (!parts) { if (count) *count = 0; return NULL; }
+    gen_concat_collect(buf, node, &parts, &n, &cap);
+    if (count) *count = n;
+    if (n <= 1) { /* 防御：单段直接返回表达式 */
+        if (n == 0) { free(parts); return strdup("vus_string_new(\"\")"); }
+        char *only = parts[0];
+        free(parts);
+        return only;
+    }
+    if (n == 2) {  /* 双段走既有 2 参 concat（等成本，少一层数组） */
+        char *r = gen_binary_concat(parts[0], parts[1]);
+        free(parts[0]); free(parts[1]); free(parts);
+        return r;
+    }
+    /* n>=3：平铺多段 → 单次分配 */
+    size_t need = 96;
+    for (int i = 0; i < n; i++) need += strlen(parts[i]) + 8;
+    char *r = (char *)malloc(need);
+    size_t pos = 0;
+    long long seq = s_call_seq++;
+    pos += snprintf(r + pos, need - pos, "({VusString* _vp%lld[%d]={", seq, n);
+    for (int i = 0; i < n; i++)
+        pos += snprintf(r + pos, need - pos, "%s%s", i ? "," : "", parts[i]);
+    pos += snprintf(r + pos, need - pos, "};vus_string_concat_n(_vp%lld, %d);})", seq, n);
+    for (int i = 0; i < n; i++) free(parts[i]);
+    free(parts);
     return r;
 }
 
@@ -1539,13 +1588,17 @@ static char *gen_expr_binary(GenBuf *buf, VusAstBinaryOp *bin) {
                         "拼接字符串请用 ..\n", bin->line);
     }
 
+    /* R3：连续拼接链（..）提前折叠 → 平铺多段 concat（一次分配）。
+     * 提前分支避免对左右子树重复 gen_expr（f-string 插值链同样受益）。 */
+    if (strcmp(bin->op, "..") == 0) {
+        return gen_concat_flatten(buf, bin, NULL);
+    }
+
     char *left = gen_expr(buf, bin->left);
     char *right = gen_expr(buf, bin->right);
     char *result = NULL;
 
-    if (strcmp(bin->op, "..") == 0) {
-        result = gen_binary_concat(left, right);
-    } else if (strcmp(bin->op, "==") == 0) {
+    if (strcmp(bin->op, "==") == 0) {
         result = gen_binary_compare(left, right, "==");
     } else if (strcmp(bin->op, "!=") == 0) {
         result = gen_binary_compare(left, right, "!=");
@@ -1671,7 +1724,13 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
             pos += snprintf(args_buf + pos, sizeof(args_buf) - pos,
                 "_vus_args[%zu]=%s;", i + 1, arg_exprs[i]);
         pos += snprintf(args_buf + pos, sizeof(args_buf) - pos,
-            "VusObject* _fvx = (VusObject*)(%s); vus_object_func_call(_fvx, _vus_args); _vus_args[0];})", fval);
+            "VusObject* _fvx = (VusObject*)(%s); vus_object_func_call(_fvx, _vus_args);", fval);
+        for (size_t i = 1; i <= nparams; i++)
+            pos += snprintf(args_buf + pos, sizeof(args_buf) - pos,
+                "vus_unref(_vus_args[%zu]);", (size_t)i);
+        long long seq = s_call_seq++;
+        pos += snprintf(args_buf + pos, sizeof(args_buf) - pos,
+            "VusString* _vr%lld=_vus_args[0];vus_unref(_vr%lld);_vr%lld;})", seq, seq, seq);
         for (size_t i = 0; i < nparams; i++) free(arg_exprs[i]);
         if (arg_exprs) free(arg_exprs);
         free(fval);
@@ -3920,7 +3979,16 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
             "_vus_args[%zu]=%s;", i + 1, arg_exprs[i]);
     }
     pos += snprintf(args_buf + pos, sizeof(args_buf) - pos,
-        "vus_%s(_vus_args);_vus_args[0];})", san);
+        "vus_%s(_vus_args);", san);
+    /* R1：对称归还实参（配平函数入口 vus_ref），并归还返回槽的计数
+     * （return 处 vus_var_set(&_args[0], ...) 多加的一份）。 */
+    for (size_t i = 1; i <= nargs; i++) {
+        pos += snprintf(args_buf + pos, sizeof(args_buf) - pos,
+            "vus_unref(_vus_args[%zu]);", (size_t)i);
+    }
+    long long seq = s_call_seq++;
+    pos += snprintf(args_buf + pos, sizeof(args_buf) - pos,
+        "VusString* _vr%lld=_vus_args[0];vus_unref(_vr%lld);_vr%lld;})", seq, seq, seq);
 
     /* 释放参数表达式 */
     for (size_t i = 0; i < nargs; i++) {
@@ -3953,20 +4021,25 @@ static char *gen_expr_string(GenBuf *buf, VusAstString *str) {
     (void)buf;
     char escaped[4096];
     gen_string_escape(str->value, escaped, sizeof(escaped));
-    size_t sz = strlen(escaped) + 64;
-    char *result = (char *)malloc(sz);
-    /* 不可变字面量 → 常驻池（避免每次调用 malloc+复制） */
-    snprintf(result, sz, "vus_literal(\"%s\")", escaped);
+    /* R2：static 缓存字面量指针（首次 vus_literal 一次，热路径仅一次判空）；
+     * 静态持有自己的引用，即使池槽被其它字面量换出也不悬垂。 */
+    char *result = (char *)malloc(strlen(escaped) + 96);
+    int n = s_lit_seq++;
+    snprintf(result, 96 + strlen(escaped),
+        "({static VusString* _L%d=NULL;if(!_L%d){_L%d=vus_literal(\"%s\");vus_ref(_L%d);}_L%d;})",
+        n, n, n, escaped, n, n);
     return result;
 }
 
 static char *gen_expr_number(GenBuf *buf, VusAstNumber *num) {
     (void)buf;
     if (num->is_float) {
-        /* 浮点数作为字符串处理（内容不可变 → 驻留池） */
-        size_t sz = strlen(num->value) + 64;
-        char *result = (char *)malloc(sz);
-        snprintf(result, sz, "vus_literal(\"%s\")", num->value);
+        /* 浮点数作为字符串处理（内容不可变 → 驻留池 + static 缓存） */
+        char *result = (char *)malloc(strlen(num->value) + 96);
+        int n = s_lit_seq++;
+        snprintf(result, strlen(num->value) + 96,
+            "({static VusString* _L%d=NULL;if(!_L%d){_L%d=vus_literal(\"%s\");vus_ref(_L%d);}_L%d;})",
+            n, n, n, num->value, n, n);
         return result;
     }
     /* 整数常量归一化为十进制后进字面量池：vus_to_string(0x0F) 输出
@@ -3982,8 +4055,11 @@ static char *gen_expr_number(GenBuf *buf, VusAstNumber *num) {
         else
             v = strtoll(num->value, &end, 10);
         if (end && *end == '\0') {
-            char *result = (char *)malloc(64);
-            snprintf(result, 64, "vus_literal(\"%lld\")", (long long)v);
+            char *result = (char *)malloc(128);
+            int n = s_lit_seq++;
+            snprintf(result, 128,
+                "({static VusString* _L%d=NULL;if(!_L%d){_L%d=vus_literal(\"%lld\");vus_ref(_L%d);}_L%d;})",
+                n, n, n, (long long)v, n, n);
             return result;
         }
     }
@@ -3995,10 +4071,19 @@ static char *gen_expr_number(GenBuf *buf, VusAstNumber *num) {
 
 static char *gen_expr_bool(GenBuf *buf, VusAstBool *b) {
     (void)buf;
+    int n = s_lit_seq++;
     if (b->value) {
-        return strdup("vus_literal(\"true\")");
+        char *r = (char *)malloc(128);
+        snprintf(r, 128,
+            "({static VusString* _L%d=NULL;if(!_L%d){_L%d=vus_literal(\"true\");vus_ref(_L%d);}_L%d;})",
+            n, n, n, n, n);
+        return r;
     }
-    return strdup("vus_literal(\"false\")");
+    char *r = (char *)malloc(128);
+    snprintf(r, 128,
+        "({static VusString* _L%d=NULL;if(!_L%d){_L%d=vus_literal(\"false\");vus_ref(_L%d);}_L%d;})",
+        n, n, n, n, n);
+    return r;
 }
 
 static char *gen_expr(GenBuf *buf, VusAstNode *node) {

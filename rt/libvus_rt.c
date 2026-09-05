@@ -52,6 +52,9 @@ void vus_unref(void* obj) {
  * 避免生成代码出现 -Wincompatible-pointer-types（反馈四.1）。 */
 void vus_var_set(VusString** slot, void* v) {
     if (!slot) return;
+    /* R5：同指针短路——循环内反复赋同一变量/常量时跳过 ref/unref 抖动
+     * （同对象 ref+1 再 unref-1 净零，跳过语义完全等价）。 */
+    if ((void*)*slot == v) return;
     if (v) vus_ref(v);
     if (*slot) vus_unref(*slot);
     *slot = (VusString*)v;
@@ -159,6 +162,28 @@ VusString* vus_string_concat(VusString* a, VusString* b) {
     memcpy(result->data, a->data, a->len);
     memcpy(result->data + a->len, b->data, b->len);
     result->data[a->len + b->len] = '\0';
+    return result;
+}
+
+/* R3：多段拼接一次分配。n 段即一次 malloc（vus_string_new_raw）+ n 次 memcpy，
+ * 替换 vus_string_concat 嵌套链（K 段 = K 次 malloc + 2K 次 memcpy）。
+ * NULL 段按空串处理（与 vus_string_concat 的 NULL 容错一致）。 */
+VusString* vus_string_concat_n(VusString** parts, int n) {
+    int total = 0;
+    for (int i = 0; i < n; i++) {
+        if (parts[i] && parts[i]->data) total += parts[i]->len;
+    }
+    VusString* result = vus_string_new_raw(total);
+    if (!result) return NULL;
+    int pos = 0;
+    for (int i = 0; i < n; i++) {
+        if (parts[i] && parts[i]->data) {
+            if (parts[i]->len > 0) memcpy(result->data + pos, parts[i]->data, (size_t)parts[i]->len);
+            pos += parts[i]->len;
+        }
+    }
+    result->data[pos] = '\0';
+    result->len = pos;
     return result;
 }
 
@@ -698,27 +723,79 @@ VusString* vus_object_to_string(void* obj) {
         case TYPE_LIST: {
             VusList* list = o->u.list;
             if (!list) return vus_string_new("[]");
-            VusString* acc = vus_string_new("[");
+            /* R4：一次性增长缓冲拼装，替换逐元素 new 分隔符 + concat（≈2n 次 malloc）。
+             * 最后包一次 VusString（单次 memcpy），整体远低于原 2n 次分配。 */
+            size_t cap = 16, len = 0;
+            char* buf = (char*)malloc(cap);
+            if (!buf) return vus_string_new("[]");
+            buf[len++] = '[';
             int n = vus_list_len(list);
             for (int i = 0; i < n; i++) {
+                if (i > 0) {
+                    static const char sep[] = ", ";
+                    if (len + 2 >= cap) { cap *= 2; buf = (char*)realloc(buf, cap); }
+                    memcpy(buf + len, sep, 2); len += 2;
+                }
                 VusString* item = vus_object_to_string(vus_list_get(list, i));
                 if (!item) item = vus_string_new("");
-                if (i > 0) {
-                    VusString* sep = vus_string_new(", ");
-                    VusString* t = vus_string_concat(acc, sep);
-                    vus_unref(acc); vus_unref(sep); acc = t;
+                if (len + (size_t)item->len + 1 >= cap) {
+                    while (len + (size_t)item->len + 1 >= cap) cap *= 2;
+                    buf = (char*)realloc(buf, cap);
                 }
-                VusString* t = vus_string_concat(acc, item);
-                vus_unref(acc); vus_unref(item); acc = t;
+                memcpy(buf + len, item->data, (size_t)item->len);
+                len += (size_t)item->len;
+                vus_unref(item);
             }
-            VusString* close = vus_string_new("]");
-            VusString* out = vus_string_concat(acc, close);
-            vus_unref(acc); vus_unref(close);
+            if (len + 1 >= cap) { buf = (char*)realloc(buf, cap + 1); }
+            buf[len++] = ']';
+            buf[len] = '\0';
+            VusString* out = vus_string_new_len(buf, (int)len);
+            free(buf);
             return out;
         }
-        case TYPE_DICT:
-            /* v0.1 字典无遍历接口，返回占位表示 */
-            return vus_string_new("{}");
+        case TYPE_DICT: {
+            struct DictImpl* impl = o->u.dict ? (struct DictImpl*)o->u.dict->impl : NULL;
+            /* R4：字典真实序列化 {k: v, ...}（修复原 "{}" 占位语义缺失） */
+            if (!impl || impl->count == 0) return vus_string_new("{}");
+            size_t cap = 16, len = 0;
+            char* buf = (char*)malloc(cap);
+            if (!buf) return vus_string_new("{}");
+            buf[len++] = '{';
+            int first = 1;
+            for (int bi = 0; bi < impl->size; bi++) {
+                DictEntry* e = impl->buckets[bi];
+                while (e) {
+                    if (!first) {
+                        static const char sep[] = ", ";
+                        if (len + 2 >= cap) { cap *= 2; buf = (char*)realloc(buf, cap); }
+                        memcpy(buf + len, sep, 2); len += 2;
+                    }
+                    first = 0;
+                    if (len + (size_t)e->key->len + 3 >= cap) {
+                        while (len + (size_t)e->key->len + 3 >= cap) cap *= 2;
+                        buf = (char*)realloc(buf, cap);
+                    }
+                    memcpy(buf + len, e->key->data, (size_t)e->key->len); len += (size_t)e->key->len;
+                    static const char kvsep[] = ": ";
+                    memcpy(buf + len, kvsep, 2); len += 2;
+                    VusString* vs = vus_object_to_string(e->value);
+                    if (!vs) vs = vus_string_new("");
+                    if (len + (size_t)vs->len + 1 >= cap) {
+                        while (len + (size_t)vs->len + 1 >= cap) cap *= 2;
+                        buf = (char*)realloc(buf, cap);
+                    }
+                    memcpy(buf + len, vs->data, (size_t)vs->len); len += (size_t)vs->len;
+                    vus_unref(vs);
+                    e = e->next;
+                }
+            }
+            if (len + 1 >= cap) { buf = (char*)realloc(buf, cap + 1); }
+            buf[len++] = '}';
+            buf[len] = '\0';
+            VusString* out = vus_string_new_len(buf, (int)len);
+            free(buf);
+            return out;
+        }
         default:
             return vus_string_new("");
     }

@@ -77,6 +77,9 @@ VusString* vus_string_intern(const char* s);
  * 路径每次 malloc+复制；池持有保底引用，借出不增加引用计数。 */
 VusString* vus_literal(const char* s);
 VusString* vus_string_concat(VusString* a, VusString* b);
+/* R3：多段拼接一次分配（a..b..c 链折叠 → 单块 malloc + n 次 memcpy）。
+ * parts 为 n 个操作数（容忍 NULL 段），返回 ref=1 的新串。 */
+VusString* vus_string_concat_n(VusString** parts, int n);
 VusString* vus_string_slice(VusString* s, int start, int len);
 int vus_string_len(VusString* s);
 char* vus_string_cstr(VusString* s);  // 返回的指针指向 data，调用方禁止修改或释放
