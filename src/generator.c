@@ -1340,9 +1340,13 @@ static char *gen_expr_access(GenBuf *buf, VusAstAccess *access) {
         /* obj 在模板中被使用两次，需要更大的缓冲区 */
         size_t sz = strlen(obj) * 2 + strlen(san_struct) + strlen(san_member) + 256;
         char *result = (char *)malloc(sz);
+        /* B2：旧模板 `({if(!obj){空串;}((vus_struct*)obj)->字段;})` 的 if 分支
+         * 只是丢弃值的孤立语句，其后 → 仍无条件执行，obj 为 NULL 时解引用崩溃。
+         * 改为临时变量求值一次 + if/else 选择：NULL 时返回新空串（ref=1 借出，
+         * 调用方按借用 vus_unref），仅访问非空结构体字段，杜绝 NULL 解引用。 */
         snprintf(result, sz,
-            "({if(!%s){VusString* _null_str=vus_string_new(\"\");_null_str;}((vus_struct_%s*)%s)->vus_%s;})",
-            obj, san_struct, obj, san_member);
+            "({void* _o=(%s); VusString* _r; if(_o){_r=(VusString*)(((vus_struct_%s*)_o)->vus_%s);}else{_r=vus_string_new(\"\");} _r;})",
+            obj, san_struct, san_member);
         free(obj);
         return result;
     }
@@ -1351,8 +1355,8 @@ static char *gen_expr_access(GenBuf *buf, VusAstAccess *access) {
     size_t sz = strlen(obj) * 2 + strlen(san_member) + strlen(san_member) + 256;
     char *result = (char *)malloc(sz);
     snprintf(result, sz,
-        "({if(!%s){VusString* _null_str=vus_string_new(\"\");_null_str;}((vus_struct_%s*)%s)->vus_%s;})",
-        obj, san_member, obj, san_member);
+        "({void* _o=(%s); VusString* _r; if(_o){_r=(VusString*)(((vus_struct_%s*)_o)->vus_%s);}else{_r=vus_string_new(\"\");} _r;})",
+        obj, san_member, san_member);
     free(obj);
     return result;
 }
@@ -5093,6 +5097,10 @@ static void gen_struct_type_def(GenBuf *buf, VusAstStructDef *sd) {
     gen_emit_linef(buf, "typedef struct vus_struct_%s {", san);
     buf->indent++;
     gen_emit_linef(buf, "int ref;  /* 引用计数 */");
+    /* B1：运行时 vus_unref 需区分结构体实例与普通 VusString，ref 后固定排放
+     * magic（VUS_STRUCT_MAGIC）与字段递归释放钩子（见 libvus_rt.h 协议） */
+    gen_emit_linef(buf, "int _magic;            /* VUS_STRUCT_MAGIC（运行时识别） */");
+    gen_emit_linef(buf, "void (*_release)(void*); /* B1：字段递归释放钩子 */");
 
     if (sd->fields) {
         for (size_t i = 0; i < sd->fields->count; i++) {
@@ -5107,7 +5115,27 @@ static void gen_struct_type_def(GenBuf *buf, VusAstStructDef *sd) {
     }
 
     buf->indent--;
-    gen_emit_linef(buf, "} vus_struct_%s;\n", san);
+    gen_emit_linef(buf, "} vus_struct_%s;", san);
+
+    /* B1：结构体释放函数——按引用计数递归释放各字段（字段可为标量/容器/嵌套
+     * 结构体，vus_unref 按其 magic 各自归零释放），再释放结构体主体。 */
+    gen_emit_linef(buf, "__attribute__((unused)) static void vus_struct_%s_release(void* _p) {", san);
+    buf->indent++;
+    gen_emit_linef(buf, "vus_struct_%s* _o = (vus_struct_%s*)_p;", san, san);
+    if (sd->fields) {
+        for (size_t i = 0; i < sd->fields->count; i++) {
+            VusAstNode *fnode = sd->fields->items[i];
+            if (fnode->type == VUS_AST_PARAM) {
+                VusAstParam *p = (VusAstParam *)fnode;
+                char fsan[256];
+                gen_sanitize_name(p->name, fsan, sizeof(fsan));
+                gen_emit_linef(buf, "if (_o->vus_%s) vus_unref(_o->vus_%s);", fsan, fsan);
+            }
+        }
+    }
+    gen_emit_line(buf, "free(_o);");
+    buf->indent--;
+    gen_emit_linef(buf, "}\n");
 }
 
 /* 生成结构体构造函数 */
@@ -5122,6 +5150,9 @@ static void gen_struct_constructor(GenBuf *buf, VusAstStructDef *sd) {
     gen_emit_line(buf, "VusString** _vus_params = (VusString**)_args;");
     gen_emit_linef(buf, "vus_struct_%s* _obj = (vus_struct_%s*)calloc(1, sizeof(vus_struct_%s));",
                    san, san, san);
+    /* B1：结构体实例标识与字段递归释放钩子（vus_unref 归零时按 magic 找到钩子） */
+    gen_emit_linef(buf, "_obj->_magic = VUS_STRUCT_MAGIC;");
+    gen_emit_linef(buf, "_obj->_release = vus_struct_%s_release;", san);
 
     if (sd->fields) {
         for (size_t i = 0; i < sd->fields->count; i++) {

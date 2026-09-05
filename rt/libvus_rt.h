@@ -29,6 +29,32 @@ typedef struct VusObject VusObject;
 // 不替代、不重写既有结构，用于承载插件返回的结构化数据。
 #define VUS_OBJECT_MAGIC 0x564F4221  // 'VOB!'：运行时识别结构化容器的魔数
 
+// ============ C 结构体实例（脚本「结构」） ============
+// 生成器把脚本结构体编译为 C 结构体类型 vus_struct_<名>，实例以 VusString*
+// 槽位存放（ref 必须为首字段，与 VusString 约定一致）。运行时 vus_unref 需
+// 区分「普通 VusString」与「结构体实例」，因此生成器在 ref 后固定排放：
+//   int ref;  int _magic;  void (*_release)(void*);  VusString* vus_<字段>...
+// _magic == VUS_STRUCT_MAGIC（'VUS!'）标识结构体实例（VusString 第二字段是
+// len 小整数，不会与其冲突）；_release 指向生成器为该结构体生成的字段递归
+// 释放函数（B1：结构体归零释放时必须先 vus_unref 各字段引用，再 free 主体）。
+// ============ 线程模型（B4） ============
+// VUS 运行时的进程级共享状态（字面量池 g_lit_pool、驻留池 g_intern_keys、
+// 数字串池 g_numstr_pool、容器释放链 g_rel_chain）已在内部用进程级递归互斥锁
+// 保护（多线程各自构造/释放不同对象安全）。但引用计数（ref 增减）与池借出
+// 对象的生命周期遵循**单线程契约**：
+//   1) 同一 VUS 对象（含 vus_literal/vus_string_intern/vus_to_string 借出的
+//      驻留实例）不得被多个线程同时 vus_ref/vus_unref；
+//   2) vus_ref/vus_unref 对全局可共享对象需由宿主在进程级互斥下调用；
+//   3) 脚本内建的 vus_literal/vus_to_string 高频借用保持单线程使用。
+// 多线程各用各的对象、不在线程间传递变量引用时无需额外同步。
+#define VUS_STRUCT_MAGIC 0x56555321  // 'VUS!'：运行时识别 C 结构体实例的魔数
+
+typedef struct {
+    int  ref;                          // 引用计数（首字段）
+    int  magic;                        // VUS_STRUCT_MAGIC
+    void (*release)(void*);            // 生成器提供的字段递归释放函数
+} VusStructHeader;
+
 struct VusObject {
     int ref;    // 引用计数，必须为第一个字段（与 VusString/VusList/VusDict 约定一致）
     int magic;  // VUS_OBJECT_MAGIC：供 vus_print/vus_typeof 区分 VusObject 与 VusString

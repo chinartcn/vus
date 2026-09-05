@@ -11,11 +11,13 @@
 #include "yyjson/yyjson.h"
 
 // ============ 引用计数通用操作 ============
+// B4：ref 首字段用原子增减（__atomic 内置），使多线程对同一对象的
+// vus_ref/vus_unref 不再构成数据竞争。归零判定用 fetch_sub 旧值==1；
+// 对象自身内存生命周期（归零释放、池驻留借用）由各对象归属方与契约约束。*/
 
 void vus_ref(void* obj) {
     if (!obj) return;
-    int* ref = (int*)obj;
-    (*ref)++;
+    __atomic_fetch_add((int*)obj, 1, __ATOMIC_RELAXED);
 }
 
 /* --- 递归释放（容器内部成员）---
@@ -26,6 +28,27 @@ void vus_ref(void* obj) {
  * 环/过深引用用固定释放链(rel_chain)防无限递归与重复释放。 */
 static void vus_object_release(VusObject* o);
 
+/* --- 全局共享状态并发保护（B4） ---
+ * g_lit_pool / g_numstr_pool / g_intern_keys / g_rel_chain 是进程级共享可变
+ * 结构，多线程（协程/线程内建）下并发读写构成数据竞争。用一把进程级递归互斥
+ * 锁保护上述池与释放链：递归锁保证 vus_object_release → vus_unref(元素) 的
+ * 重入安全（同一线程重复加锁不死锁）。引用计数增减（ref--）若跨线程共享同一
+ * 对象仍需外部同步（对象级语义，见 libvus_rt.h 契约说明）。 */
+#include <pthread.h>
+static pthread_mutex_t        g_pool_lock;
+static pthread_once_t         g_pool_once = PTHREAD_ONCE_INIT;
+
+static void vus_pool_lock_init(void) {
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&g_pool_lock, &attr);
+    pthread_mutexattr_destroy(&attr);
+}
+#define VUS_POOL_LOCK()   (pthread_once(&g_pool_once, vus_pool_lock_init), \
+                           pthread_mutex_lock(&g_pool_lock))
+#define VUS_POOL_UNLOCK() (pthread_mutex_unlock(&g_pool_lock))
+
 static void *g_rel_chain[256];
 static int   g_rel_depth = 0;
 static int rel_contains(void *p) {
@@ -35,12 +58,26 @@ static int rel_contains(void *p) {
 
 void vus_unref(void* obj) {
     if (!obj) return;
-    int* ref = (int*)obj;
-    (*ref)--;
-    if (*ref > 0) return;
+    /* 原子归零判定：仅最后一个引用（旧值==1）触发释放 */
+    if (__atomic_fetch_sub((int*)obj, 1, __ATOMIC_ACQ_REL) != 1) return;
     if (vus_is_object(obj)) {
+        VUS_POOL_LOCK();               /* 保护释放链 */
         vus_object_release((VusObject*)obj);
+        VUS_POOL_UNLOCK();
         return;
+    }
+    /* B1：脚本结构体实例（C 结构体，ref 后为 VUS_STRUCT_MAGIC）——归零释放必须
+     * 先通过其 _release 钩子递归 vus_unref 各字段引用，再 free 主体；原先
+     * 一律按非容器单块 free，字段持有的引用永久泄漏（与已修复 UAF 同源） */
+    if (((VusStructHeader*)obj)->magic == VUS_STRUCT_MAGIC) {
+        VusStructHeader *h = (VusStructHeader*)obj;
+        if (h->release) {
+            VUS_POOL_LOCK();
+            h->release(obj);
+            VUS_POOL_UNLOCK();
+            return;
+        }
+        /* 无钩子（异常形态）：退化为仅释放外壳 */
     }
     /* 非容器：VusString 标量（单块分配），直接释放 */
     free(obj);
@@ -97,15 +134,20 @@ VusString* vus_literal(const char* s) {
     if (!s) return NULL;
     int len = (int)strlen(s);
     int slot = (int)(vus_literal_hash(s, len) % VUS_LIT_SLOTS);
+    VUS_POOL_LOCK();                 /* B4：池槽位并发保护 */
     VusString* v = g_lit_pool[slot];
-    if (v && v->len == len && memcmp(v->data, s, (size_t)len) == 0) return v;
+    if (v && v->len == len && memcmp(v->data, s, (size_t)len) == 0) {
+        VUS_POOL_UNLOCK();
+        return v;
+    }
     VusString* nv = vus_string_new_len(s, len);   /* ref=1 由池持有 */
-    if (!nv) return NULL;
+    if (!nv) { VUS_POOL_UNLOCK(); return NULL; }
     /* 换出时不 unref 旧项：借出的指针可能已被 static 缓存/容器持久化，
      * 池换出若递减其引用会叠加到提前 free，导致悬垂（GUI 测试段错误）。
      * 改为永驻：旧项失链交给进程退出回收，借用恒有效。VUS 短生命周期
      * 程序里本文件字面量数量有限，代价可忽略。 */
     g_lit_pool[slot] = nv;
+    VUS_POOL_UNLOCK();
     return nv;
 }
 
@@ -127,20 +169,29 @@ VusString* vus_string_intern(const char* s) {
     if (!s || !s[0]) return vus_string_new("");
     int len = (int)strlen(s);
     int slot = (int)(vus_intern_hash(s, len) % VUS_INTERN_SLOTS);
+    VUS_POOL_LOCK();                 /* B4：池槽位并发保护 */
     VusString* v = g_intern_keys[slot];
     if (v && v->len == len && memcmp(v->data, s, (size_t)len) == 0) {
         vus_ref(v);                      /* 本次借用 */
+        VUS_POOL_UNLOCK();
         return v;
     }
     VusString* nv = vus_string_new_len(s, len);   /* ref=1 归缓存持有 */
-    if (!nv) return vus_string_new("");
-    if (g_intern_keys[slot]) {           /* 换出旧驻留，归还其缓存引用 */
-        VusString* old = g_intern_keys[slot];
+    if (!nv) { VUS_POOL_UNLOCK(); return vus_string_new(""); }
+    VusString* old = g_intern_keys[slot];
+    if (old && __atomic_load_n(&old->ref, __ATOMIC_RELAXED) != 1) {
+        /* B4：旧驻留仍有借用（跨线程共享中）——不换出（避免 free 借用中的
+         * 实例），本次新实例仅借出放弃驻留；借用归还后 ref 回 1，下次再命中。 */
+        VUS_POOL_UNLOCK();
+        return nv;
+    }
+    if (old) {                          /* 换出旧驻留，归还其缓存引用 */
         g_intern_keys[slot] = NULL;
         vus_unref(old);
     }
     g_intern_keys[slot] = nv;
     vus_ref(nv);                         /* 本次借用（调用方归还） */
+    VUS_POOL_UNLOCK();
     return nv;
 }
 
@@ -870,7 +921,13 @@ VusString* vus_add(VusString* a, VusString* b) {
  * 直接传 VusString* 时原样返回（owned=0），避免把 VusObject 当 VusString 解引用野指针。 */
 static VusString *vus_value_unwrap(void *v, int *owned) {
     if (owned) *owned = 0;
-    if (!v || !vus_is_object(v)) return (VusString *)v;
+    if (!v || !vus_is_object(v)) {
+        /* B3：脚本结构体实例不是 VusString，直接按串读 ref 后的 data 会读到
+         * 字段区野指针（offset 8 是 _release 或首个字段指针）。magic 判定后
+         * 返回 NULL，由调用方置 err（转数字/浮点失败），不再越界解引用。 */
+        if (v && ((VusStructHeader *)v)->magic == VUS_STRUCT_MAGIC) return NULL;
+        return (VusString *)v;
+    }
     VusObject *o = (VusObject *)v;
     if (o->type == TYPE_LIST || o->type == TYPE_DICT) {
         VusString *s = vus_json_generate(v);
@@ -927,20 +984,29 @@ VusString* vus_to_string(int64_t n) {
     if (len >= (int)sizeof(buf)) len = (int)sizeof(buf) - 1;
 
     unsigned slot = ((unsigned)n * 2654435761u) % VUS_NUMSTR_SLOTS;
+    VUS_POOL_LOCK();                 /* B4：数字驻留池并发保护 */
     VusString *cached = g_numstr_pool[slot];
     if (cached && cached->len == len && memcmp(cached->data, buf, (size_t)len) == 0) {
         vus_ref(cached);               /* 本次借用 */
+        VUS_POOL_UNLOCK();
         return cached;
     }
     VusString *nv = vus_string_new_len(buf, len);
-    if (!nv) return NULL;
-    if (g_numstr_pool[slot]) {         /* 换出旧驻留 */
-        VusString *old = g_numstr_pool[slot];
+    if (!nv) { VUS_POOL_UNLOCK(); return NULL; }
+    VusString *old = g_numstr_pool[slot];
+    if (old && __atomic_load_n(&old->ref, __ATOMIC_RELAXED) != 1) {
+        /* B4：旧驻留仍有借用——不换出（避免 free 借用中的实例），
+         * 新实例仅借出放弃驻留；借用归还后 ref 回 1，下次同槽再命中/置换。 */
+        VUS_POOL_UNLOCK();
+        return nv;
+    }
+    if (old) {                     /* 换出旧驻留 */
         g_numstr_pool[slot] = NULL;
         vus_unref(old);
     }
     g_numstr_pool[slot] = nv;          /* 缓存保底引用 */
     vus_ref(nv);                       /* 本次借用（调用方 unref 归还） */
+    VUS_POOL_UNLOCK();
     return nv;
 }
 
@@ -970,6 +1036,21 @@ int vus_compare(VusString* a, VusString* b) {
 }
 
 double vus_to_float(VusString* s, int* err) {
+    if (!s) {
+        if (err) *err = 1;
+        return 0.0;
+    }
+    /* B3：与 vus_to_int 对称做容器解包——列表/字典序列化为 JSON 后不可转浮点
+     * （置 err）；结构体实例经 vus_value_unwrap 判 magic 返回 NULL（置 err），
+     * 不再按 VusString 直读 data 造成越界解引用。 */
+    int owned = 0;
+    VusString *tmp = vus_value_unwrap(s, &owned);
+    if (owned) {
+        if (err) *err = 1;
+        vus_unref(tmp);
+        return 0.0;
+    }
+    s = tmp;
     if (!s || !s->data) {
         if (err) *err = 1;
         return 0.0;
@@ -991,7 +1072,7 @@ double vus_to_float(VusString* s, int* err) {
 
 // ============ 线程实现 ============
 
-#include <pthread.h>
+/* pthread.h 已在顶部（B4 全局池锁）包含；usleep 供 vus_thread_sleep */
 #include <unistd.h>  /* usleep / useconds_t，供 vus_thread_sleep */
 
 struct VusThread {
