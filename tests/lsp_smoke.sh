@@ -23,13 +23,16 @@ DETAIL='{"jsonrpc":"2.0","id":3,"method":"textDocument/completion","params":{"te
 # 3) 命令补全：光标所在行为 `..:执行 开始`
 COMMAND='{"jsonrpc":"2.0","id":4,"method":"textDocument/completion","params":{"textDocument":{"text":"..:执行 开始"},"position":{"line":0,"character":25}}}'
 
-# workspace/executeCommand：处理 `开始` 命令，stdout 打印执行意图并返回成功
-EXEC='{"jsonrpc":"2.0","id":5,"method":"workspace/executeCommand","params":{"command":"开始"}}'
+# 3.5) VUA 普通补全：光标所在行为 `界面_`，光标在其末尾（character=7）
+VUA_NORMAL='{"jsonrpc":"2.0","id":5,"method":"textDocument/completion","params":{"textDocument":{"text":"界面_"},"position":{"line":0,"character":7}}}'
 
-SHUT='{"jsonrpc":"2.0","id":6,"method":"shutdown"}'
+# workspace/executeCommand：处理 `开始` 命令，stdout 打印执行意图并返回成功
+EXEC='{"jsonrpc":"2.0","id":6,"method":"workspace/executeCommand","params":{"command":"开始"}}'
+
+SHUT='{"jsonrpc":"2.0","id":7,"method":"shutdown"}'
 EXIT='{"jsonrpc":"2.0","method":"exit"}'
 
-PAYLOAD="$(frame "$INIT")$(frame "$NORMAL")$(frame "$DETAIL")$(frame "$COMMAND")$(frame "$EXEC")$(frame "$SHUT")$(frame "$EXIT")"
+PAYLOAD="$(frame "$INIT")$(frame "$NORMAL")$(frame "$DETAIL")$(frame "$COMMAND")$(frame "$VUA_NORMAL")$(frame "$EXEC")$(frame "$SHUT")$(frame "$EXIT")"
 
 OUTPUT="$(printf '%s' "$PAYLOAD" | "$VUS" lsp 2>&1)"
 RC=$?
@@ -56,10 +59,14 @@ grep -q '"kind":3' <<< "$OUTPUT" || fail "普通补全未返回函数 kind=3"
 grep -q '图形_滚动容器(名, x, y, 宽, 高, 内容高)' <<< "$OUTPUT" || fail "详细补全未返回 图形_滚动容器 完整签名"
 grep -q '"documentation"' <<< "$OUTPUT" || fail "详细补全未返回 documentation 字段"
 
-# 命令补全 + 执行：应返回命令 `开始`（kind=9），并打印执行意图
+# 命令补全：应返回命令 `开始`（kind=9），并打印执行意图
 grep -q '"开始"' <<< "$OUTPUT" || fail "命令补全未返回命令 开始"
 grep -q '"kind":9' <<< "$OUTPUT" || fail "命令补全未返回命令 kind=9"
 grep -q '执行命令: 开始' <<< "$OUTPUT" || fail "executeCommand 未在 stdout 打印执行意图"
+
+# VUA 普通补全：界面_ 前缀应返回 VUA 内建（kind=3）
+grep -q '"界面_显示"' <<< "$OUTPUT" || fail "VUA 补全未返回 界面_显示"
+grep -q '"界面_全局取"' <<< "$OUTPUT" || fail "VUA 补全未返回 界面_全局取"
 
 # shutdown：应返回 result null
 grep -q '"result":null' <<< "$OUTPUT" || fail "shutdown 未返回 result:null"

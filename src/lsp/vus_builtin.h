@@ -21,7 +21,8 @@ enum {
     VUS_BUILTIN_FILE,          /* 文件_* 文件操作 */
     VUS_BUILTIN_SHELL,         /* 命令_执行 / 文本_分割 */
     VUS_BUILTIN_PLUGIN,        /* 插件_* 插件调用 */
-    VUS_BUILTIN_TERMUX         /* Termux_* 环境启动 */
+    VUS_BUILTIN_TERMUX,        /* Termux_* 环境启动 */
+    VUS_BUILTIN_VUA            /* 界面_* VUA Android 组件流 */
 };
 
 /* 单个内置函数元数据 */
