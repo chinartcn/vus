@@ -162,6 +162,27 @@ static void parser_set_error(VusParser *parser, const char *fmt, ...) {
     parser->error = 1;
 }
 
+/*
+ * 尝试解析"类型注解"：接受标识符（自定义类型名）或类型关键字
+ * （int/float/str/bool/list/dict 及中文别名）。命中则消费并返回 strndup
+ * 文本（调用方 free）；未命中返回 NULL 且不消费，由调用方决定是否报错。
+ */
+static char *parser_try_type_annotation(VusParser *parser) {
+    VusToken *tok = parser_peek(parser);
+    if (!tok) return NULL;
+    if (tok->type != VUS_TOKEN_IDENTIFIER &&
+        tok->type != VUS_TOKEN_TYPE_INT &&
+        tok->type != VUS_TOKEN_TYPE_FLOAT &&
+        tok->type != VUS_TOKEN_TYPE_STR &&
+        tok->type != VUS_TOKEN_TYPE_BOOL &&
+        tok->type != VUS_TOKEN_TYPE_LIST &&
+        tok->type != VUS_TOKEN_TYPE_DICT)
+        return NULL;
+    char *ann = strndup(tok->start, tok->length);
+    parser_advance(parser);
+    return ann;
+}
+
 /* ==================================================================
  * 语句块解析
  * ================================================================== */
@@ -389,12 +410,15 @@ static VusAstList *parse_params(VusParser *parser) {
         int line = name_token->line;
         int col = name_token->column;
 
-        /* 类型注解 */
+        /* 类型注解（接受标识符或类型关键字：int/float/str/bool/list/dict 及中文别名） */
         char *type_ann = NULL;
         if (parser_match(parser, VUS_TOKEN_COLON)) {
-            VusToken *type_token = parser_expect(parser, VUS_TOKEN_IDENTIFIER);
-            if (!type_token) { free(param_name); vus_ast_list_free(list); return NULL; }
-            type_ann = strndup(type_token->start, type_token->length);
+            type_ann = parser_try_type_annotation(parser);
+            if (!type_ann) {
+                VusToken *type_token = parser_expect(parser, VUS_TOKEN_IDENTIFIER);
+                if (!type_token) { free(param_name); vus_ast_list_free(list); return NULL; }
+                type_ann = strndup(type_token->start, type_token->length);
+            }
         }
 
         /* 默认值 */
@@ -1046,17 +1070,11 @@ static VusAstNode *parse_struct_def(VusParser *parser) {
         snprintf(field_name, sizeof(field_name), "%.*s", (int)tok->length, tok->start);
         parser_advance(parser);
 
-        /* 可选类型注解 */
+        /* 可选类型注解（接受标识符或类型关键字） */
         char *type_ann = NULL;
         if (parser->pos < parser->token_count && parser->tokens[parser->pos].type == VUS_TOKEN_COLON) {
             parser_advance(parser);
-            if (parser->pos < parser->token_count && parser->tokens[parser->pos].type == VUS_TOKEN_IDENTIFIER) {
-                char ann_buf[256];
-                snprintf(ann_buf, sizeof(ann_buf), "%.*s",
-                         (int)parser->tokens[parser->pos].length, parser->tokens[parser->pos].start);
-                type_ann = strdup(ann_buf);
-                parser_advance(parser);
-            }
+            type_ann = parser_try_type_annotation(parser);
         }
 
         VusAstParam *param = vus_ast_param_new(field_name, type_ann, tok->line, tok->column);
@@ -1154,10 +1172,14 @@ static VusAstNode *parse_assign_or_expr(VusParser *parser) {
             VusAstNode *value = NULL;
 
             if (parser_peek(parser)->type == VUS_TOKEN_COLON) {
-                /* 类型注解 */
-                VusToken *type_token = parser_expect(parser, VUS_TOKEN_IDENTIFIER);
-                if (!type_token) { free(target); return NULL; }
-                type_ann = strndup(type_token->start, type_token->length);
+                /* 类型注解（先消费冒号，再接受标识符或类型关键字） */
+                parser_advance(parser);
+                type_ann = parser_try_type_annotation(parser);
+                if (!type_ann) {
+                    VusToken *type_token = parser_expect(parser, VUS_TOKEN_IDENTIFIER);
+                    if (!type_token) { free(target); return NULL; }
+                    type_ann = strndup(type_token->start, type_token->length);
+                }
 
                 parser_expect(parser, VUS_TOKEN_ASSIGN);
                 if (parser->error) { free(target); free(type_ann); return NULL; }
