@@ -100,6 +100,12 @@ if [ -f "$VAZ/vaz.json" ]; then
   echo "[0b] 展开 .vaz 控件模板: $VAZ"
   "$VUS_BIN" vaz expand "$ASSETS" -v "$VAZ"
 fi
+# 布局模板包（侧边栏布局等，pkg 含 vaz.json 即启用；与逻辑包先后展开互不干扰）
+LAYOUT_VAZ="${LAYOUT_VAZ:-$TESTDATA_SRC/vaz/layout}"
+if [ -f "$LAYOUT_VAZ/vaz.json" ]; then
+  echo "[0b] 展开 .vaz 布局模板: $LAYOUT_VAZ"
+  "$VUS_BIN" vaz expand "$ASSETS" -v "$LAYOUT_VAZ"
+fi
 
 # ---------- 0c. 生成 vus_app.c（vua_test.vus 内 导入 "通用控件包" 由编译器自动展开） ----------
 if [ ! -f "$VUS_C" ] || [ "$TESTDATA_SRC/vua_test.vus" -nt "$VUS_C" ]; then

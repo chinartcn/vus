@@ -21,6 +21,7 @@ package com.vus.android;
 import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 
 import org.json.JSONObject;
 
@@ -39,9 +40,35 @@ import java.util.concurrent.TimeUnit;
 
 public final class VuaBridge {
 
-    static {
-        // 与 vus_apk.c 生成的壳保持一致：native 库名 libvus_app.so
+    /*
+     * 单一真源（热更设计 §5.4）：native 库由 ensureNative() 显式加载——
+     * filesDir/lib/libvus_app.so（patch 释放产物）优先，缺失/加载失败回退 APK 内
+     * lib/<abi>/libvus_app.so（内置版本 0）。加载成功触发 UpdateManager.onSoLoaded()
+     * 作为 last-good 的晋升时机（§5.2）。类加载本身不再隐式 loadLibrary，
+     * 避免 appContext 注入前（filesDir 判定条件）就加载错库。
+     */
+    private static volatile boolean libLoaded = false;
+
+    /** 加载 native 库（单一真源）。首次调用任一 native 方法前必须执行（MainActivity 起步）。
+     * 幂等：重复调用直接返回。 */
+    public static synchronized void ensureNative() {
+        if (libLoaded) return;
+        if (appContext != null) {
+            try {
+                File f = new File(appContext.getFilesDir(), "lib/libvus_app.so");
+                if (f.isFile()) {
+                    System.load(f.getAbsolutePath());
+                    libLoaded = true;
+                    UpdateManager.onSoLoaded();
+                    return;
+                }
+            } catch (Throwable t) {
+                Log.w("VuaBridge", "filesDir 版本 libvus_app.so 加载失败，回退 APK 内置", t);
+            }
+        }
         System.loadLibrary("vus_app");
+        libLoaded = true;
+        UpdateManager.onSoLoaded();
     }
 
     /** 应用 Context：由 MainActivity.onCreate 注入，供 callJava 平台能力桥解析文件路径/目录。 */

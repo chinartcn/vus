@@ -230,6 +230,7 @@ public final class VuaRenderer {
             case "滑块": case "slider":      { sliderView(node, parent); return; }
             case "下拉": case "spinner":     { spinnerView(node, parent); return; }
             case "图片": case "image":       { imageView(node, parent); return; }
+            case "图标": case "icon":        { iconView(node, parent); return; }
             case "课表": case "table": case "grid": { classTable(node, parent); return; }
             case "列表": case "list": case "listview": { listView(node, parent); return; }
             case "网页": case "web": case "浏览器": { webView(node, parent); return; }
@@ -269,7 +270,18 @@ public final class VuaRenderer {
 
     private void layout(JSONObject node, ViewGroup parent, boolean vert) throws Exception {
         LinearLayout ll = makeLayout(vert);
-        parent.addView(ll, matchWrap());
+        /* 宽/高/权重：静态布局参数（布局模板展开产物使用，如侧边栏"列宽/主区权重"）。
+         * 缺省 = matchWrap，与既有行为一致；显式任一参数才走精确 LayoutParams。 */
+        int w = node.optInt("宽度", node.optInt("宽", 0));
+        int h = node.optInt("高度", node.optInt("高", 0));
+        int weight = node.optInt("权重", 0);
+        if (w > 0 || h > 0 || weight > 0) {
+            int lw = w > 0 ? dp(w) : ViewGroup.LayoutParams.WRAP_CONTENT;
+            int lh = h > 0 ? dp(h) : ViewGroup.LayoutParams.WRAP_CONTENT;
+            parent.addView(ll, new LinearLayout.LayoutParams(lw, lh, weight));
+        } else {
+            parent.addView(ll, matchWrap());
+        }
         if (vert) styleVertCard(ll);
         JSONArray ch = node.optJSONArray("children");
         if (ch == null) ch = node.optJSONArray("子组件");
@@ -296,6 +308,9 @@ public final class VuaRenderer {
             default: sp = 14;
         }
         t.setTextSize(sp); t.setTypeface(Typeface.DEFAULT, styleB);
+        // 自定义字体：节点 "字体"/"font" 指定 filesDir 下相对路径 .ttf/.otf
+        // （资源由 extractAssets 从 assets 释放，反馈 2.3 资源包机制）
+        applyFont(node, t);
         // 标题类文本用主题主色，正文保持正文色
         if (styleB == Typeface.BOLD) t.setTextColor(darkTheme ? 0xFF8FB4FF : COLOR_PRIMARY);
         rememberInput(node, t);
@@ -504,11 +519,60 @@ public final class VuaRenderer {
         rememberInput(node, tv);
     }
 
+    /* ---------- 图标控件：显示 filesDir 下的命名位图（反馈 2.3 资源包） ----------
+     * 渲染树节点：{ type:"图标", "名称":"icons/back.png" | "src":"home.png", "宽":24, "高":24 }
+     * 资源文件由 extractAssets 从 assets 释放（png/jpg/webp 均可解码）；
+     * 找不到资源时显示 "[图标 名称]" 占位。 */
+    private void iconView(JSONObject node, ViewGroup parent) {
+        String name = node.optString("名称", node.optString("src", node.optString("icon", "")));
+        ImageView iv = new ImageView(ctx);
+        int w = node.optInt("宽", 0);
+        int h = node.optInt("高", 0);
+        if (w <= 0) w = dp(24);
+        if (h <= 0) h = dp(24);
+        if (!name.isEmpty()) {
+            try {
+                java.io.File f = new java.io.File(ctx.getFilesDir(), name);
+                if (f.isFile()) {
+                    android.graphics.Bitmap bm = BitmapFactory.decodeFile(f.getAbsolutePath());
+                    if (bm != null) {
+                        iv.setImageBitmap(bm);
+                        iv.setContentDescription(node.optString("标签", name));
+                        parent.addView(iv, new LinearLayout.LayoutParams(w, h));
+                        rememberInput(node, iv);
+                        return;
+                    }
+                }
+            } catch (Exception ignored) { }
+        }
+        TextView tv = TextView(ctx, "[图标 " + name + "]");
+        tv.setTextColor(darkTheme ? 0xFF888888 : 0xFF666666);
+        tv.setGravity(Gravity.CENTER);
+        parent.addView(tv);
+        rememberInput(node, tv);
+    }
+
+    /** 自定义字体：节点 "字体"/"font" 指定 filesDir 下相对路径 .ttf/.otf 文件。
+     * 加载失败静默回退系统字体（资源缺失不崩渲染）。 */
+    private void applyFont(JSONObject node, TextView tv) {
+        String font = node.optString("字体", node.optString("font", ""));
+        if (font.isEmpty()) return;
+        try {
+            java.io.File f = new java.io.File(ctx.getFilesDir(), font);
+            if (f.isFile()) {
+                Typeface tf = Typeface.createFromFile(f.getAbsolutePath());
+                if (tf != null) tv.setTypeface(tf, Typeface.NORMAL);
+            }
+        } catch (Exception ignored) { }
+    }
+
     /* ---------- 新控件：列表（ListView 虚拟化 + 复用，项多不卡） ----------
-     * 渲染树节点：{ type:"列表", 数据:[ "标题" | {"标题":"..","副标题":"..","图片":".."} ],
+     * 渲染树节点：{ type:"列表", 数据:[ "标题" | {"标题":"..","副标题":"..","图片":".."} ||
+     *              {"节标题":"分组头"} ],
      *              "加载更多":"事件名"(滚动到底触发), 事件:{...}(行点击), "高度":dp(默认480) }
-     * ListView 的 Adapter getView convertView 复用机制 = 长列表只渲染可视区，
-     * View 数量与屏幕高度相关、与数据条数无关（对应反馈「长列表性能」）。 */
+     * 数据项对象带非空"节标题"字段 → 渲染分组头行（分组列表模板的分组头，
+     * 不参与行点击派发）；否则普通行。ListView convertView 按 viewType 复用，
+     * 长列表只渲染可视区（对应反馈「长列表性能」）。 */
     private void listView(final JSONObject node, final ViewGroup parent) {
         final JSONArray data = node.optJSONArray("数据");
         if (data == null || data.length() == 0) {
@@ -535,7 +599,31 @@ public final class VuaRenderer {
             public int getCount() { return rows; }
             public Object getItem(int pos) { return data.opt(pos); }
             public long getItemId(int pos) { return pos; }
+            /* 两种视图类型：0=普通行，1=分组头行（convertView 按类型复用，互不串形） */
+            @Override public int getViewTypeCount() { return 2; }
+            @Override public int getItemViewType(int pos) {
+                Object it = data.opt(pos);
+                return (it instanceof JSONObject &&
+                        !((JSONObject) it).optString("节标题", "").isEmpty()) ? 1 : 0;
+            }
             public View getView(int pos, View convertView, ViewGroup p) {
+                Object it = data.opt(pos);
+                /* 分组头：数据项对象带非空"节标题" → 粗体小字头行，不参与行点击派发 */
+                if (getItemViewType(pos) == 1) {
+                    TextView h;
+                    if (convertView == null) {
+                        h = new TextView(ctx);
+                        h.setTextSize(13);
+                        h.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+                        h.setTextColor(titleColor);
+                        h.setPadding(dp(12), dp(18), dp(12), dp(4));
+                    } else {
+                        h = (TextView) convertView;
+                    }
+                    h.setText(((JSONObject) it).optString("节标题", ""));
+                    h.setTag(pos);
+                    return h;
+                }
                 // convertView 复用核心：滑出屏幕的 item 视图直接回收重用
                 final LinearLayout row;
                 final TextView titleTv, subTv;
@@ -605,9 +693,12 @@ public final class VuaRenderer {
             }
         });
 
-        /* 行点击 → 事件派发（默认携带 下标 + 点击行文本；再合并输入控件/回调变量） */
+        /* 行点击 → 事件派发（默认携带 下标 + 点击行文本；再合并输入控件/回调变量）。
+         * 分组头行（项带"节标题"）不参与派发。 */
         lv.setOnItemClickListener((a, v, pos, id) -> {
             Object item = data.opt(pos);
+            if (item instanceof JSONObject &&
+                    !((JSONObject) item).optString("节标题", "").isEmpty()) return;
             String title = item instanceof String ? (String) item
                     : item instanceof JSONObject ? ((JSONObject) item).optString("标题", "")
                     : "";
