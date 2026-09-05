@@ -18,6 +18,7 @@
 #include "yyjson/yyjson.h"
 #include "lexer.h"
 #include "token.h"
+#include "vua_lint.h"   /* .vua 校验闭环：发布诊断（复用 vua.c 严格校验+渲染树归一） */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -550,6 +551,67 @@ static void send_doc(yyjson_mut_doc *doc) {
     yyjson_mut_doc_free(doc);
 }
 
+/* ============ .vua 校验闭环（publishDiagnostics） ============ */
+
+static int uri_is_vua(const char *uri) {
+    if (!uri) return 0;
+    size_t n = strlen(uri);
+    return n >= 4 && strcmp(uri + n - 4, ".vua") == 0;
+}
+
+/* 构造 publishDiagnostics 通知并发送（diags 内为空数组则清空诊断） */
+static void send_publish_diagnostics(const char *uri, int have_err,
+                                     const VuaError *errs) {
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    obj_add_str(doc, root, "jsonrpc", "2.0");
+    obj_add_str(doc, root, "method", "textDocument/publishDiagnostics");
+    yyjson_mut_val *params = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_val(doc, root, "params", params);
+    obj_add_str(doc, params, "uri", uri);
+    yyjson_mut_val *diags = yyjson_mut_arr(doc);
+    yyjson_mut_obj_add_val(doc, params, "diagnostics", diags);
+
+    const VuaError *e = errs;
+    for (int n = 0; have_err && e && n < 32; e = e->next, n++) {
+        yyjson_mut_val *item = yyjson_mut_obj(doc);
+        yyjson_mut_arr_append(diags, item);
+        yyjson_mut_val *range = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_val(doc, item, "range", range);
+        int line = e->line > 0 ? e->line - 1 : 0;   /* VuaError.line 为 1 起步；0=未知 */
+        yyjson_mut_val *start = yyjson_mut_obj(doc);
+        yyjson_mut_val *end = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_val(doc, range, "start", start);
+        yyjson_mut_obj_add_val(doc, range, "end", end);
+        yyjson_mut_obj_add_int(doc, start, "line", line);
+        yyjson_mut_obj_add_int(doc, start, "character", 0);
+        yyjson_mut_obj_add_int(doc, end, "line", line);
+        yyjson_mut_obj_add_int(doc, end, "character", 1);
+        yyjson_mut_obj_add_int(doc, item, "severity", 1);   /* 1 = Error */
+        obj_add_str(doc, item, "source", "vua-lint");
+        yyjson_mut_obj_add_int(doc, item, "code", e->code);
+        obj_add_str(doc, item, "message", e->msg);
+    }
+    send_doc(doc);
+}
+
+/* 校验 .vua 文本并发布诊断（didOpen/didChange/didSave 后调用） */
+static void publish_vua_diagnostics(const char *uri, const char *text) {
+    if (!uri_is_vua(uri)) return;
+    vua_lint_ensure_catalog(NULL, NULL, 0);   /* 进程级一次，尽力加载控件表 */
+    VuaError err;
+    memset(&err, 0, sizeof(err));
+    int rc = vua_lint_text(text ? text : "", uri, &err, NULL);  /* 0=通过, -1=失败 */
+    send_publish_diagnostics(uri, rc != 0, rc == 0 ? NULL : &err);
+}
+
+/* 关闭 .vua 文档时清空诊断 */
+static void clear_vua_diagnostics(const char *uri) {
+    if (!uri_is_vua(uri)) return;
+    send_publish_diagnostics(uri, 0, NULL);
+}
+
 /* ============ 补全项追加 ============ */
 
 static void append_builtin_item(yyjson_mut_doc *doc, yyjson_mut_val *arr,
@@ -920,10 +982,14 @@ static void process_request(yyjson_val *req) {
             const char *text = req_document_text(params);
             if (text) doc_update(uri, text);
         }
+        /* .vua 校验闭环：文档打开/变更/保存后发布诊断 */
+        publish_vua_diagnostics(uri, doc_find_text(uri));
     } else if (strcmp(method, "textDocument/didClose") == 0) {
-        /* 关闭文档：释放缓冲 */
+        /* 关闭文档：释放缓冲并清空 .vua 诊断 */
         yyjson_val *params = yyjson_obj_get(req, "params");
-        doc_close(req_document_uri(params));
+        const char *uri = req_document_uri(params);
+        clear_vua_diagnostics(uri);
+        doc_close(uri);
     } else if (strcmp(method, "$/cancelRequest") == 0) {
         /* 忽略取消请求 */
     } else {

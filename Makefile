@@ -35,6 +35,7 @@ SRCS     = $(SRC_DIR)/main.c $(SRC_DIR)/token.c $(SRC_DIR)/lexer.c \
            $(SRC_DIR)/ast.c $(SRC_DIR)/vus_abi.c $(SRC_DIR)/vus_plugin.c \
            $(SRC_DIR)/vus_lang.c $(SRC_DIR)/vus_vusx.c $(SRC_DIR)/vus_apk.c \
            $(SRC_DIR)/vus_chart.c $(SRC_DIR)/vus_vaz.c \
+           $(SRC_DIR)/vua_lint.c \
            $(SRC_DIR)/lsp/lsp.c $(SRC_DIR)/lsp/vus_builtin.c
 OBJS     = $(SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
 RT_SRC   = $(RT_DIR)/libvus_rt.c
@@ -102,13 +103,18 @@ all: vus $(RT_LIB)
 # 编译目标
 # =============================================================================
 
-# 链接编译器（含 yyjson：LSP 服务器模块在进程内直接使用该 JSON 库）
-vus: $(OBJS) $(YYJSON_OBJ)
-	$(CC) $(CFLAGS) -o $@ $^ -lm -ldl
+# VUA 界面运行时（native 组件流：解析/严格校验/渲染树归一/事件派发）
+VUA_SRC  = $(RT_DIR)/vua.c
+VUA_OBJ  = $(BUILD_DIR)/vua.o
+
+# 链接编译器（含 yyjson、VUA 运行时与其所需 libvus_rt/协程/EasyLogger：
+# CLI `vus lint` 与 LSP .vua 校验闭环进程内复用 vua.c 严格校验 + 渲染树归一）
+vus: $(OBJS) $(YYJSON_OBJ) $(VUA_OBJ) $(RT_OBJ) $(RT_CORO_OBJ) $(EL_OBJ)
+	$(CC) $(CFLAGS) -o $@ $^ -lm -ldl -lpthread
 
 # 编译源文件
 $(BUILD_DIR)/main.o: $(SRC_DIR)/main.c $(MAIN_H) $(COMMON_H) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -I$(SRC_DIR) -c -o $@ $<
+	$(CC) $(CFLAGS) -I$(SRC_DIR) -I$(RT_DIR) -c -o $@ $<
 
 $(BUILD_DIR)/token.o: $(SRC_DIR)/token.c $(TOKEN_H) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c -o $@ $<
@@ -124,6 +130,15 @@ $(BUILD_DIR)/generator.o: $(SRC_DIR)/generator.c $(GEN_H) $(TOKEN_H) $(SRC_DIR)/
 
 $(BUILD_DIR)/config.o: $(SRC_DIR)/config.c $(CONFIG_H) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c -o $@ $<
+
+# .vua 离线校验（vus lint）/ LSP .vua 诊断（复用 rt/vua.c 严格校验+渲染树归一）
+VUA_LINT_H = $(SRC_DIR)/vua_lint.h
+
+$(BUILD_DIR)/vua_lint.o: $(SRC_DIR)/vua_lint.c $(VUA_LINT_H) $(RT_DIR)/vua.h $(RT_H) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(SRC_DIR) -I$(RT_DIR) -c -o $@ $<
+
+$(VUA_OBJ): $(RT_DIR)/vua.c $(RT_DIR)/vua.h $(RT_H) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(RT_DIR) -c -o $@ $<
 
 $(BUILD_DIR)/ast.o: $(SRC_DIR)/ast.c $(SRC_DIR)/ast.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c -o $@ $<

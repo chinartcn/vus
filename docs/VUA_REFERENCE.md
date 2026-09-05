@@ -340,9 +340,14 @@ select→下拉  slider→滑块  list→列表  web→网页  table→表格  d
 | 根节点 type 不是 `界面` | 报错 `VUA_ERR_ROOT` |
 | 事件名绑定不到处理函数 | 触发时报 `VUA_ERR_BINDING`（不静默）|
 
-## 十一、离线校验（vua lint）
+## 十一、离线校验（vus lint）
 
-错误不应等装机后才发现。当前严格校验在**加载期**由 `vua_screen_load` 执行（读控件表/词典 → 校验 type/字段 → 建组件树），`tests/vua_smoke.c` 即为"改 .vua 时"的离线冒烟校验。
+错误不应等装机后才发现。`vus lint` 提供独立的 `.vua` 离线校验命令：读控件表（`--controls` / `VUS_VUA_CONTROLS` / 缺省探测 `vua_controls.json`、`testdata/vua_controls.json`）→ 对每个 `.vua` 走与装载期完全相同的严格校验（复用 `rt/vua.c` 的 `vua_screen_load` + `vua_screen_dump_rendertree`，与 `tests/vua_smoke.c` 同套逻辑）→ 输出渲染树指纹。
+
+```bash
+vus lint vua_home.vua vua_settings.vua          # 默认探测控件表
+vus lint --controls vua_controls.json *.vua     # 显式指定控件表
+```
 
 | 检查项 | 说明 | 状态 |
 |--------|------|:----:|
@@ -352,7 +357,7 @@ select→下拉  slider→滑块  list→列表  web→网页  table→表格  d
 | JSON 语法 | `.vua` 是合法 JSON | ✅ 加载期校验 |
 | 引用控件存在 | 控件依赖在 APK 打包清单里存在 | ⚠️ 打包期人工核对 |
 
-> `vus lint` 独立命令行工具为**待办**（未实现）；当前可用 `tests/vua_smoke.c`（需要 `gcc -I rt rt/vua.c rt/yyjson/yyjson.c tests/vua_smoke.c` 编译运行）对 `.vua` 做同样的立项校验。
+> `vus lint` 已实现（`src/vua_lint.c`），并补上 LSP 校验闭环：编辑器打开/编辑/保存 `.vua` 时发布 `textDocument/publishDiagnostics`（source=`vua-lint`），IDE 内即时暴露校验错误。冒烟覆盖：`tests/lint_smoke.sh`（CLI）与 `tests/lsp_smoke.sh`（LSP 诊断）。
 
 ## 十二、可拓展流程
 

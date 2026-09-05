@@ -32,7 +32,10 @@ EXEC='{"jsonrpc":"2.0","id":6,"method":"workspace/executeCommand","params":{"com
 SHUT='{"jsonrpc":"2.0","id":7,"method":"shutdown"}'
 EXIT='{"jsonrpc":"2.0","method":"exit"}'
 
-PAYLOAD="$(frame "$INIT")$(frame "$NORMAL")$(frame "$DETAIL")$(frame "$COMMAND")$(frame "$VUA_NORMAL")$(frame "$EXEC")$(frame "$SHUT")$(frame "$EXIT")"
+# 4) .vua 校验闭环：didOpen 坏 JSON 应发布 publishDiagnostics（source=vua-lint）
+VUA_OPEN='{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///tmp/坏.vua","languageId":"vua","version":1,"text":"{非法JSON"}}}'
+
+PAYLOAD="$(frame "$INIT")$(frame "$NORMAL")$(frame "$DETAIL")$(frame "$COMMAND")$(frame "$VUA_NORMAL")$(frame "$EXEC")$(frame "$VUA_OPEN")$(frame "$SHUT")$(frame "$EXIT")"
 
 OUTPUT="$(printf '%s' "$PAYLOAD" | "$VUS" lsp 2>&1)"
 RC=$?
@@ -67,6 +70,11 @@ grep -q '执行命令: 开始' <<< "$OUTPUT" || fail "executeCommand 未在 stdo
 # VUA 普通补全：界面_ 前缀应返回 VUA 内建（kind=3）
 grep -q '"界面_显示"' <<< "$OUTPUT" || fail "VUA 补全未返回 界面_显示"
 grep -q '"界面_全局取"' <<< "$OUTPUT" || fail "VUA 补全未返回 界面_全局取"
+
+# .vua 校验闭环：didOpen 坏 JSON → publishDiagnostics（source=vua-lint）
+grep -q 'textDocument/publishDiagnostics' <<< "$OUTPUT" || fail ".vua didOpen 未发布 publishDiagnostics"
+grep -q '"source":"vua-lint"' <<< "$OUTPUT" || fail ".vua 诊断 source 非 vua-lint"
+grep -q '非法 JSON' <<< "$OUTPUT" || fail ".vua 诊断未含 JSON 解析错误"
 
 # shutdown：应返回 result null
 grep -q '"result":null' <<< "$OUTPUT" || fail "shutdown 未返回 result:null"

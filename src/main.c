@@ -17,6 +17,7 @@
 #include "vus_apk.h"
 #include "vus_chart.h"
 #include "vus_vaz.h"
+#include "vua_lint.h"
 #include "lsp/lsp.h"
 
 #include <stdio.h>
@@ -681,7 +682,9 @@ static void print_help(void) {
     printf("  build --exe   <file>   编译为可执行文件\n");
     printf("  build --apk   <file>   编译为 Android APK 项目\n");
     printf("                [--ndk-path <路径>] [--app-name <名称>] [--output <目录>]\n");
-    printf("  test                   运行「测试/」目录下的测试用例\n\n");
+    printf("  test                   运行「测试/」目录下的测试用例\n");
+    printf("  lint [--controls <控件表.json>] <file.vua>...\n");
+    printf("                          离线校验 .vua（复用 vua.c 严格校验+渲染树归一）\n\n");
     printf("项目管理:\n");
     printf("  init [--force]         交互式项目初始化\n");
     printf("  update                 自动更新编译器（git 拉取或预编译包）\n");
@@ -751,6 +754,11 @@ int main(int argc, char *argv[]) {
     /* test */
     if (strcmp(cmd, "test") == 0) {
         return vus_test();
+    }
+
+    /* lint */
+    if (strcmp(cmd, "lint") == 0) {
+        return vus_lint_cmd(argc - 2, argv + 2);
     }
 
     /* build */
