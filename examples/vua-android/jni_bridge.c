@@ -149,15 +149,29 @@ JNIEXPORT jbyteArray JNICALL
 Java_com_vus_android_VuaBridge_vuaRenderTreeBytes(JNIEnv *env, jclass clazz) {
     (void)env; (void)clazz;
 
+    /* G5：JNI 拷贝减负 ——
+     * 1) 长度走 native 缓存（vua_screen_rendertree_len），免 strlen 整树扫描；
+     * 2) 指纹不变时复用上次的 jbyteArray（NewLocalRef），不再 NewByteArray+
+     *    SetByteArrayRegion 整树拷贝（同屏纯文本变量更新先被 Java 端 tryVarUpdate
+     *    吸收；此处兜住"多次取整树但内容未变"的场景）。 */
+    static jbyteArray g_treeBytes = NULL;
+    static jlong     g_treeHash  = 0;   /* 0 只会在空屏出现，前面已 return */
     VuaSession *s = vua_global_session(NULL);
     VuaScreen *cur = s ? vua_session_current(s) : NULL;
     if (!cur) return NULL;
+    jlong h = (jlong)(vua_screen_rendertree_hash(cur) & 0x7FFFFFFFFFFFFFFFULL);
+    int clen = vua_screen_rendertree_len(cur);
+    if (g_treeBytes && h == g_treeHash && clen > 0) {
+        return (*env)->NewLocalRef(env, g_treeBytes);
+    }
     const char *tree = vua_screen_dump_rendertree(cur);
     if (!tree) return NULL;
-    jsize len = (jsize)strlen(tree);
-    jbyteArray arr = (*env)->NewByteArray(env, len);
+    jbyteArray arr = (*env)->NewByteArray(env, clen);
     if (!arr) return NULL;
-    (*env)->SetByteArrayRegion(env, arr, 0, len, (const jbyte *)tree);
+    (*env)->SetByteArrayRegion(env, arr, 0, clen, (const jbyte *)tree);
+    if (g_treeBytes) (*env)->DeleteGlobalRef(env, g_treeBytes);
+    g_treeBytes = (jbyteArray)(*env)->NewGlobalRef(env, arr);
+    g_treeHash = h;
     return arr;
 
 }
@@ -208,7 +222,7 @@ Java_com_vus_android_VuaBridge_vuaTrigger(JNIEnv *env, jclass clazz, jstring eve
 JNIEXPORT jint JNICALL
 Java_com_vus_android_VuaBridge_vuaTriggerById(JNIEnv *env, jclass clazz, jstring nodeId, jstring varsJson) {
 
-    return do_trigger(env, node_id, vars_json, 1);
+    return do_trigger(env, nodeId, varsJson, 1);
 
 }
 

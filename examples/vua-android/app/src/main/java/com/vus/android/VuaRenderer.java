@@ -10,10 +10,12 @@
 package com.vus.android;
 
 import android.content.Context;
+import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.text.InputType;
+import android.util.LruCache;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -54,6 +56,16 @@ public final class VuaRenderer {
     private static final int COLOR_PRIMARY = 0xFF2962FF; // 主题主色（与 styles.xml colorAccent 一致）
     private static final int BG_LIGHT      = 0xFFF5F6FA; // 页面浅灰底（Material Light windowBackground）
     private static final int PAGE_CACHE_MAX = 6;          // 页面 View 缓存上限（LRU 逐出）
+    private static final int DEFAULT_PAGE_CACHE_MAX = PAGE_CACHE_MAX;
+
+    /** 本地图片位图缓存（G1）：文件路径 -> Bitmap。ImageLoader 只覆盖远程图，
+     *  本地 decodeFile 每帧全量重建时反复解压同一文件，这里按路径 LRU 复用解码结果。 */
+    private static final class BitmapMemCache extends LruCache<String, Bitmap> {
+        BitmapMemCache(int maxBytes) { super(maxBytes); }
+        @Override protected int sizeOf(String key, Bitmap value) {
+            return value.getByteCount();
+        }
+    }
 
     /** 页面 View 缓存条目：已构建好的整棵子树 + 输入控件/变量文本/变量值快照。
      *  缓存命中（重新进入同一页面且内容相同）时直接挂回 root，跳过 JSON 解析与
@@ -82,15 +94,45 @@ public final class VuaRenderer {
     private long lastFp = -2L;                 // 当前显示内容的指纹（-2 初始占位，强制首帧）
     private long lastScreenId = -2L;           // 当前显示内容的屏序号（判断是否同一屏）
     private final LinkedHashMap<Long, PageCache> pageCache; // 渲染树指纹 -> 已构建 View（LRU）
+    private final BitmapMemCache bitmapCache;               // G1：本地图片按路径复用位图
+    private final int pageCacheMax;                         // G5：页面 View 缓存上限（参数化）
+
+    /* G4：id 键控子树复用缓存。同一屏连续构建时，带 id 节点的子树快照（node.toString）
+     * 相同则直接复用上次构建的 View 实例（含其输入/文本/变量登记），非文本局部变化
+     * 只重建受影响子树，不再 removeAllViews + 整树 new JSONObject。换屏时清空。 */
+    private static final class IdEntry {
+        final long sid;
+        final String snap;
+        final View view;
+        final Map<String, View> subInputs;          // 该子树登记的 输入控件（id/variable → View）
+        final Map<String, TextView> subVarTexts;    // 该子树登记的 变量文本
+        final Map<String, String> subVars;          // 该子树登记的 变量快照（构建路径收集）
+        IdEntry(long sid, String snap, View view,
+                Map<String, View> subInputs, Map<String, TextView> subVarTexts,
+                Map<String, String> subVars) {
+            this.sid = sid; this.snap = snap; this.view = view;
+            this.subInputs = subInputs; this.subVarTexts = subVarTexts; this.subVars = subVars;
+        }
+    }
+    private final LinkedHashMap<String, IdEntry> idCache; // 屏内 id -> 子树条目
+    private long idCacheSid = -2L;                        // idCache 所属屏序号（-2=还未首次构建）
 
     public VuaRenderer(Context ctx, ViewGroup root) {
+        this(ctx, root, DEFAULT_PAGE_CACHE_MAX);
+    }
+
+    public VuaRenderer(Context ctx, ViewGroup root, int pageCacheMax) {
         this.ctx = ctx;
         this.root = root;
+        this.pageCacheMax = pageCacheMax;
         this.inputs = new HashMap<>();
         this.savedVals = new HashMap<>();
         this.varTexts = new HashMap<>();
         this.lastVars = new HashMap<>();
         this.pageCache = new LinkedHashMap<>(16, 0.75f, true);   // accessOrder=true → LRU
+        this.bitmapCache = new BitmapMemCache(
+                (int) (Runtime.getRuntime().maxMemory() / 16));  // 1/16 堆给本地位图
+        this.idCache = new LinkedHashMap<>(32, 0.75f, true);
     }
 
     /** 版本号协议 + View diff：仅凭指纹/屏序号决定动作。
@@ -139,12 +181,16 @@ public final class VuaRenderer {
             root.setBackgroundColor(darkTheme ? 0xFF121212 : BG_LIGHT);
             /* 先构建到透明包装容器，整棵子树才能脱离 root 缓存复用 */
             varTexts.clear();
+            idCacheSync(sid);                          // G4：换屏时清空屏内子树复用缓存
             LinearLayout wrapper = new LinearLayout(ctx);
             wrapper.setOrientation(LinearLayout.VERTICAL);
-            buildInto(parsed, wrapper);
+            Map<String, String> builtVars = new HashMap<>();
+            buildInto(parsed, wrapper, builtVars);
             root.addView(wrapper, matchWrap());
+            /* G2：变量快照在构建路径上顺带收集（不变量控件时 same diff 基准），
+             * 不再整树第二遍 collectVars 扫描 */
             lastVars.clear();
-            lastVars.putAll(collectVars(parsed, new HashMap<String, String>()));
+            lastVars.putAll(builtVars);
             cachePage(fp, wrapper);
         } catch (Exception e) {
             String msg = "渲染失败: " + e.getMessage();
@@ -156,7 +202,7 @@ public final class VuaRenderer {
     private void cachePage(long fp, View view) {
         pageCache.put(fp, new PageCache(view, new HashMap<>(inputs),
                 new HashMap<>(varTexts), new HashMap<>(lastVars)));
-        while (pageCache.size() > PAGE_CACHE_MAX) {
+        while (pageCache.size() > pageCacheMax) {
             long eldest = pageCache.keySet().iterator().next();
             pageCache.remove(eldest);
         }
@@ -165,6 +211,7 @@ public final class VuaRenderer {
     /** 换页缓存命中：挂回该页 View，并恢复输入/变量文本/变量值快照。 */
     private void swapPage(PageCache hit, long fp, long sid) {
         root.removeAllViews();
+        idCacheSync(sid);                     // 换页：屏内子树复用缓存随屏切换
         root.addView(hit.view, matchWrap());
         inputs.clear();
         inputs.putAll(hit.inputs);
@@ -174,6 +221,14 @@ public final class VuaRenderer {
         lastVars.putAll(hit.lastVars);
         lastFp = fp;
         lastScreenId = sid;
+    }
+
+    /** 屏内子树复用缓存与屏序号同步：换屏（sid 变化）即清空，防跨屏误用。 */
+    private void idCacheSync(long sid) {
+        if (sid != idCacheSid) {
+            idCache.clear();
+            idCacheSid = sid;
+        }
     }
 
     /** View diff：新树只更新"变量文本"值变化的部分；若变化涉及非文本控件则
@@ -217,12 +272,53 @@ public final class VuaRenderer {
 
     /* ---------- 分发 ---------- */
 
-    private void buildInto(JSONObject node, ViewGroup parent) throws Exception {
+    /* G4：id 键控子树复用。同屏连续构建时，带 id 节点的子树快照（node.toString）
+     * 相同 → 直接复用上次构建的 View 实例（输入/文本/变量登记一并并回）；
+     * 不同 → 构建到临时容器，归因子树对登记表的贡献后缓存新条目。 */
+    private void buildInto(JSONObject node, ViewGroup parent,
+                           Map<String, String> builtVars) throws Exception {
+        String id = node.optString("id", "");
+        if (!id.isEmpty()) {
+            String snap = node.toString();
+            IdEntry hit = idCache.get(id);
+            if (hit != null && hit.sid == idCacheSid && snap.equals(hit.snap)) {
+                /* 复用：登记快照并回（等价于该子树本次“重建登记”，值取上次快照） */
+                inputs.putAll(hit.subInputs);
+                varTexts.putAll(hit.subVarTexts);
+                builtVars.putAll(hit.subVars);
+                parent.addView(hit.view);
+                return;
+            }
+            /* 记账基线：构建前后登记表的差集 = 该子树的贡献 */
+            java.util.Set<String> inB = new java.util.HashSet<>(inputs.keySet());
+            java.util.Set<String> vtB = new java.util.HashSet<>(varTexts.keySet());
+            java.util.Set<String> bvB = new java.util.HashSet<>(builtVars.keySet());
+            LinearLayout tmp = new LinearLayout(ctx);
+            buildIntoBody(node, tmp, builtVars);
+            View got = tmp.getChildCount() == 1 ? tmp.getChildAt(0)
+                    : (tmp.getChildCount() == 0 ? null : tmp);
+            if (got != null) {
+                idCache.put(id, new IdEntry(idCacheSid, snap, got,
+                        diffMap(inB, inputs), diffMap(vtB, varTexts), diffMap(bvB, builtVars)));
+                parent.addView(got);
+            }
+            return;
+        }
+        buildIntoBody(node, parent, builtVars);
+    }
+
+    /** 构建分发主体：G2 变量快照收集在遍历每个节点时顺带完成（与 collectVars 同语义）。 */
+    private void buildIntoBody(JSONObject node, ViewGroup parent,
+                               Map<String, String> builtVars) throws Exception {
+        String vv = node.optString("variable", "");
+        if (!vv.isEmpty()) {
+            builtVars.put(vv, node.optString("内容", node.optString("value", "")));
+        }
         String type = node.optString("type");
         switch (type) {
             case "界面": case "列": case "column": case "卡片": case "card":
-            case "表单": case "form":   { layout(node, parent, vertical(node)); return; }
-            case "行": case "row":      { layout(node, parent, false); return; }
+            case "表单": case "form":   { layout(node, parent, vertical(node), builtVars); return; }
+            case "行": case "row":      { layout(node, parent, false, builtVars); return; }
             case "文本": case "text":   { parent.addView(textView(node)); return; }
             case "按钮": case "button": { parent.addView(buttonView(node)); return; }
             case "输入框": case "text_input": case "tarea": {
@@ -236,7 +332,7 @@ public final class VuaRenderer {
             case "图标": case "icon":        { iconView(node, parent); return; }
             case "课表": case "table": case "grid": { classTable(node, parent); return; }
             case "列表": case "list": case "listview": { listView(node, parent); return; }
-            case "侧边栏": case "drawer": case "sidebar": { drawerView(node, parent); return; }
+            case "侧边栏": case "drawer": case "sidebar": { drawerView(node, parent, builtVars); return; }
             case "网页": case "web": case "浏览器": { webView(node, parent); return; }
             default: {
                 // 未知/扩展 type：降级为一个文本框占位（严格原则下应报错，这里保证不崩）。
@@ -245,6 +341,15 @@ public final class VuaRenderer {
                 parent.addView(t);
             }
         }
+    }
+
+    /** 复用判定用的登记表差集：返回 cur 中不在 before 里的键值对。 */
+    private static <K, V> Map<K, V> diffMap(java.util.Set<K> before, Map<K, V> cur) {
+        Map<K, V> m = new HashMap<>();
+        for (Map.Entry<K, V> e : cur.entrySet()) {
+            if (!before.contains(e.getKey())) m.put(e.getKey(), e.getValue());
+        }
+        return m;
     }
 
     private static boolean vertical(JSONObject node) {
@@ -272,7 +377,8 @@ public final class VuaRenderer {
         ll.setPadding(dp(16), dp(12), dp(16), dp(12));
     }
 
-    private void layout(JSONObject node, ViewGroup parent, boolean vert) throws Exception {
+    private void layout(JSONObject node, ViewGroup parent, boolean vert,
+                        Map<String, String> builtVars) throws Exception {
         LinearLayout ll = makeLayout(vert);
         /* 宽/高/权重：静态布局参数（布局模板展开产物使用，如侧边栏"列宽/主区权重"）。
          * 缺省 = matchWrap，与既有行为一致；显式任一参数才走精确 LayoutParams。 */
@@ -292,7 +398,7 @@ public final class VuaRenderer {
         if (ch != null) {
             for (int i = 0; i < ch.length(); i++) {
                 JSONObject c = ch.optJSONObject(i);
-                if (c != null) buildInto(c, ll);
+                if (c != null) buildInto(c, ll, builtVars);
             }
         }
     }
@@ -501,7 +607,7 @@ public final class VuaRenderer {
             try {
                 java.io.File imgFile = new java.io.File(ctx.getFilesDir(), src);
                 if (imgFile.exists()) {
-                    android.graphics.Bitmap bm = BitmapFactory.decodeFile(imgFile.getAbsolutePath());
+                    Bitmap bm = loadLocalBitmap(imgFile.getAbsolutePath());
                     if (bm != null) {
                         iv.setImageBitmap(bm);
                         iv.setAdjustViewBounds(true);
@@ -538,7 +644,7 @@ public final class VuaRenderer {
             try {
                 java.io.File f = new java.io.File(ctx.getFilesDir(), name);
                 if (f.isFile()) {
-                    android.graphics.Bitmap bm = BitmapFactory.decodeFile(f.getAbsolutePath());
+                    Bitmap bm = loadLocalBitmap(f.getAbsolutePath());
                     if (bm != null) {
                         iv.setImageBitmap(bm);
                         iv.setContentDescription(node.optString("标签", name));
@@ -754,7 +860,8 @@ public final class VuaRenderer {
      *     "宽度":240, "侧":"左"|"右" }
      * 抽屉默认收起；「侧」边缘 20dp 水平向内拖动滑出，点击遮罩或菜单项后收起。
      * 菜单项点击事件载荷与「列表」一致：{"下标":i,"值":"标题"}（+ 收集/回调变量）。 */
-    private void drawerView(final JSONObject node, final ViewGroup parent) throws Exception {
+    private void drawerView(final JSONObject node, final ViewGroup parent,
+                            final Map<String, String> builtVars) throws Exception {
         final String evName = eventName(node);
         final String nodeId = node.optString("id", "");
         final boolean left = !"右".equals(node.optString("侧", node.optString("side", "左")));
@@ -773,7 +880,7 @@ public final class VuaRenderer {
         if (content != null) {
             for (int i = 0; i < content.length(); i++) {
                 JSONObject c = content.optJSONObject(i);
-                if (c != null) buildInto(c, contentHost);
+                if (c != null) buildInto(c, contentHost, builtVars);
             }
         }
 
@@ -1163,5 +1270,16 @@ public final class VuaRenderer {
         if (!id.isEmpty()) inputs.put(id, v);
         String variable = node.optString("variable", "");
         if (!variable.isEmpty()) { v.setTag("variable:" + variable); inputs.put(variable, v); }
+    }
+
+    /* ---------- 本地图片（G1）：按路径 LRU 复用位图，避免反复 decodeFile ---------- */
+    private Bitmap loadLocalBitmap(String absPath) {
+        Bitmap bm = bitmapCache.get(absPath);
+        if (bm != null) return bm;
+        try {
+            bm = BitmapFactory.decodeFile(absPath);
+            if (bm != null) bitmapCache.put(absPath, bm);
+        } catch (Exception ignored) { }
+        return bm;
     }
 }

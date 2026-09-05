@@ -84,6 +84,17 @@ struct VuaScreen {
     char       *render_cache; /* 渲染树缓存：state 未变时复用（vua_screen_dump_rendertree 所有者） */
     uint64_t    render_hash;  /* 缓存内容的 64 位指纹（FNV-1a），版本号协议用 */
     uint64_t    seq;          /* 屏序号（push 时递增分配），供 View diff 识别"是否同一屏" */
+
+    /* G3：渲染树骨架 + 变量占位符。
+     * skeleton 为含占位符的整树 JSON（变量文本「内容」= @@VUA_VAR_<i>@@），
+     * 源树不变则骨架不变；界面_设置 只置 vars_dirty，重建时仅做单遍扫描替换，
+     * 不再整树归一化+序列化。 */
+    char       *skeleton;
+    VuaVarSlot *var_slots;    /* slot i → 变量名 + 缺省显示值（源「内容」） */
+    int         var_count;
+    int         var_cap;
+    size_t      render_cache_len; /* 渲染树缓存字节长度（JNI 侧免 strlen） */
+    int         vars_dirty;       /* state 变化 → 需重算变量注入 */
 };
 
 struct VuaSession {
@@ -278,6 +289,161 @@ static yyjson_mut_val *build_event_obj(yyjson_mut_doc *d, const yyjson_val *v) {
     return ev;
 }
 
+/* ============ G3 渲染树骨架：变量占位符插槽 ============ */
+
+struct VuaVarSlot {
+    char *name;      /* 变量名 */
+    char *fallback;  /* 变量未在屏状态时的缺省显示值（源「内容」），动态复制 */
+};
+
+/* 渲染树构建上下文：d=目标 mut 文档；state=屏变量表；screen=骨架模式（登记变量 slot，非 NULL 时
+ * 变量文本「内容」输出为占位符 @@VUA_VAR_<i>@@ 而非状态值直填）。 */
+typedef struct {
+    yyjson_mut_doc *d;
+    VusDict        *state;
+    VuaScreen      *screen;
+} RenderBuildCtx;
+
+/* 登记变量 slot：同变量名复用同一 slot（多处文本引用共享，占位符 token 唯一）。
+ * 返回 slot 序号；失败（内存不足）返回 -1，调用方回退正常字面量。 */
+static int vua_var_slot(VuaScreen *s, const char *var, const char *fallback) {
+    if (!s || !var) return -1;
+    for (int i = 0; i < s->var_count; i++) {
+        if (strcmp(s->var_slots[i].name, var) == 0) return i;
+    }
+    if (s->var_count >= s->var_cap) {
+        int nc = s->var_cap ? s->var_cap * 2 : 8;
+        VuaVarSlot *ns = (VuaVarSlot *)realloc(s->var_slots, (size_t)nc * sizeof(VuaVarSlot));
+        if (!ns) return -1;
+        s->var_slots = ns;
+        s->var_cap = nc;
+    }
+    VuaVarSlot *sl = &s->var_slots[s->var_count];
+    sl->name = strdup(var ? var : "");
+    sl->fallback = strdup(fallback ? fallback : "");
+    if (!sl->name || !sl->fallback) {
+        free(sl->name); free(sl->fallback);
+        sl->name = NULL; sl->fallback = NULL;
+        return -1;
+    }
+    return s->var_count++;
+}
+
+/* JSON 字符串内容转义：统计/写出（\ " 与 \n\r\t\b\f）。 */
+static size_t json_esc_len(const char *s) {
+    size_t n = 0;
+    if (!s) return n;
+    for (; *s; s++) {
+        switch (*s) {
+            case '"': case '\\': case '\n': case '\r': case '\t':
+            case '\b': case '\f': n += 2; break;
+            default: n++;
+        }
+    }
+    return n;
+}
+static void json_esc_write(const char *s, char *out) {
+    if (!s) { out[0] = '\0'; return; }
+    for (; *s; s++) {
+        switch (*s) {
+            case '"':  *out++ = '\\'; *out++ = '"';  break;
+            case '\\': *out++ = '\\'; *out++ = '\\'; break;
+            case '\n': *out++ = '\\'; *out++ = 'n';  break;
+            case '\r': *out++ = '\\'; *out++ = 'r';  break;
+            case '\t': *out++ = '\\'; *out++ = 't';  break;
+            case '\b': *out++ = '\\'; *out++ = 'b';  break;
+            case '\f': *out++ = '\\'; *out++ = 'f';  break;
+            default:   *out++ = *s;
+        }
+    }
+    *out = '\0';
+}
+
+/* 把骨架（含占位符）重建为注入变量后的渲染树：单遍扫描，遇到
+ * `@@VUA_VAR_<i>@@` 即替换为 slot i 的当前值（屏状态有 → 状态值；无 → 缺省显示值）。
+ * 返回 malloc 的字符串（调用方接管）；失败返回 NULL。 */
+static char *vua_apply_vars(VuaScreen *s, size_t *out_len) {
+    if (!s || !s->skeleton) return NULL;
+    const char *sk = s->skeleton;
+    /* 先算总长（值按 JSON 转义后的长度计） */
+    size_t total = 0;
+    for (const char *p = sk; *p; ) {
+        const char *tok = strstr(p, "@@VUA_VAR_");
+        if (!tok) {
+            total += strlen(p);
+            break;
+        }
+        total += (size_t)(tok - p);
+        const char *e = strstr(tok + 10, "@@");        /* 结束符在数字之后 */
+        if (e && (size_t)(e - tok) <= 32) {
+            size_t nlen = (size_t)(e - (tok + 10));
+            int idx = -1;
+            if (nlen > 0 && nlen < 24) {
+                char numbuf[24];
+                memcpy(numbuf, tok + 10, nlen);
+                numbuf[nlen] = '\0';
+                idx = atoi(numbuf);
+            }
+            if (idx >= 0 && idx < s->var_count) {
+                VusDict *st = s->state;
+                VusString *k = vus_string_new(s->var_slots[idx].name);
+                void *val = st && k ? vus_dict_get(st, k) : NULL;
+                if (k) vus_unref(k);
+                const char *valstr = val ? vus_string_cstr((VusString *)val) : s->var_slots[idx].fallback;
+                total += json_esc_len(valstr ? valstr : "");
+            } else {
+                total += (size_t)(e - tok + 2);        /* 未识别占位符原样保留 */
+            }
+            p = e + 2;
+        } else {
+            total += strlen(tok);                      /* 残缺 token：剩余整体保留 */
+            break;
+        }
+    }
+    /* 统一分配并写出 */
+    char *out = (char *)malloc(total + 1);
+    if (!out) return NULL;
+    char *dst = out;
+    const char *p = sk;
+    while (*p) {
+        const char *tok = strstr(p, "@@VUA_VAR_");
+        if (!tok) { size_t r = strlen(p); memcpy(dst, p, r); dst += r; break; }
+        size_t lead = (size_t)(tok - p);
+        memcpy(dst, p, lead);
+        dst += lead;
+        const char *e = strstr(tok + 10, "@@");
+        if (e && (size_t)(e - tok) <= 32) {
+            size_t nlen = (size_t)(e - (tok + 10));
+            int idx = -1;
+            if (nlen > 0 && nlen < 24) {
+                char numbuf[24];
+                memcpy(numbuf, tok + 10, nlen);
+                numbuf[nlen] = '\0';
+                idx = atoi(numbuf);
+            }
+            if (idx >= 0 && idx < s->var_count) {
+                VusDict *st = s->state;
+                VusString *k = vus_string_new(s->var_slots[idx].name);
+                void *val = st && k ? vus_dict_get(st, k) : NULL;
+                if (k) vus_unref(k);
+                const char *valstr = val ? vus_string_cstr((VusString *)val) : s->var_slots[idx].fallback;
+                json_esc_write(valstr ? valstr : "", dst);
+                dst += strlen(dst);
+                p = e + 2;
+                continue;
+            }
+        }
+        /* 未识别占位符（异常）：原样拷贝完整 token */
+        size_t tlen = e ? (size_t)(e - tok + 2) : strlen(tok);
+        memcpy(dst, tok, tlen);
+        dst += tlen;
+        p = e ? e + 2 : tok + strlen(tok);
+    }
+    *dst = '\0';
+    if (out_len) *out_len = (size_t)(dst - out);
+    return out;
+}
+
 /*
  * 归一化一个 .vua 组件对象 → 渲染树节点 mut 对象：
  *  - 内部原语键固定：type / id / variable / event / children
@@ -286,7 +452,7 @@ static yyjson_mut_val *build_event_obj(yyjson_mut_doc *d, const yyjson_val *v) {
  *  - 其余键：控件属性，原样透传（值深复制）
  */
 static yyjson_mut_val *build_render_node(yyjson_mut_doc *d, const yyjson_val *src,
-                                         VusDict *state) {
+                                         RenderBuildCtx *ctx) {
     yyjson_mut_val *out = yyjson_mut_obj(d);
 
     /* 预扫描 type / variable：供「内容」变量回填（文本控件显示状态值） */
@@ -316,7 +482,7 @@ static yyjson_mut_val *build_render_node(yyjson_mut_doc *d, const yyjson_val *sr
                 yyjson_mut_val *carr = yyjson_mut_arr(d);
                 yyjson_arr_iter ai; yyjson_arr_iter_init((yyjson_val *)v, &ai); yyjson_val *e;
                 while ((e = yyjson_arr_iter_next(&ai))) {
-                    if (yyjson_is_obj(e)) yyjson_mut_arr_append(carr, build_render_node(d, e, state));
+                    if (yyjson_is_obj(e)) yyjson_mut_arr_append(carr, build_render_node(d, e, ctx));
                 }
                 yyjson_mut_obj_add_val(d, out, "children", carr);
             }
@@ -325,17 +491,31 @@ static yyjson_mut_val *build_render_node(yyjson_mut_doc *d, const yyjson_val *sr
                    key_is(ks, "变化", "onChange")) {
             yyjson_mut_obj_add_val(d, out, "event", build_event_obj(d, v));
         } else if (streq(ks, "内容") && node_type && streq(node_type, "文本") &&
-                   node_var && state) {
-            /* 变量回填：文本控件带 variable 且屏内状态有值 → 用状态值替换「内容」，
-             * 使 .vus 里 界面_设置 的运算结果实时显示；仅此一处写「内容」，无重复键。 */
-            VusString *vk = vus_string_new(node_var);
-            void *val = vus_dict_get(state, vk);
-            vus_unref(vk);
-            if (val) {
-                yyjson_mut_obj_add_strcpy(d, out, "内容", vus_string_cstr((VusString *)val));
-                continue;
+                   node_var) {
+            /* 变量回填：文本控件带 variable → 屏内状态有值则显示状态值（界面_设置 结果）。
+             * G3 骨架模式（ctx->screen 非空）：登记变量 slot，「内容」输出为占位符
+             * `@@VUA_VAR_<i>@@`，后续 界面_设置 只做占位符替换，不再整树重建。 */
+            if (ctx->screen) {
+                const char *fallback = yyjson_is_str(v) ? yyjson_get_str(v) : "";
+                int idx = vua_var_slot(ctx->screen, node_var, fallback);
+                if (idx >= 0) {
+                    char ph[40];
+                    snprintf(ph, sizeof(ph), "@@VUA_VAR_%d@@", idx);
+                    yyjson_mut_obj_add_strcpy(d, out, "内容", ph);
+                    continue;
+                }
+                /* slot 登记失败（内存不足）：退化为普通属性透传 */
+                yyjson_mut_obj_add_val(d, out, ks, mv_copy(d, v));
+            } else {
+                VusString *vk = vus_string_new(node_var);
+                void *val = vus_dict_get(ctx->state, vk);
+                vus_unref(vk);
+                if (val) {
+                    yyjson_mut_obj_add_strcpy(d, out, "内容", vus_string_cstr((VusString *)val));
+                    continue;
+                }
+                yyjson_mut_obj_add_val(d, out, ks, mv_copy(d, v));
             }
-            yyjson_mut_obj_add_val(d, out, ks, mv_copy(d, v));
         } else {
             /* 控件自定义属性：原样透传 */
             yyjson_mut_obj_add_val(d, out, ks, mv_copy(d, v));
@@ -504,6 +684,12 @@ void vua_screen_free(VuaScreen *screen) {
     if (screen->state) vus_unref(screen->state);
     if (screen->events) vus_unref(screen->events);
     free(screen->render_cache);
+    free(screen->skeleton);
+    for (int i = 0; i < screen->var_count; i++) {
+        free(screen->var_slots[i].name);
+        free(screen->var_slots[i].fallback);
+    }
+    free(screen->var_slots);
     free(screen);
 }
 
@@ -511,7 +697,6 @@ const char *vua_screen_name(VuaScreen *screen) { return screen ? screen->name : 
 
 uint64_t vua_screen_seq(VuaScreen *screen) { return screen ? screen->seq : 0; }
 
-/* ============ 规范化渲染树（native → Java） ============ */
 
 /* —— 渲染树内容指纹（版本号协议）：FNV-1a 64，稳定、低碰撞 —— */
 static uint64_t vus_renderhash_fnv1a64(const char *s) {
@@ -525,37 +710,59 @@ static uint64_t vus_renderhash_fnv1a64(const char *s) {
 const char *vua_screen_dump_rendertree(VuaScreen *screen) {
     if (!screen || !screen->tree) return NULL;
 
-    /* 渲染树缓存：screen 的 state / 屏树未变时直接复用上次序列化结果，
-     * 省去整树归一化 + JSON 序列化（高频路径：点击无状态变化 / 返回同屏）。
-     * 缓存由 vua_state_set 置脏（free），屏销毁时随 screen 释放。 */
-    if (screen->render_cache) return screen->render_cache;
+    /* 渲染树缓存：屏树/state 未变时直接复用上次结果。
+     * G3：首次构建「骨架」（变量文本「内容」为占位符）；此后 界面_设置 只置
+     * vars_dirty，重建仅做单遍占位符替换（vua_apply_vars），不再整树归一化+序列化。 */
+    if (screen->render_cache && !screen->vars_dirty) return screen->render_cache;
 
-    yyjson_mut_doc *md = yyjson_mut_doc_new(NULL);
-    if (!md) return NULL;
-    yyjson_mut_val *root = build_render_node(md, yyjson_doc_get_root(screen->tree), screen->state);
-    yyjson_mut_doc_set_root(md, root);
+    if (!screen->skeleton) {
+        RenderBuildCtx ctx;
+        ctx.state = screen->state;
+        ctx.screen = screen;
+        ctx.d = yyjson_mut_doc_new(NULL);
+        if (!ctx.d) return NULL;
+        yyjson_mut_val *root = build_render_node(ctx.d, yyjson_doc_get_root(screen->tree), &ctx);
+        yyjson_mut_doc_set_root(ctx.d, root);
 
-    /* 顶层 eventIndex：从 imm 源树收集 id → {name, collect} */
-    yyjson_mut_val *eix = yyjson_mut_obj(md);
-    collect_eventindex_imm(md, yyjson_doc_get_root(screen->tree), eix);
-    yyjson_mut_obj_add_val(md, root, "eventIndex", eix);
+        /* 顶层 eventIndex：从 imm 源树收集 id → {name, collect} */
+        yyjson_mut_val *eix = yyjson_mut_obj(ctx.d);
+        collect_eventindex_imm(ctx.d, yyjson_doc_get_root(screen->tree), eix);
+        yyjson_mut_obj_add_val(ctx.d, root, "eventIndex", eix);
 
+        size_t len = 0;
+        screen->skeleton = yyjson_mut_write(ctx.d, 0, &len);
+        yyjson_mut_doc_free(ctx.d);
+        if (!screen->skeleton) return NULL;
+    }
+
+    /* 变量注入：骨架不变时仅重算这一层（界面_设置 的运算结果实时显示） */
     size_t len = 0;
-    char *out = yyjson_mut_write(md, 0, &len);
-    yyjson_mut_doc_free(md);
-    if (!out) return NULL;
-    screen->render_cache = out;   /* 所有权归 screen，调用方不得 free */
+    char *out = vua_apply_vars(screen, &len);
+    if (!out) return screen->skeleton ? screen->render_cache : NULL;
+    free(screen->render_cache);
+    screen->render_cache = out;           /* 所有权归 screen，调用方不得 free */
+    screen->render_cache_len = len;
     screen->render_hash = vus_renderhash_fnv1a64(out);
+    screen->vars_dirty = 0;
     return out;
 }
 
-/* 取当前屏渲染树指纹：缓存缺失时先触发 dump 构建再取；无屏返回 0。 */
+/* 取当前屏渲染树指纹：缓存缺失或变量脏时先触发 dump 构建再取；无屏返回 0。 */
 uint64_t vua_screen_rendertree_hash(VuaScreen *screen) {
     if (!screen || !screen->tree) return 0;
-    if (!screen->render_cache) {
+    if (!screen->render_cache || screen->vars_dirty) {
         if (!vua_screen_dump_rendertree(screen)) return 0;
     }
     return screen->render_hash;
+}
+
+/* 已缓存渲染树字节长度（未构建先构建）：JNI 侧分配 byte[] 免 strlen 整树扫描。 */
+int vua_screen_rendertree_len(VuaScreen *screen) {
+    if (!screen || !screen->tree) return 0;
+    if (!screen->render_cache || screen->vars_dirty) {
+        if (!vua_screen_dump_rendertree(screen)) return 0;
+    }
+    return (int)screen->render_cache_len;
 }
 
 int vua_screen_dump_rendertree_len(const char *rendertree_json) {
@@ -568,10 +775,9 @@ VusDict *vua_state(VuaScreen *screen) { return screen ? screen->state : NULL; }
 void vua_state_set(VuaScreen *screen, VusString *var, void *val) {
     if (screen && var && val) {
         vus_dict_set(screen->state, var, val);
-        /* state 变化 → 渲染树文本必然变化，作废缓存与指纹 */
-        free(screen->render_cache);
-        screen->render_cache = NULL;
-        screen->render_hash = 0;
+        /* G3：state 变化只影响变量注入层，置脏即可；骨架与整树结构不动。
+         * 下次 dump/hash 时仅重新扫一遍骨架做占位符替换，不再整树作废重建。 */
+        screen->vars_dirty = 1;
     }
 }
 /* 高频路径（界面_设置 字面量变量名）：key 走字符串驻留，避免每次 malloc 复制 */

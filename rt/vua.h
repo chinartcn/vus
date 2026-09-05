@@ -48,6 +48,8 @@ typedef struct VuaError {
 typedef struct VuaSession VuaSession;
 /* 一屏：组件树 + 变量状态 + 事件表。此处仅前置声明，供会话导航函数返回。 */
 typedef struct VuaScreen VuaScreen;
+/* 渲染树变量插槽（G3）：变量名 + 缺省显示值，供骨架占位符替换使用。内部结构 opaque。 */
+typedef struct VuaVarSlot VuaVarSlot;
 
 /*
  * 新建会话。控件表/词典在 session 级共享（见 vua_control_table_load / vua_dict_load，
@@ -125,6 +127,9 @@ uint64_t vua_screen_seq(VuaScreen *screen);
  * 调用方不得 free；见 dump 实现内的 render_cache）。状态变化后自动重建。
  */
 const char *vua_screen_dump_rendertree(VuaScreen *screen);
+
+/* 已缓存渲染树字节长度（未构建先构建）。JNI 侧用其分配 byte[]，免 strlen 整树扫描。 */
+int vua_screen_rendertree_len(VuaScreen *screen);
 
 /* 取渲染树 JSON 的稳定字节长度（供 JNI NewStringUTF 使用前走长度）。 */
 int vua_screen_dump_rendertree_len(const char *rendertree_json);
