@@ -76,6 +76,7 @@ if command -v python3-config >/dev/null 2>&1; then
     echo "运行 C 单元测试: test_plugin_inproc"
     if gcc -DVUS_USE_PY $(python3-config --includes) -I../rt -I../rt/easylogger/inc \
         test_plugin_inproc.c ../rt/libvus_rt.c ../rt/vus_coro.c \
+        ../rt/yyjson/yyjson.c \
         ../rt/easylogger/src/elog.c ../rt/easylogger/src/elog_utils.c ../rt/elog_port.c \
         $(python3-config --ldflags) -lpthread -o test_plugin_inproc 2>/dev/null; then
         if LD_LIBRARY_PATH=$(python3-config --prefix)/lib \

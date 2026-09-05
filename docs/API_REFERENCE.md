@@ -793,6 +793,7 @@
 ## 8. 网络请求（HTTP）
 
 桌面构建基于 libcurl（需 `VUS_HAVE_CURL` + `-lcurl`）；**Android APK 由 Java 平台桥实现**（`http.get`/`http.post`/`http.request`/`http.upload`），无需额外依赖。
+> 无 libcurl 开发库时自动**回退系统 `curl` 命令**（需 PATH 中有 curl 可执行文件，超时默认 30s、下载 60s），能力不降级。
 
 #### `网络_GET(URL)`
 
@@ -808,7 +809,7 @@
 
 #### `网络_请求(方式, 地址, 头JSON, 数据, 超时秒, 重试次数)`
 
-- **说明**：通用 HTTP 请求（认证/超时/重试）。`方式` 为 `GET`/`POST`；`头JSON` 传入自定义请求头（如 `{"Authorization":"Bearer <token>"}` 做 token 认证）；`数据` 为 POST 请求体；`超时秒` 与 `重试次数` 可省略（默认 30 秒 / 0 次，APK 侧默认重试 2 次）。APK 全参生效；桌面回退 curl（忽略头/超时/重试）。
+- **说明**：通用 HTTP 请求（认证/超时/重试）。`方式` 为 `GET`/`POST`；`头JSON` 传入自定义请求头（如 `{"Authorization":"Bearer <token>"}` 做 token 认证）；`数据` 为 POST 请求体；`超时秒` 与 `重试次数` 可省略（默认 30 秒 / 0 次，APK 侧默认重试 2 次）。APK 全参生效；桌面回退系统 curl 命令（忽略头/重试，应用超时秒）。
 - **返回**：响应体文本（字符串）
 - **示例**：
   ```vus
@@ -825,7 +826,7 @@
 #### `网络_下载(URL, 路径)`
 
 - **说明**：下载 URL 指向的文件到本地路径。
-- **返回**：`"1"` 成功 / `"0"` 失败
+- **返回**：`"0"` 成功 / `"-1"` 失败
 - **示例**：`网络_下载("https://example.com/file.zip", "/sdcard/file.zip")`
 
 ---

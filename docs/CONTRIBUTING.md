@@ -19,7 +19,7 @@ VUS 是一个用 C 写成的**编译型中文编程语言**：源码 → 词法 
 |---|---|---|
 | Linux（本机/容器/WSL） | 主平台 | — |
 | `gcc` + `make` | 编译器本体自有程序 | 无法构建 |
-| `libcurl-dev`（可选） | `网络_*`（需 `-DVUS_HAVE_CURL`） | 网络函数返回空，不发送请求 |
+| `libcurl-dev`（可选） | `网络_*`（需 `-DVUS_HAVE_CURL`） | 缺失时自动回退系统 `curl` 命令（需 PATH 中有 curl 可执行文件），能力不降级 |
 | `libpng/freetype`（可选） | `图形_*` GUI（X11 显示） | 无 GUI 时 `make vus` 仅编编译器+LSP |
 | `python3`（可选） | `.vux` 插件 / `JSON_*` 进程内（`VUS_USE_PY`） | 插件/JSON 走子进程回退 |
 | Android SDK/NDK（可选） | `vus build --apk`、examples/vua-android | 仅 APK 场景需要 |

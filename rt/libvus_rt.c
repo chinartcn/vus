@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <elog.h>
 
@@ -1138,6 +1139,61 @@ VusString* vus_plugin_tui_reset(VusString* dummy) {
     return vus_string_new("");
 }
 
+/* ---- 网络回退辅助 ---- */
+
+/* shell 单引号转义：`'` → `'\''`，整体用单引号包裹，返回 malloc 缓冲（调用方 free）。
+ * 用于把 URL / 数据 / 文件路径安全嵌入 curl 命令行，避免引号、&、$ 等破坏 shell 结构。 */
+static char *vus_sh_squote(const char *s) {
+    if (!s) return NULL;
+    size_t need = 3; /* 首尾两枚单引号 + NUL */
+    for (const char *q = s; *q; q++) need += (*q == '\'' ? 4 : 1);
+    char *out = (char *)malloc(need);
+    if (!out) return NULL;
+    char *p = out;
+    *p++ = '\'';
+    for (const char *q = s; *q; q++) {
+        if (*q == '\'') { memcpy(p, "'\\''", 4); p += 4; }
+        else *p++ = *q;
+    }
+    *p++ = '\'';
+    *p = '\0';
+    return out;
+}
+
+/* 网络回退到系统 curl 命令构造：无 libcurl 开发库时仍可发起请求。
+ * 返回完整命令行（调用方 vus_plugin_shell_exec 执行），失败返回 NULL。 */
+static char *vus_curl_cli(const char *url, const char *data, const char *out_path,
+                          const char *upload_path, long timeout_s) {
+    char *qu = vus_sh_squote(url);
+    if (!qu) return NULL;
+    char cmd[8192];
+    int n;
+    if (upload_path) {
+        char *qp = vus_sh_squote(upload_path);
+        if (!qp) { free(qu); return NULL; }
+        n = snprintf(cmd, sizeof(cmd), "curl -s -L -m %ld -F 'file=@%s' %s 2>/dev/null",
+                     timeout_s, qp, qu);
+        free(qp);
+    } else if (out_path) {
+        char *qo = vus_sh_squote(out_path);
+        if (!qo) { free(qu); return NULL; }
+        n = snprintf(cmd, sizeof(cmd), "curl -s -L -m %ld -o %s %s 2>/dev/null",
+                     timeout_s, qo, qu);
+        free(qo);
+    } else if (data) {
+        char *qd = vus_sh_squote(data);
+        if (!qd) { free(qu); return NULL; }
+        n = snprintf(cmd, sizeof(cmd), "curl -s -L -m %ld -d %s %s 2>/dev/null",
+                     timeout_s, qd, qu);
+        free(qd);
+    } else {
+        n = snprintf(cmd, sizeof(cmd), "curl -s -L -m %ld %s 2>/dev/null", timeout_s, qu);
+    }
+    free(qu);
+    if (n <= 0 || n >= (int)sizeof(cmd)) return NULL;
+    return strdup(cmd);
+}
+
 /* ---- 网络（libcurl） ---- */
 
 #ifdef VUS_HAVE_CURL
@@ -1275,8 +1331,13 @@ VusString* vus_plugin_http_get(VusString* url) {
     free(buf.data);
     return result;
 #else
-    (void)url;
-    return vus_string_new("");
+    /* 无 libcurl 开发库：回退系统 curl 命令（GET），失败返回空串 */
+    if (!url) return vus_string_new("");
+    char *cli = vus_curl_cli(vus_string_cstr(url), NULL, NULL, NULL, 30);
+    if (!cli) return vus_string_new("");
+    VusString *out = vus_plugin_shell_exec(vus_string_new(cli));
+    free(cli);
+    return out;
 #endif
 }
 
@@ -1310,8 +1371,15 @@ VusString* vus_plugin_http_post(VusString* url, VusString* data) {
     free(buf.data);
     return result;
 #else
-    (void)url; (void)data;
-    return vus_string_new("");
+    /* 无 libcurl 开发库：回退系统 curl 命令（POST），失败返回空串 */
+    if (!url) return vus_string_new("");
+    char *cli = vus_curl_cli(vus_string_cstr(url),
+                             (data && vus_string_len(data) > 0) ? vus_string_cstr(data) : "",
+                             NULL, NULL, 30);
+    if (!cli) return vus_string_new("");
+    VusString *out = vus_plugin_shell_exec(vus_string_new(cli));
+    free(cli);
+    return out;
 #endif
 }
 
@@ -1338,8 +1406,16 @@ VusString* vus_plugin_http_download(VusString* url, VusString* filepath) {
     curl_easy_cleanup(curl);
     return vus_string_new(res == CURLE_OK ? "0" : "-1");
 #else
-    (void)url; (void)filepath;
-    return vus_string_new("-1");
+    /* 无 libcurl 开发库：回退系统 curl 命令（-o 写文件），成功返回 "0"，失败 "-1" */
+    if (!url || !filepath) return vus_string_new("-1");
+    char *cli = vus_curl_cli(vus_string_cstr(url), NULL, vus_string_cstr(filepath), NULL, 60);
+    if (!cli) return vus_string_new("-1");
+    VusString *out = vus_plugin_shell_exec(vus_string_new(cli));
+    free(cli);
+    vus_unref(out);
+    /* 以目标文件是否生成判定成败 */
+    if (access(vus_string_cstr(filepath), F_OK) != 0) return vus_string_new("-1");
+    return vus_string_new("0");
 #endif
 }
 
@@ -1392,10 +1468,16 @@ VusString* vus_plugin_http_request(VusString* method, VusString* url,
         }
         return vus_string_new("");
     }
-    /* 桌面回退 curl（headers 忽略） */
-    if (strcmp(m, "POST") == 0 || strcmp(m, "post") == 0)
-        return vus_plugin_http_post(url, body);
-    return vus_plugin_http_get(url);
+    /* 桌面回退：系统 curl 命令（headers 忽略），POST 用 -d，否则 GET；应用超时秒 */
+    {
+        if (!u[0]) return vus_string_new("");
+        const char *data = (strcmp(m, "POST") == 0 || strcmp(m, "post") == 0) ? d : NULL;
+        char *cli = vus_curl_cli(u, data, NULL, NULL, to);
+        if (!cli) return vus_string_new("");
+        VusString *out = vus_plugin_shell_exec(vus_string_new(cli));
+        free(cli);
+        return out;
+    }
 }
 
 /* ---- 文件上传（multipart/form-data，反馈「文件上传」）----
@@ -1426,14 +1508,13 @@ VusString* vus_plugin_http_upload(VusString* url, VusString* path,
         if (jr) return jr;
         return vus_string_new("0");
     }
-    /* 桌面回退: curl -F file=@本地路径（单引号包裹防止注入；返回服务器响应文本，失败空串） */
+    /* 桌面回退: curl -F file=@本地路径（单引号转义防注入；返回服务器响应文本，失败空串） */
     {
-        char cmd[4096];
-        int n = snprintf(cmd, sizeof(cmd),
-            "curl -s -m 60 -F 'file=@%s' %s",
-            p, u);
-        if (n <= 0 || (size_t)n >= sizeof(cmd)) return vus_string_new("0");
-        return vus_plugin_shell_exec(vus_string_new(cmd));
+        char *cli = vus_curl_cli(u, NULL, NULL, p, 60);
+        if (!cli) return vus_string_new("0");
+        VusString *out = vus_plugin_shell_exec(vus_string_new(cli));
+        free(cli);
+        return out;
     }
 }
 
@@ -1750,8 +1831,18 @@ VusString* vus_json_generate(void* obj) {
 /* 沿 JSON 取值后递归导航。读取一段：字段名或 [索引]。返回解析后的新 p，或 NULL。 */
 void* vus_json_query(VusString* json, VusString* path) {
     if (!json || !path) return NULL;
+    /* 兼容容器输入（JSON_解析 的结果）：先序列化为 JSON 文本再查询 */
+    VusString* owned = NULL;
+    if (vus_is_object(json)) {
+        VusObject* jo = (VusObject*)json;
+        if (jo->type == TYPE_LIST || jo->type == TYPE_DICT) {
+            owned = vus_json_generate(json);
+            json = owned;
+        }
+    }
+    if (!json) return NULL;
     yyjson_doc* doc = yyjson_read(vus_string_cstr(json), (size_t)vus_string_len(json), 0);
-    if (!doc) return NULL;
+    if (!doc) { if (owned) vus_unref(owned); return NULL; }
     yyjson_val* cur = yyjson_doc_get_root(doc);
     const char* p = vus_string_cstr(path);
     while (cur && *p) {
@@ -1771,6 +1862,7 @@ void* vus_json_query(VusString* json, VusString* path) {
     }
     VusObject* o = cur ? vus_json_val_to_object(cur) : NULL;
     yyjson_doc_free(doc);
+    if (owned) vus_unref(owned);
     return o;
 }
 
@@ -1823,6 +1915,22 @@ int vus_termux_start_gl(void)
  * 注意：VUS 协程为单线程协作式调度，插件调用采用同步阻塞执行，
  * 调用期间协程不可切换（决策 #6）。
  * ===================================================================== */
+
+/* 插件 JSON 子进程回退（无进程内 python 或进程内失败时共用）：
+ * 调用 vux_plugin_manager 取插件原始输出，按 JSON 解析为结构化对象；
+ * 输出为空或非 JSON → NULL。 */
+static void* vus_plugin_run_vux_json_fallback(VusString* plugin, VusString* cmd) {
+    VusString *raw = vus_plugin_run_vux(plugin, cmd);
+    if (!raw || vus_string_len(raw) == 0) {
+        if (raw) vus_unref(raw);
+        return NULL;
+    }
+    void *obj = vus_json_parse(raw);
+    vus_unref(raw);
+    return obj;
+}
+
+/* ---- 进程内嵌入 Python ---- */
 #ifdef VUS_USE_PY
 #include <dlfcn.h>
 
@@ -2050,7 +2158,14 @@ static void* vus_py_plugin_run_obj(VusString* plugin, VusString* cmd, int struct
 
 VusString* vus_plugin_run_vux_inproc(VusString* plugin, VusString* cmd) {
 #ifdef VUS_USE_PY
-    return (VusString*)vus_py_plugin_run_obj(plugin, cmd, 0);
+    /* 进程内嵌入 python 可用且返回非空 → 用进程内结果；
+     * dlopen 失败 / 返回空 → 回退子进程 vux_plugin_manager，能力不降级 */
+    if (plugin && cmd && vus_py_init() == 0) {
+        VusString *r = (VusString*)vus_py_plugin_run_obj(plugin, cmd, 0);
+        if (r && vus_string_len(r) > 0) return r;
+        if (r) vus_unref(r);
+    }
+    return vus_plugin_run_vux(plugin, cmd);
 #else
     return vus_plugin_run_vux(plugin, cmd);
 #endif
@@ -2058,10 +2173,15 @@ VusString* vus_plugin_run_vux_inproc(VusString* plugin, VusString* cmd) {
 
 void* vus_plugin_run_vux_json(VusString* plugin, VusString* cmd) {
 #ifdef VUS_USE_PY
-    return vus_py_plugin_run_obj(plugin, cmd, 1);
-#else
-    return NULL;
+    /* 进程内嵌入可用且成功解析出结构化结果 → 直接返回；
+     * 失败（dlopen 失败 / 插件输出非 JSON）→ 回退子进程再试 */
+    if (plugin && cmd && vus_py_init() == 0) {
+        void *obj = vus_py_plugin_run_obj(plugin, cmd, 1);
+        if (obj) return obj;
+    }
 #endif
+    /* 无进程内 python（或失败）：回退子进程取原始输出，按 JSON 解析 */
+    return vus_plugin_run_vux_json_fallback(plugin, cmd);
 }
 
 VusString* vus_typeof(void* obj) {
@@ -2089,8 +2209,8 @@ VusString* vus_plugin_run_vux_inproc(VusString* plugin, VusString* cmd) {
 }
 
 void* vus_plugin_run_vux_json(VusString* plugin, VusString* cmd) {
-    (void)plugin; (void)cmd;
-    return NULL;
+    /* 无进程内 python：回退子进程并解析 JSON（不再返回 NULL） */
+    return vus_plugin_run_vux_json_fallback(plugin, cmd);
 }
 
 VusString* vus_typeof(void* obj) { (void)obj; return vus_string_new("空"); }
