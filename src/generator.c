@@ -1718,7 +1718,7 @@ static char *gen_expr_binary(GenBuf *buf, VusAstBinaryOp *bin) {
     /* R3：连续拼接链（..）提前折叠 → 平铺多段 concat（一次分配）。
      * 提前分支避免对左右子树重复 gen_expr（f-string 插值链同样受益）。 */
     if (strcmp(bin->op, "..") == 0) {
-        return gen_concat_flatten(buf, bin, NULL);
+        return gen_concat_flatten(buf, (VusAstNode *)bin, NULL);
     }
 
     char *left = gen_expr(buf, bin->left);
@@ -1801,11 +1801,32 @@ static char *gen_expr_unary(GenBuf *buf, VusAstUnaryOp *un) {
     return result;
 }
 
+/* ============ R6 前置声明 ============
+ * 三态归属与用户调用登记：实现位于 generator.c 后半段（gen_stmt_assign 附近），
+ * gen_expr_call（打印分支/实参收割）先于其定义使用，故在此前置。 */
+#define GEN_OWNED_BORROW  0  /* 借用/共享/容器：不收割 */
+#define GEN_OWNED_NEW     1  /* 确证新建 VusString：无条件 unref 配平出生份 */
+#define GEN_OWNED_UNKNOWN 2  /* 用户调用（返回动态）：赋值处运行时容器判定收割 */
+static int gen_expr_owned(GenBuf *buf, const VusAstNode *node);
+static void gen_note_user_call(const char *name);
+static int gen_fn_borrows_param(const char *name);
+
 static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
     /* 处理内置函数 */
     if (strcmp(call->func_name, "打印") == 0 || strcmp(call->func_name, "print") == 0) {
         if (call->args && call->args->count > 0) {
             char *arg = gen_expr(buf, call->args->items[0]);
+            /* R6：确证新建实参 → RAII（vus_print 不持有引用，出生份必须当场归还）。
+             * 池借用/借用返回实参不在此列（无 var_set 配平，误 unref 会提前 free 池实例）。 */
+            if (gen_expr_owned(buf, call->args->items[0]) == GEN_OWNED_NEW) {
+                size_t sz = strlen(arg) + 128;
+                char *result = (char *)malloc(sz);
+                long long seq = s_call_seq++;
+                snprintf(result, sz, "({VusString* _rnd%lld=(%s); vus_print(_rnd%lld); vus_unref(_rnd%lld);})",
+                         seq, arg, seq, seq);
+                free(arg);
+                return result;
+            }
             size_t sz = strlen(arg) + 64;
             char *result = (char *)malloc(sz);
             snprintf(result, sz, "vus_print(%s)", arg);
@@ -1855,6 +1876,15 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
         for (size_t i = 1; i <= nparams; i++)
             GEN_APPEND(args_buf, pos,
                 "vus_unref(_vus_args[%zu]);", (size_t)i);
+        /* R6：确证新建实参 → 补还出生份（上一轮 unref 只配平入口 vus_ref）。
+         * 运行时排除「函数值把实参直接返回」：该情形返回值与实参共享同一对象，
+         * 返回槽还借用着它；补还出生份会把返回值提前 free。其余（丢弃/加工）安全。 */
+        for (size_t i = 1; i <= nparams; i++) {
+            if (gen_expr_owned(buf, call->args->items[i]) == GEN_OWNED_NEW)
+                GEN_APPEND(args_buf, pos,
+                    "if (_vus_args[%zu] != _vus_args[0]) vus_unref(_vus_args[%zu]);",
+                    (size_t)i, (size_t)i);
+        }
         long long seq = s_call_seq++;
         /* 返回值直接转交（函数返回已改为直接赋值、不再 vus_var_set 多加一 ref），
          * 故此处不再 vus_unref(_vr)——容器返回值初值 ref=0，若 unref 会把
@@ -4250,6 +4280,7 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
     if (gdef) {
         /* 泛型函数调用：改指实例符号（由预发现阶段建立）。
          * 实参个数强制校验：与声明不符 → 编译错误。 */
+        gen_note_user_call(call->func_name);   /* R6：泛型实例返回动态类型 */
         char key[300];
         size_t nta = gen_inst_key_of_call(call, key, sizeof(key));
         size_t ntp = gdef->type_params ? gdef->type_params->count : 0;
@@ -4272,6 +4303,7 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
         if (gen_struct_exists(s_gen_structs, call->func_name)) {
             return gen_struct_inst_expr(buf, call->func_name, call->args);
         }
+        gen_note_user_call(call->func_name);   /* R6：普通用户函数返回动态类型 */
         gen_sanitize_name(call->func_name, san, sizeof(san));
     }
 
@@ -4320,6 +4352,16 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
     for (size_t i = 1; i <= nargs; i++) {
         GEN_APPEND(args_buf, pos,
             "vus_unref(_vus_args[%zu]);", (size_t)i);
+    }
+    /* R6：确证新建实参 → 补还出生份（上一轮 unref 只配平函数入口 vus_ref）。
+     * 但函数若直接返回参数（身份/直通），实参与返回值共享引用——贸然收割会把
+     * 返回槽同一对象提前 free → UAF，故按函数定义跳过（gen_fn_borrows_param）。 */
+    if (nargs > 0 && !gen_fn_borrows_param(call->func_name)) {
+        for (size_t i = 0; i < nargs; i++) {
+            if (gen_expr_owned(buf, call->args->items[i]) == GEN_OWNED_NEW)
+                GEN_APPEND(args_buf, pos,
+                    "vus_unref(_vus_args[%zu]);", (size_t)(i + 1));
+        }
     }
     long long seq = s_call_seq++;
     GEN_APPEND(args_buf, pos,
@@ -4605,14 +4647,229 @@ static void gen_line_map(GenBuf *buf, int vus_line) {
     gen_emit_linef(buf, "#line %d \"%s\"", vus_line, s_map_file);
 }
 
+/* ============ R6：语句粒度 RAII（表达式新建对象无主计数根治） ============
+ * 现象（PERFORMANCE.md §3.8）：`x = x + 1` 等「必新建」表达式结果出生 ref=1
+ * （vus_string_new 所有权随指针），`vus_var_set` 无差别 +1 后无处归还那份出生
+ * 引用，热循环下 RSS 持续增长（实测 2×10⁷ 次 `总和 = 总和 + 1` ≈ 780MB）。
+ * 根治：在赋值 / 表达式语句顶层对「必新建」表达式做 RAII——
+ *   ({VusString* _rnd=EXPR; vus_var_set(&目标,_rnd); vus_unref(_rnd);})
+ * EXPR 出生 1 份由 _rnd 暂持 → vus_var_set +1 转给目标 → unref 归还出生份 → 精确。
+ *
+ * R6 二期（函数边界）：赋值/表达式语句的收割推广到用户函数调用——
+ *   - 核心难点：返回值可能是容器（出生 ref=0，var_set +1 即唯一持有，不可归还）
+ *     也可能是新字符串（出生 ref=1，必须归还）或池字面量（借用于 var_set +1 对冲）。
+ *   - 解法三态判定 + 运行时收割：`({VusString* _rnd=EXPR; vus_var_set(&目标,_rnd);
+ *     if(_rnd && !vus_is_container(_rnd)) vus_unref(_rnd);})` —— 容器豁免（精确），
+ *     非容器 unref 恰好配平 var_set 的 +1（字符串 / 池借用均无净残留）。
+ *   - 实参 / 直接内建（打印）无 var_set 配平，只对「确证新字符串」(GEN_OWNED_NEW)
+ *     收割；用户调用返回值可能与池共享，只走赋值收割 (GEN_OWNED_UNKNOWN)。
+ * 判别保守：借用/共享（池字面量、直通转发、借用返回）与容器（出生 ref=0 已精确）
+ * 绝不 RAII——误 unref 池实例会在字面量池换出时叠加到提前 free 造成悬垂。 */
+
+/* 内建白名单：返回必新建 VusString（可 RAII）。只读且新建者进名单；
+ * 直通转发（转文本）、借用返回（列表_取 等）、返回 void 的语句型内建
+ * （打印/日志 → vus_print 无值可 unref）与不确定者一律不在名单。 */
+static int gen_expr_owned_builtin(const char *name) {
+    if (!name) return 0;
+    if (strcmp(name, "转数字") == 0) return 1;    /* vus_to_string(vus_to_int(...)) 新建 */
+    return 0;   /* 未知/可能借用/void：保守不入名单 */
+}
+
+/* R6 二期：编译期按需收集「确认为用户函数调用」的名字（gen_expr_call 走到
+ * 普通函数/泛型分支时登记）。集合内容 = 返回值动态类型 → 赋值处走 UNKNOWN 收割。 */
+static char s_user_call_names[256][96];
+static int  s_user_call_count = 0;
+static void gen_note_user_call(const char *name) {
+    if (!name || s_user_call_count >= (int)(sizeof(s_user_call_names) / sizeof(s_user_call_names[0])))
+        return;
+    for (int i = 0; i < s_user_call_count; i++)
+        if (strcmp(s_user_call_names[i], name) == 0) return;
+    snprintf(s_user_call_names[s_user_call_count], sizeof(s_user_call_names[0]), "%s", name);
+    s_user_call_count++;
+}
+static int gen_is_user_call_name(const char *name) {
+    if (!name) return 0;
+    for (int i = 0; i < s_user_call_count; i++)
+        if (strcmp(s_user_call_names[i], name) == 0) return 1;
+    return 0;
+}
+
+/* R6：函数「是否直接返回参数」（身份/直通返回）。调用点对这类函数省略实参
+ * 出生份收割——函数把实参借出为返回值时，收割会把返回槽里的同一对象提前
+ * free（返回值与实参共享引用）→ UAF。预扫描在 vus_generate_c 登记。 */
+typedef struct {
+    char name[96];
+    int  borrow_any;   /* 任一 返回 表达式为裸参数标识符 */
+} GenFnBorrowInfo;
+static GenFnBorrowInfo s_fn_borrow[256];
+static int s_fn_borrow_count = 0;
+
+static int gen_node_returns_param(VusAstFunctionDef *fd, VusAstNode *node);
+static int gen_block_returns_param(VusAstFunctionDef *fd, VusAstList *body);
+
+static int gen_fn_param_match(VusAstFunctionDef *fd, const char *name) {
+    if (!fd || !name || !fd->params) return 0;
+    for (size_t i = 0; i < fd->params->count; i++) {
+        VusAstNode *pn = fd->params->items[i];
+        const char *pname = NULL;
+        if (pn->type == VUS_AST_PARAM) pname = ((VusAstParam *)pn)->name;
+        else if (pn->type == VUS_AST_PARAM_DEFAULT) pname = ((VusAstParamDefault *)pn)->name;
+        if (pname && strcmp(pname, name) == 0) return 1;
+    }
+    return 0;
+}
+
+static int gen_node_returns_param(VusAstFunctionDef *fd, VusAstNode *node) {
+    if (!node) return 0;
+    switch (node->type) {
+    case VUS_AST_RETURN: {
+        /* 直接返回参数 → 借用；返回结构体构造 → 实参被字段封存（不 ref）同样借用 */
+        VusAstReturn *r = (VusAstReturn *)node;
+        if (!r->value) return 0;
+        if (r->value->type == VUS_AST_IDENTIFIER)
+            return gen_fn_param_match(fd, ((VusAstIdentifier *)r->value)->name);
+        return gen_node_returns_param(fd, r->value);
+    }
+    case VUS_AST_ASSIGN:
+        return gen_node_returns_param(fd, ((VusAstAssign *)node)->value);
+    case VUS_AST_EXPR_STMT:
+        return gen_node_returns_param(fd, ((VusAstExprStmt *)node)->expr);
+    case VUS_AST_TRY: {
+        VusAstTry *t = (VusAstTry *)node;
+        if (gen_block_returns_param(fd, t->try_body)) return 1;
+        if (t->except_bodies)
+            for (size_t i = 0; i < t->except_bodies->count; i++) {
+                VusAstList *b = (VusAstList *)t->except_bodies->items[i];
+                if (b && gen_block_returns_param(fd, b)) return 1;
+            }
+        return 0;
+    }
+    case VUS_AST_IF: {
+        VusAstIf *f = (VusAstIf *)node;
+        if (gen_block_returns_param(fd, f->then_body)) return 1;
+        if (f->elif_bodies)
+            for (size_t i = 0; i < f->elif_bodies->count; i++) {
+                VusAstList *b = (VusAstList *)f->elif_bodies->items[i];
+                if (b && gen_block_returns_param(fd, b)) return 1;
+            }
+        return gen_block_returns_param(fd, f->else_body);
+    }
+    case VUS_AST_WHILE:   return gen_block_returns_param(fd, ((VusAstWhile *)node)->body);
+    case VUS_AST_FOR_RANGE: return gen_block_returns_param(fd, ((VusAstForRange *)node)->body);
+    case VUS_AST_FOR_EACH:  return gen_block_returns_param(fd, ((VusAstForEach *)node)->body);
+    case VUS_AST_CALL: {
+        /* 结构体构造：构造函数已对字段 vus_ref（富引用持有）——实参进字段即被
+         * 安全持有，调用点补还出生份不会造成悬垂。此处仅需排除「直接返回参数」
+         * （返回槽借用、无 ref），故 CALL 一律不视为借用。 */
+        return 0;
+    }
+    default:
+        return 0;
+    }
+}
+
+static int gen_block_returns_param(VusAstFunctionDef *fd, VusAstList *body) {
+    if (!body) return 0;
+    for (size_t i = 0; i < body->count; i++)
+        if (gen_node_returns_param(fd, body->items[i])) return 1;
+    return 0;
+}
+
+static void gen_scan_fn_borrow(VusAstFunctionDef *fd) {
+    if (!fd || !fd->name || s_fn_borrow_count >= (int)(sizeof(s_fn_borrow) / sizeof(s_fn_borrow[0])))
+        return;
+    for (int i = 0; i < s_fn_borrow_count; i++)
+        if (strcmp(s_fn_borrow[i].name, fd->name) == 0) return;
+    GenFnBorrowInfo *b = &s_fn_borrow[s_fn_borrow_count++];
+    snprintf(b->name, sizeof(b->name), "%s", fd->name);
+    b->borrow_any = gen_block_returns_param(fd, fd->body);
+}
+
+/* 查函数是否直接返回参数。未知函数（未定义的动态路径）保守按 1（不收割实参） */
+static int gen_fn_borrows_param(const char *name) {
+    if (!name) return 1;
+    for (int i = 0; i < s_fn_borrow_count; i++)
+        if (strcmp(s_fn_borrow[i].name, name) == 0) return s_fn_borrow[i].borrow_any;
+    return 1;
+}
+
+/* R6：表达式求值结果的归属分类（GEN_OWNED_*）。见上方总注释。
+ * 前置声明见 gen_expr_call 之前（打印分支/实参收割先于本定义使用）。 */
+static int gen_expr_owned(GenBuf *buf, const VusAstNode *node) {
+    (void)buf;
+    if (!node) return 0;
+    switch (node->type) {
+    case VUS_AST_BINARY_OP: {
+        const VusAstBinaryOp *b = (const VusAstBinaryOp *)node;
+        const char *op = b->op ? b->op : "";
+        if (strcmp(op, "..") == 0) return GEN_OWNED_NEW;   /* vus_string_concat_n 新建 */
+        /* 比较/逻辑 → 池字面量（借用，不可 RAII） */
+        if (strcmp(op, "==") == 0 || strcmp(op, "!=") == 0 ||
+            strcmp(op, "<") == 0 || strcmp(op, ">") == 0 ||
+            strcmp(op, "<=") == 0 || strcmp(op, ">=") == 0 ||
+            strcmp(op, "and") == 0 || strcmp(op, "和") == 0 ||
+            strcmp(op, "or") == 0 || strcmp(op, "或") == 0)
+            return GEN_OWNED_BORROW;
+        /* 整树常量折叠 → vus_literal（借用池，不可 RAII） */
+        int64_t cval;
+        if (eval_const_int((VusAstNode *)node, &cval)) return GEN_OWNED_BORROW;
+        return GEN_OWNED_NEW;   /* + - * / % & | ^ << >> 均 vus_to_string/vus_add 新建 */
+    }
+    case VUS_AST_UNARY_OP: {
+        const VusAstUnaryOp *u = (const VusAstUnaryOp *)node;
+        if (u->op && (strcmp(u->op, "not") == 0 || strcmp(u->op, "非") == 0))
+            return GEN_OWNED_BORROW;    /* 池字面量借用 */
+        return GEN_OWNED_NEW;        /* - / ~ → vus_to_string 新建 */
+    }
+    case VUS_AST_CALL: {
+        const VusAstCall *c = (const VusAstCall *)node;
+        if (!c->func_name) return GEN_OWNED_BORROW;
+        /* 用户函数/泛型实例调用（已登记）：返回动态类型 → 赋值处运行时收割。
+         * 内建（含借用返回、结构体构造经专用模板）一律不在此列。 */
+        if (gen_is_user_call_name(c->func_name)) return GEN_OWNED_UNKNOWN;
+        /* 函数一等公民调用：返回值跟随被调函数，动态类型 → 同样运行时收割 */
+        if (strcmp(c->func_name, "调用") == 0 || strcmp(c->func_name, "调用函数") == 0)
+            return GEN_OWNED_UNKNOWN;
+        return gen_expr_owned_builtin(c->func_name) ? GEN_OWNED_NEW : GEN_OWNED_BORROW;
+    }
+    default:
+        return GEN_OWNED_BORROW;
+    }
+}
+
+/* 把 `目标 = EXPR` 的赋值改造成 RAII 形态（出生份归还）。发射完整语句（含分号）。
+ * target_var 为完整 C 变量名（如 vus_金额 或 局部符号名），helper 取其地址。
+ * GEN_OWNED_NEW：无条件 unref（确证新字符串，出生份必须归还）；
+ * GEN_OWNED_UNKNOWN：运行时容器判定（容器出生 0 豁免，字符串/池借用被 var_set 对冲）。 */
+static void gen_stmt_assign_emit_raii(GenBuf *buf, const char *target_var, const char *val, int owned) {
+    long long seq = s_call_seq++;
+    if (owned == GEN_OWNED_NEW) {
+        gen_emit_linef(buf, "({VusString* _rnd%lld=(%s); vus_var_set(&%s,_rnd%lld); vus_unref(_rnd%lld);});",
+                       seq, val, target_var, seq, seq);
+    } else { /* GEN_OWNED_UNKNOWN */
+        gen_emit_linef(buf,
+            "({VusString* _rnd%lld=(%s); vus_var_set(&%s,_rnd%lld);"
+            " if (_rnd%lld && !vus_is_container(_rnd%lld)) vus_unref(_rnd%lld);});",
+            seq, val, target_var, seq, seq, seq, seq);
+    }
+}
+
 static void gen_stmt_assign(GenBuf *buf, VusAstAssign *assign) {
     char *val = gen_expr(buf, assign->value);
     char gsan[300];
+    /* R6：值表达式新建/未知归属 → RAII 包裹（出生份归还，计数精确） */
+    int owned = gen_expr_owned(buf, assign->value);
 
     /* 顶层全局赋值，或函数内对全局名的赋值：一律写文件级符号（全局名不遮蔽） */
     if (!assign->is_local || gen_is_global_name(assign->target)) {
         gen_sanitize_name(assign->target, gsan, sizeof(gsan));
-        gen_emit_linef(buf, "vus_var_set(&vus_%s, %s);", gsan, val);
+        if (owned != GEN_OWNED_BORROW) {
+            char tvar[340];
+            snprintf(tvar, sizeof(tvar), "vus_%s", gsan);
+            gen_stmt_assign_emit_raii(buf, tvar, val, owned);
+        } else {
+            gen_emit_linef(buf, "vus_var_set(&vus_%s, %s);", gsan, val);
+        }
         free(val);
         return;
     }
@@ -4626,17 +4883,37 @@ static void gen_stmt_assign(GenBuf *buf, VusAstAssign *assign) {
         cname = scope_declare(buf, assign->target, 1);
     }
     if (cname) {
-        gen_emit_linef(buf, "vus_var_set(&%s, %s);", cname, val);
+        if (owned != GEN_OWNED_BORROW) gen_stmt_assign_emit_raii(buf, cname, val, owned);
+        else gen_emit_linef(buf, "vus_var_set(&%s, %s);", cname, val);
     } else {
         gen_sanitize_name(assign->target, gsan, sizeof(gsan));
-        gen_emit_linef(buf, "vus_var_set(&vus_%s, %s);", gsan, val);
+        if (owned != GEN_OWNED_BORROW) {
+            char tvar[340];
+            snprintf(tvar, sizeof(tvar), "vus_%s", gsan);
+            gen_stmt_assign_emit_raii(buf, tvar, val, owned);
+        } else {
+            gen_emit_linef(buf, "vus_var_set(&vus_%s, %s);", gsan, val);
+        }
     }
     free(val);
 }
 
 static void gen_stmt_expr(GenBuf *buf, VusAstExprStmt *stmt) {
+    /* R6：结果被丢弃的必新建表达式 → RAII（出生份归还）。
+     * GEN_OWNED_NEW 无条件归还；GEN_OWNED_UNKNOWN 运行时容器判定（调用返回的动态值）；
+     * 共享/借用（变量、比较、字面量、转文本转发等）保持原样。 */
     char *expr = gen_expr(buf, stmt->expr);
-    gen_emit_linef(buf, "%s;", expr);
+    int owned = gen_expr_owned(buf, stmt->expr);
+    if (owned == GEN_OWNED_NEW) {
+        long long seq = s_call_seq++;
+        gen_emit_linef(buf, "({VusString* _rnd%lld=%s; vus_unref(_rnd%lld);});", seq, expr, seq);
+    } else if (owned == GEN_OWNED_UNKNOWN) {
+        long long seq = s_call_seq++;
+        gen_emit_linef(buf, "({VusString* _rnd%lld=%s; if (_rnd%lld && !vus_is_container(_rnd%lld)) vus_unref(_rnd%lld);});",
+                       seq, expr, seq, seq, seq);
+    } else {
+        gen_emit_linef(buf, "%s;", expr);
+    }
     free(expr);
 }
 
@@ -5448,6 +5725,8 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config,
     s_tmap_count = 0;
     s_gen_has_error = 0;
     s_gen_error[0] = '\0';
+    s_user_call_count = 0;   /* R6：重置按需登记的用户调用集合 */
+    s_fn_borrow_count = 0;   /* R6：重置函数借用返回扫描表 */
     if (g_inst_fwd) { free(g_inst_fwd->data); free(g_inst_fwd); g_inst_fwd = NULL; }
     if (g_inst_body) { free(g_inst_body->data); free(g_inst_body); g_inst_body = NULL; }
 
@@ -5577,6 +5856,16 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config,
             if (node->type == VUS_AST_STRUCT_DEF) {
                 gen_struct_constructor(buf, (VusAstStructDef *)node);
             }
+        }
+    }
+
+    /* R6：函数「返回参数 / 结构体封存实参」预扫描（须在结构体表之后）——
+     * 影响调用点是否对确证新建实参补还出生份（见 gen_fn_borrows_param）。 */
+    if (program->statements) {
+        for (size_t i = 0; i < program->statements->count; i++) {
+            VusAstNode *node = program->statements->items[i];
+            if (node->type == VUS_AST_FUNCTION_DEF)
+                gen_scan_fn_borrow((VusAstFunctionDef *)node);
         }
     }
 

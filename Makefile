@@ -107,10 +107,41 @@ all: vus $(RT_LIB)
 VUA_SRC  = $(RT_DIR)/vua.c
 VUA_OBJ  = $(BUILD_DIR)/vua.o
 
+# ---- 扩展内建/m 依赖的对象（须在 vus 规则之前定义：依赖列表解析期展开） ----
+# miniz：（解压_zip/压缩_zip 与 VAZ 解包，MIT）— O0 最快编译。
+# 3.0.2 拆分为 4 个实现 TU：miniz.c(核心) + miniz_tdef.c(deflate) +
+# miniz_tinfl.c(inflate) + miniz_zip.c(zip)，各自编译后并入静态库。
+MINIZ_SRC = $(RT_DIR)/miniz/miniz.c $(RT_DIR)/miniz/miniz_tdef.c \
+            $(RT_DIR)/miniz/miniz_tinfl.c $(RT_DIR)/miniz/miniz_zip.c
+MINIZ_OBJ = $(BUILD_DIR)/miniz.o $(BUILD_DIR)/miniz_tdef.o \
+            $(BUILD_DIR)/miniz_tinfl.o $(BUILD_DIR)/miniz_zip.o
+
+# Oniguruma：（正则内建，BSD-2）— 核心 + UTF-8 编码，gnu11（xalloca 走 GCC 内置）
+ONIG_SRC = $(RT_DIR)/oniguruma/regcomp.c $(RT_DIR)/oniguruma/regenc.c \
+           $(RT_DIR)/oniguruma/regerror.c $(RT_DIR)/oniguruma/regext.c \
+           $(RT_DIR)/oniguruma/regparse.c $(RT_DIR)/oniguruma/regsyntax.c \
+           $(RT_DIR)/oniguruma/regtrav.c $(RT_DIR)/oniguruma/regversion.c \
+           $(RT_DIR)/oniguruma/regexec.c $(RT_DIR)/oniguruma/st.c \
+           $(RT_DIR)/oniguruma/onig_init.c $(RT_DIR)/oniguruma/unicode.c \
+           $(RT_DIR)/oniguruma/utf8.c $(RT_DIR)/oniguruma/ascii.c \
+           $(RT_DIR)/oniguruma/unicode_fold1_key.c \
+           $(RT_DIR)/oniguruma/unicode_fold2_key.c \
+           $(RT_DIR)/oniguruma/unicode_fold3_key.c \
+           $(RT_DIR)/oniguruma/unicode_unfold_key.c
+ONIG_OBJ = $(ONIG_SRC:$(RT_DIR)/oniguruma/%.c=$(BUILD_DIR)/onig_%.o)
+
+# 扩展内建（哈希/ZIP/图片导出/正则，均 vendored 进 rt/）
+VUS_EXT_SRC = $(RT_DIR)/vus_hash.c $(RT_DIR)/vus_zip.c \
+              $(RT_DIR)/vus_img.c $(RT_DIR)/vus_regex.c
+VUS_EXT_OBJ = $(VUS_EXT_SRC:$(RT_DIR)/%.c=$(BUILD_DIR)/%.o)
+
 # 链接编译器（含 yyjson、VUA 运行时与其所需 libvus_rt/协程/EasyLogger：
 # CLI `vus lint` 与 LSP .vua 校验闭环进程内复用 vua.c 严格校验 + 渲染树归一）
-vus: $(OBJS) $(YYJSON_OBJ) $(VUA_OBJ) $(RT_OBJ) $(RT_CORO_OBJ) $(EL_OBJ)
-	$(CC) $(CFLAGS) -o $@ $^ $(ONIG_OBJ) $(VUS_EXT_OBJ) $(MINIZ_OBJ) -lm -ldl -lpthread
+# 注：Oniguruma/扩展内建/miniz 对象同时被 libvus_rt.a 与 vus 引用，必须同时
+# 列入 vus 的前置依赖，否则 `make vus`/`make` 单独构建时缺对象链接失败。
+vus: $(OBJS) $(YYJSON_OBJ) $(VUA_OBJ) $(RT_OBJ) $(RT_CORO_OBJ) $(EL_OBJ) \
+      $(ONIG_OBJ) $(VUS_EXT_OBJ) $(MINIZ_OBJ)
+	$(CC) $(CFLAGS) -o $@ $^ -lm -ldl -lpthread
 
 # 编译源文件
 $(BUILD_DIR)/main.o: $(SRC_DIR)/main.c $(MAIN_H) $(COMMON_H) | $(BUILD_DIR)
@@ -244,13 +275,7 @@ $(XYZ_OBJ): $(XYZ_SRC) $(RT_H) | $(BUILD_DIR)
 $(YYJSON_OBJ): $(YYJSON_SRC) | $(BUILD_DIR)
 	$(CC) -Wall -Wextra -O0 -std=c11 $(YYJSON_INC) -c -o $@ $<
 
-# miniz：（解压_zip/压缩_zip 与 VAZ 解包，MIT）— O0 最快编译。
-# 3.0.2 拆分为 4 个实现 TU：miniz.c(核心) + miniz_tdef.c(deflate) +
-# miniz_tinfl.c(inflate) + miniz_zip.c(zip)，各自编译后并入静态库。
-MINIZ_SRC = $(RT_DIR)/miniz/miniz.c $(RT_DIR)/miniz/miniz_tdef.c \
-            $(RT_DIR)/miniz/miniz_tinfl.c $(RT_DIR)/miniz/miniz_zip.c
-MINIZ_OBJ = $(BUILD_DIR)/miniz.o $(BUILD_DIR)/miniz_tdef.o \
-            $(BUILD_DIR)/miniz_tinfl.o $(BUILD_DIR)/miniz_zip.o
+# miniz 编译规则（变量定义见 vus 规则前的 MINIZ_SRC/MINIZ_OBJ）
 $(BUILD_DIR)/miniz.o: $(RT_DIR)/miniz/miniz.c $(RT_DIR)/miniz/miniz.h $(RT_DIR)/miniz/miniz_export.h | $(BUILD_DIR)
 	$(CC) -Wall -Wextra -O0 -std=c11 -I$(RT_DIR) -c -o $@ $<
 $(BUILD_DIR)/miniz_tdef.o: $(RT_DIR)/miniz/miniz_tdef.c $(RT_DIR)/miniz/miniz_tdef.h | $(BUILD_DIR)
@@ -260,27 +285,13 @@ $(BUILD_DIR)/miniz_tinfl.o: $(RT_DIR)/miniz/miniz_tinfl.c $(RT_DIR)/miniz/miniz_
 $(BUILD_DIR)/miniz_zip.o: $(RT_DIR)/miniz/miniz_zip.c $(RT_DIR)/miniz/miniz_zip.h | $(BUILD_DIR)
 	$(CC) -Wall -Wextra -O0 -std=c11 -I$(RT_DIR) -c -o $@ $<
 
-# Oniguruma：（正则内建，BSD-2）— 核心 + UTF-8 编码，gnu11（xalloca 走 GCC 内置）
-ONIG_SRC = $(RT_DIR)/oniguruma/regcomp.c $(RT_DIR)/oniguruma/regenc.c \
-           $(RT_DIR)/oniguruma/regerror.c $(RT_DIR)/oniguruma/regext.c \
-           $(RT_DIR)/oniguruma/regparse.c $(RT_DIR)/oniguruma/regsyntax.c \
-           $(RT_DIR)/oniguruma/regtrav.c $(RT_DIR)/oniguruma/regversion.c \
-           $(RT_DIR)/oniguruma/regexec.c $(RT_DIR)/oniguruma/st.c \
-           $(RT_DIR)/oniguruma/onig_init.c $(RT_DIR)/oniguruma/unicode.c \
-           $(RT_DIR)/oniguruma/utf8.c $(RT_DIR)/oniguruma/ascii.c \
-           $(RT_DIR)/oniguruma/unicode_fold1_key.c \
-           $(RT_DIR)/oniguruma/unicode_fold2_key.c \
-           $(RT_DIR)/oniguruma/unicode_fold3_key.c \
-           $(RT_DIR)/oniguruma/unicode_unfold_key.c
-ONIG_OBJ = $(ONIG_SRC:$(RT_DIR)/oniguruma/%.c=$(BUILD_DIR)/onig_%.o)
+# Oniguruma 编译规则（变量定义见 vus 规则前的 ONIG_SRC/ONIG_OBJ）
 $(BUILD_DIR)/onig_%.o: $(RT_DIR)/oniguruma/%.c $(RT_DIR)/oniguruma/oniguruma.h | $(BUILD_DIR)
 	$(CC) -Wall -Wextra -O0 -std=gnu11 -Wno-unused-parameter -Wno-sign-compare \
 		-I$(RT_DIR)/oniguruma -c -o $@ $<
 
-# VUS 扩展内建模块（哈希/ZIP/图片/正则的 VusString* 封装，随运行时库编译）
-VUS_EXT_SRC = $(RT_DIR)/vus_hash.c $(RT_DIR)/vus_zip.c \
-              $(RT_DIR)/vus_img.c $(RT_DIR)/vus_regex.c
-VUS_EXT_OBJ = $(VUS_EXT_SRC:$(RT_DIR)/%.c=$(BUILD_DIR)/%.o)
+# VUS 扩展内建模块编译规则（哈希/ZIP/图片/正则的 VusString* 封装，随运行时库编译；
+# 变量定义见 vus 规则前的 VUS_EXT_SRC/VUS_EXT_OBJ）
 $(BUILD_DIR)/vus_hash.o: $(RT_DIR)/vus_hash.c $(RT_H) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -I$(RT_DIR) -c -o $@ $<
 $(BUILD_DIR)/vus_zip.o: $(RT_DIR)/vus_zip.c $(RT_H) | $(BUILD_DIR)

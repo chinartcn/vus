@@ -74,6 +74,16 @@ static inline int vus_is_object(void* obj) {
     return obj && ((VusObject*)obj)->magic == VUS_OBJECT_MAGIC;
 }
 
+// 判断指针是否为任何容器（VusObject* 或结构体实例）。非容器（普通 VusString*）返回 0。
+// VusString 的 ref 后第二字段是 len（小正整数），不会与两个大魔数冲突。
+// 用于 R6 返回值收割点：仅对非容器（NUL 字符串或标量）归还出生引用，容器出生 ref=0
+// 精确转让（var_set +1 即唯一持有），豁免避免提前释放。
+static inline int vus_is_container(void* obj) {
+    if (!obj) return 0;
+    int m = ((int*)obj)[1];
+    return m == VUS_OBJECT_MAGIC || m == VUS_STRUCT_MAGIC;
+}
+
 // 将任意值（VusString* 或 VusObject*）转为字符串表示：标量取原文，列表/字典递归序列化。
 // 纯 C 实现，不依赖嵌入式 Python，供 vus_print 等安全消费。
 VusString* vus_object_to_string(void* obj);
