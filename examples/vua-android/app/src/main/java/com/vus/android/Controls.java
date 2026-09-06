@@ -79,10 +79,18 @@ final class Controls {
             b.setTextSize(22);
             b.setTextColor(Theme.accent(r.darkTheme));
             b.setMinHeight(0);
-        } else {
+        } else if ("检查更新".equals(node.eventName())) {
             b.setMinHeight(r.dp(44));
             b.setPadding(r.dp(18), 0, r.dp(18), 0);
-            if (r.darkTheme) b.setTextColor(Theme.text(true));
+        } else {
+            // MD3 filled 按钮：大圆角 + primaryContainer/primary 底 + onPrimary 字
+            b.setMinHeight(r.dp(44));
+            b.setPadding(r.dp(22), 0, r.dp(22), 0);
+            b.setTextColor(Theme.onPrimary(r.darkTheme));
+            android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+            bg.setColor(r.darkTheme ? Theme.primaryContainer(true) : Theme.sPrimary);
+            bg.setCornerRadius(r.dp(20));
+            b.setBackground(bg);
         }
         final String evName = node.eventName();
         b.setOnClickListener(v -> {
@@ -120,7 +128,7 @@ final class Controls {
         e.setOnFocusChangeListener((v, has) -> {
             android.graphics.drawable.GradientDrawable g2 =
                     (android.graphics.drawable.GradientDrawable) e.getBackground();
-            g2.setStroke(r.dp(has ? 2 : 1), has ? Theme.PRIMARY : normalStroke);
+            g2.setStroke(r.dp(has ? 2 : 1), has ? Theme.sPrimary : normalStroke);
         });
         if (dark) e.setTextColor(Theme.text(true));
         r.rememberInput(node, e, false);
@@ -132,6 +140,8 @@ final class Controls {
         CheckBox c = new CheckBox(r.ctx);
         c.setText(node.attr("", "标签", "label"));
         c.setTextColor(Theme.text(r.darkTheme));
+        // MD3 着色：勾选态用主色（12+ 动态色）
+        c.setButtonTintList(android.content.res.ColorStateList.valueOf(Theme.accent(r.darkTheme)));
         r.rememberInput(node, c, false);
         restore(node, c);
         return c;
@@ -141,25 +151,15 @@ final class Controls {
         Switch s = new Switch(r.ctx);
         s.setText(node.attr("", "标签", "label"));
         s.setTextColor(Theme.text(r.darkTheme));
+        // MD3 着色：thumb=主色，track=描边色
+        s.setThumbTintList(android.content.res.ColorStateList.valueOf(Theme.accent(r.darkTheme)));
+        s.setTrackTintList(android.content.res.ColorStateList.valueOf(Theme.stroke(r.darkTheme)));
         r.rememberInput(node, s, false);
         restore(node, s);
         return s;
     }
 
     /* ---- 进度条 / 分隔线 / 间距（新增叶子控件） ---- */
-
-    /** 彩色字符串 → int（"0xRRGGBB"/"#RRGGBB"/系统色名），解析失败回退默认。 */
-    private static int parseColor(String s, int def) {
-        if (s == null || s.isEmpty()) return def;
-        try {
-            if (s.startsWith("0x") || s.startsWith("0X")) {
-                return 0xFF000000 | (int) Long.parseLong(s.substring(2), 16);
-            }
-            return android.graphics.Color.parseColor(s);
-        } catch (Throwable t) {
-            return def;
-        }
-    }
 
     /** 进度条：值/最大值/颜色，可选右侧百分比文本（百分比=1 时显示）。 */
     void progressView(RenderNode node, ViewGroup parent) {
@@ -176,7 +176,7 @@ final class Controls {
         if (!lv.isEmpty()) pb.setContentDescription(lv);
         if (Build.VERSION.SDK_INT >= 21) {
             pb.setProgressTintList(android.content.res.ColorStateList
-                    .valueOf(parseColor(node.attr("", "颜色"), Theme.accent(r.darkTheme))));
+                    .valueOf(Theme.parseColor(node.attr("", "颜色"), Theme.accent(r.darkTheme))));
             pb.setProgressBackgroundTintList(android.content.res.ColorStateList
                     .valueOf(Theme.stroke(r.darkTheme)));
         }
@@ -198,7 +198,7 @@ final class Controls {
     void dividerView(RenderNode node, ViewGroup parent) {
         View line = new View(r.ctx);
         int th = Math.max(1, node.intAttr(1, "粗细"));
-        line.setBackgroundColor(parseColor(node.attr("", "颜色"), Theme.divider(r.darkTheme)));
+        line.setBackgroundColor(Theme.parseColor(node.attr("", "颜色"), Theme.divider(r.darkTheme)));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, r.dp(th));
         int top = node.intAttr(0, "上边距");
@@ -219,6 +219,9 @@ final class Controls {
 
     void sliderView(RenderNode node, ViewGroup parent) {
         final SeekBar sb = new SeekBar(r.ctx);
+        // MD3 着色：进度/thumb 用主色，统一各版本观感
+        sb.setProgressTintList(android.content.res.ColorStateList.valueOf(Theme.accent(r.darkTheme)));
+        sb.setThumbTintList(android.content.res.ColorStateList.valueOf(Theme.accent(r.darkTheme)));
         sb.setMax(node.intAttr(100, "最大值"));
         String label = node.attr("", "标签");
         if (!label.isEmpty()) sb.setContentDescription(label);

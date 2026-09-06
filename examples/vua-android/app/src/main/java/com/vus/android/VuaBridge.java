@@ -200,6 +200,7 @@ public final class VuaBridge {
             /* 主题：脚本运行时切换浅色/暗色/跟随系统（覆盖页面声明） */
             if ("theme.set".equals(api)) { themeSet(str(a, "name")); return ok("0"); }
             if ("theme.get".equals(api)) return ok(themeGet());
+            if ("theme.primary".equals(api)) { themePrimary(str(a, "color")); return ok("0"); }
             // DEX 逻辑拓展：api 形如 "ext.<插件名>.<操作>"，交给 ExtensionLoader 动态加载调用。
             // 插件 dex 位于 filesDir/plugins/<插件名>.dex，支持运行期热更新（配合 http.download）。
             if (api.startsWith("ext.")) {
@@ -503,6 +504,22 @@ public final class VuaBridge {
         if (sTheme == null) return "浅色";
         if ("system".equals(sTheme)) return "跟随系统";
         return "dark".equals(sTheme) ? "暗色" : "浅色";
+    }
+
+    /** 主题_主色：接受 "#RRGGBB"/"0xRRGGBB"、"动态"（12+ 壁纸取色，低版本回退默认蓝）、"默认"（恢复品牌蓝）。 */
+    private static void themePrimary(String color) {
+        if (color == null || color.isEmpty()) return;
+        int c = 0;
+        if ("动态".equals(color) || "dynamic".equalsIgnoreCase(color)) {
+            c = Theme.dynamicPrimary();
+        } else if ("默认".equals(color) || "default".equalsIgnoreCase(color)) {
+            c = Theme.PRIMARY;
+        } else {
+            c = Theme.parseColor(color, 0);
+        }
+        if (c == 0) return;
+        Theme.setPrimary(c);
+        requestRender();
     }
 
     /* ---- 网络（VusNet 封装，主线程规避已在 VusNet 内处理） ---- */

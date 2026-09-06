@@ -2654,6 +2654,16 @@ VusString* vus_plugin_theme_get(void) {
     return vus_string_new("浅色");
 }
 
+VusString* vus_plugin_theme_primary(VusString* color) {
+    if (color && vus_string_cstr(color)) {
+        char *aj = vus_java_json_kv("color", vus_string_cstr(color));
+        VusString *jr = aj ? vus_java_rpc("theme.primary", aj) : NULL;
+        free(aj);
+        if (jr) return jr;
+    }
+    return vus_string_new("0");
+}
+
 /* ---- shell 命令执行（供"终端"使用） ---- */
 VusString* vus_plugin_shell_exec(VusString* cmd) {
     if (!cmd) return vus_string_new("");

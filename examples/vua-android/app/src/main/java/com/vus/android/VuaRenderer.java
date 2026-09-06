@@ -164,6 +164,7 @@ public final class VuaRenderer {
             RenderNode top = new RenderNode(new JSONObject(tree));
             darkTheme = resolveDark(top.attr("light", "主题", "theme"));
             root.setBackgroundColor(darkTheme ? Theme.BG_DARK : Theme.BG_LIGHT);
+            applyStatusBar(darkTheme);
             /* 先构建到透明包装容器，整棵子树才能脱离 root 缓存复用 */
             varTexts.clear();
             idCacheSync(sid);                          // G4：换屏时清空屏内子树复用缓存
@@ -351,15 +352,29 @@ public final class VuaRenderer {
         return m;
     }
 
-    /** 竖容器（列/卡片/表单/界面）套圆角白卡片背景，浅灰页面上形成 Material 卡片层次。 */
+    /** 竖容器（列/卡片/表单/界面）套大圆角卡片背景，阴影分层形成 MD3 表面层级（无描边）。 */
     private void styleVertCard(LinearLayout ll) {
         android.graphics.drawable.GradientDrawable g = new android.graphics.drawable.GradientDrawable();
         g.setColor(Theme.card(darkTheme));
-        g.setCornerRadius(dp(14));
-        if (!darkTheme) g.setStroke(dp(1), 0x14000000);
+        g.setCornerRadius(dp(16));
         ll.setBackground(g);
-        ll.setElevation(dp(1));
+        ll.setElevation(dp(2));
         ll.setPadding(dp(16), dp(12), dp(16), dp(12));
+    }
+
+    /** 状态栏跟随页面主题底色与深浅图标（系统自带 MD3 主题下自动处理，此处保证 10/11 一致）。 */
+    private void applyStatusBar(boolean dark) {
+        if (VuaBridge.sActivity == null) return;
+        android.view.Window w = VuaBridge.sActivity.getWindow();
+        if (w == null) return;
+        w.addFlags(android.view.WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+        w.setStatusBarColor(dark ? Theme.BG_DARK : Theme.BG_LIGHT);
+        if (Build.VERSION.SDK_INT >= 23) {
+            int v = w.getDecorView().getSystemUiVisibility();
+            if (dark) v &= ~android.view.View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+            else v |= android.view.View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+            w.getDecorView().setSystemUiVisibility(v);
+        }
     }
 
     private LinearLayout makeLayout(boolean vert) {

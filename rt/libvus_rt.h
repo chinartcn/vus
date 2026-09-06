@@ -390,6 +390,7 @@ VusString* vus_plugin_notify_send(VusString* title, VusString* body); /* 通知_
 /* 主题（APK） */
 VusString* vus_plugin_theme_set(VusString* name);   /* 主题_设置(浅色|暗色|跟随系统)：APK 切主题并重建，桌面 "0" */
 VusString* vus_plugin_theme_get(void);              /* 主题_查询()：APK 返回当前主题名，桌面 "浅色" */
+VusString* vus_plugin_theme_primary(VusString* color); /* 主题_主色：#RRGGBB/动态/默认：APK 换活力色并重建，桌面 "0" */
 
 /* shell 命令执行：popen 捕获命令标准输出，返回输出文本(上限 64KB) */
 VusString* vus_plugin_shell_exec(VusString* cmd);

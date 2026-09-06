@@ -3582,6 +3582,16 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
     if (strcmp(call->func_name, "主题_查询") == 0) {
         return strdup("vus_plugin_theme_get()");
     }
+    if (strcmp(call->func_name, "主题_主色") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_theme_primary(%s)", a);
+            free(a);
+            return strdup(result);
+        }
+        return strdup("vus_plugin_theme_primary(vus_string_new(\"默认\"))");
+    }
 
     /* shell 命令执行：popen 捕获输出，供"终端"应用使用 */
     if (strcmp(call->func_name, "命令_执行") == 0) {
