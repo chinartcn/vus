@@ -89,6 +89,10 @@ public final class VuaBridge {
     /** 主 Activity：由 MainActivity.onCreate 注入，供 屏幕_常亮 等窗口相关能力使用。 */
     public static Activity sActivity = null;
 
+    /** 运行期主题覆盖（null=尊重页面 .vua 声明的"主题"）："light"/"dark"/"system"。
+     * 由 主题_设置 内建写入并触发重建，VuaRenderer 渲染时优先取用。 */
+    public static volatile String sTheme = null;
+
     /** native → Java 重绘回调：屏栈变化（界面_显示/返回/返回至）后由 native 调用。
      * MainActivity 在此注册一个 runnable 来重建当前屏的 View。 */
     public static Runnable onRerender = null;
@@ -193,6 +197,9 @@ public final class VuaBridge {
             if ("screen.keepon".equals(api)) { keepScreenOn(str(a, "flag", "1")); return ok("0"); }
             if ("network.type".equals(api)) return ok(networkType());
             if ("notify.send".equals(api)) return ok(sendNotify(str(a, "title"), str(a, "body")));
+            /* 主题：脚本运行时切换浅色/暗色/跟随系统（覆盖页面声明） */
+            if ("theme.set".equals(api)) { themeSet(str(a, "name")); return ok("0"); }
+            if ("theme.get".equals(api)) return ok(themeGet());
             // DEX 逻辑拓展：api 形如 "ext.<插件名>.<操作>"，交给 ExtensionLoader 动态加载调用。
             // 插件 dex 位于 filesDir/plugins/<插件名>.dex，支持运行期热更新（配合 http.download）。
             if (api.startsWith("ext.")) {
@@ -476,6 +483,26 @@ public final class VuaBridge {
         } catch (Throwable t) {
             return "-1";
         }
+    }
+
+    /* ---- 主题（浅色/暗色/跟随系统，覆盖页面 .vua 声明并触发重建） ---- */
+
+    /** 主题_设置：接受 中文名/英文名；写入 sTheme 并请求一次界面重建。 */
+    private static void themeSet(String name) {
+        if (name == null || name.isEmpty()) return;
+        String v;
+        if ("跟随系统".equals(name) || "system".equalsIgnoreCase(name)) v = "system";
+        else if ("暗色".equals(name) || "dark".equalsIgnoreCase(name)) v = "dark";
+        else v = "light";
+        sTheme = v;
+        requestRender();
+    }
+
+    /** 主题_查询：返回当前覆盖主题的中文名（未覆盖时按"浅色"，页面声明以 .vua 为准）。 */
+    private static String themeGet() {
+        if (sTheme == null) return "浅色";
+        if ("system".equals(sTheme)) return "跟随系统";
+        return "dark".equals(sTheme) ? "暗色" : "浅色";
     }
 
     /* ---- 网络（VusNet 封装，主线程规避已在 VusNet 内处理） ---- */

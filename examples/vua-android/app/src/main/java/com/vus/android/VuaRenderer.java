@@ -162,7 +162,7 @@ public final class VuaRenderer {
         try {
             if (tree == null || tree.isEmpty()) throw new Exception("空渲染树");
             RenderNode top = new RenderNode(new JSONObject(tree));
-            darkTheme = "dark".equalsIgnoreCase(top.attr("light", "主题", "theme"));
+            darkTheme = resolveDark(top.attr("light", "主题", "theme"));
             root.setBackgroundColor(darkTheme ? Theme.BG_DARK : Theme.BG_LIGHT);
             /* 先构建到透明包装容器，整棵子树才能脱离 root 缓存复用 */
             varTexts.clear();
@@ -292,6 +292,18 @@ public final class VuaRenderer {
             return;
         }
         buildIntoBody(node, parent, builtVars);
+    }
+
+    /** 实况主题：运行期覆盖（VuaBridge.sTheme）优先，其次页面 .vua 声明；
+     * "跟随系统"/system 按系统夜间模式（uiMode）判定。 */
+    private boolean resolveDark(String pageTheme) {
+        String t = VuaBridge.sTheme != null ? VuaBridge.sTheme : pageTheme;
+        if ("system".equals(t) || "跟随系统".equals(t)) {
+            int mode = ctx.getResources().getConfiguration().uiMode
+                    & android.content.res.Configuration.UI_MODE_NIGHT_MASK;
+            return mode == android.content.res.Configuration.UI_MODE_NIGHT_YES;
+        }
+        return "dark".equalsIgnoreCase(t) || "暗色".equals(t);
     }
 
     /** 构建分发主体：容器/侧边栏在本类递归，叶子控件委托 Controls。 */

@@ -3543,6 +3543,19 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
         }
         return strdup("vus_plugin_notify_send(vus_string_new(\"\"), vus_string_new(\"\"))");
     }
+    if (strcmp(call->func_name, "主题_设置") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_theme_set(%s)", a);
+            free(a);
+            return strdup(result);
+        }
+        return strdup("vus_plugin_theme_set(vus_string_new(\"浅色\"))");
+    }
+    if (strcmp(call->func_name, "主题_查询") == 0) {
+        return strdup("vus_plugin_theme_get()");
+    }
 
     /* shell 命令执行：popen 捕获输出，供"终端"应用使用 */
     if (strcmp(call->func_name, "命令_执行") == 0) {

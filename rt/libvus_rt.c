@@ -2636,6 +2636,24 @@ VusString* vus_plugin_notify_send(VusString* title, VusString* body) {
     return vus_string_new("0");
 }
 
+/* ---- 主题（APK：Java 平台桥切换并重建；桌面：无害降级） ---- */
+
+VusString* vus_plugin_theme_set(VusString* name) {
+    if (name && vus_string_cstr(name)) {
+        char *aj = vus_java_json_kv("name", vus_string_cstr(name));
+        VusString *jr = aj ? vus_java_rpc("theme.set", aj) : NULL;
+        free(aj);
+        if (jr) return jr;
+    }
+    return vus_string_new("0");   /* 桌面 GUI 主题不受脚本控制：空操作成功 */
+}
+
+VusString* vus_plugin_theme_get(void) {
+    VusString *jr = vus_java_rpc("theme.get", "{}");
+    if (jr) return jr;
+    return vus_string_new("浅色");
+}
+
 /* ---- shell 命令执行（供"终端"使用） ---- */
 VusString* vus_plugin_shell_exec(VusString* cmd) {
     if (!cmd) return vus_string_new("");

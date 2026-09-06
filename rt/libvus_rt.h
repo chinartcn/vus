@@ -387,6 +387,10 @@ VusString* vus_plugin_screen_keepon(VusString* flag);     /* 屏幕_常亮(开�
 VusString* vus_plugin_network_type(void);                 /* 网络_类型()：APK 返回 wifi/mobile/none，桌面 "none" */
 VusString* vus_plugin_notify_send(VusString* title, VusString* body); /* 通知_发送(标题, 内容)：APK 发通知栏，桌面 "0" */
 
+/* 主题（APK） */
+VusString* vus_plugin_theme_set(VusString* name);   /* 主题_设置(浅色|暗色|跟随系统)：APK 切主题并重建，桌面 "0" */
+VusString* vus_plugin_theme_get(void);              /* 主题_查询()：APK 返回当前主题名，桌面 "浅色" */
+
 /* shell 命令执行：popen 捕获命令标准输出，返回输出文本(上限 64KB) */
 VusString* vus_plugin_shell_exec(VusString* cmd);
 

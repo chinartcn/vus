@@ -88,7 +88,8 @@ fi
 mkdir -p "$ASSETS"
 cp "$TESTDATA_SRC"/vua_home.vua "$TESTDATA_SRC"/vua_settings.vua \
    "$TESTDATA_SRC"/vua_logic.vua "$TESTDATA_SRC"/vua_class.vua \
-   "$TESTDATA_SRC"/vua_advanced.vua "$TESTDATA_SRC"/vua_controls.json "$ASSETS/"
+   "$TESTDATA_SRC"/vua_advanced.vua "$TESTDATA_SRC"/vua_theme.vua \
+   "$TESTDATA_SRC"/vua_life.vua "$TESTDATA_SRC"/vua_controls.json "$ASSETS/"
 cp "$TESTDATA_SRC"/*.jpg "$ASSETS"/ 2>/dev/null || true
 # 示例 DEX 逻辑拓展插件（ExtensionLoader 加载，检出 .sha256 即强制校验）
 if [ -d "$ROOT/plugins/dist" ]; then
@@ -218,7 +219,8 @@ for ABI in "${ABIS[@]}"; do
   cp "$ROOT/build/libs/$ABI/libvus_app.so" "$STM/lib/$ABI/"
 done
 cp "$ASSETS"/vua_home.vua "$ASSETS"/vua_settings.vua "$ASSETS"/vua_logic.vua \
-   "$ASSETS"/vua_class.vua "$ASSETS"/vua_advanced.vua "$ASSETS"/vua_controls.json "$STM/assets/"
+   "$ASSETS"/vua_class.vua "$ASSETS"/vua_advanced.vua "$ASSETS"/vua_theme.vua \
+   "$ASSETS"/vua_life.vua "$ASSETS"/vua_controls.json "$STM/assets/"
 cp "$ASSETS"/*.jpg "$ASSETS"/*.png "$STM/assets/" 2>/dev/null || true
 cp -r "$ASSETS/plugins" "$STM/assets/" 2>/dev/null || true
 
