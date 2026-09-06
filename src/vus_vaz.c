@@ -8,7 +8,7 @@
  *   logic/ 目录       可复用 VUS 函数库，构建期合并输出，供页面逻辑直接调用。
  *   vaz.json          清单："名称/版本/控件/逻辑"。
  *
- * 依赖：yyjson（JSON 解析/操作）、unzip（解压 .vaz zip，目录形式无需）。
+ * 依赖：yyjson（JSON 解析/操作）、miniz（内建解压 .vaz zip，目录形式无需）。
  * =============================================================================
  */
 #define _GNU_SOURCE
@@ -22,6 +22,7 @@
 
 #include "yyjson.h"
 #include "vus_vaz.h"
+#include "libvus_rt.h"   /* vus_zip_unzip_to_dir：内建 miniz 解包 */
 
 #define VAZ_MAX_CTRL  128
 #define VAZ_MAX_KEYS  64
@@ -96,10 +97,7 @@ static char *vaz_prepare(const char *vaz_path, char *err, size_t errsz) {
     }
     char tmp[512];
     snprintf(tmp, sizeof(tmp), "/tmp/vus_vaz_%ld", (long)getpid());
-    char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "rm -rf %s && mkdir -p %s && unzip -q -o \"%s\" -d %s",
-             tmp, tmp, vaz_path, tmp);
-    if (system(cmd) != 0) {
+    if (vus_zip_unzip_to_dir(vaz_path, tmp) != 0) {   /* 内建 miniz 解包（替代 system unzip） */
         snprintf(err, errsz, "解压扩展包失败: %s", vaz_path);
         return NULL;
     }
@@ -485,10 +483,7 @@ static int vaz_dir_is_pkg(const char *dir) {
 static int vaz_unpack_into(const char *zip, const char *dest) {
     struct stat st;
     if (stat(dest, &st) == 0 && S_ISDIR(st.st_mode)) return 0;
-    char cmd[2048];
-    snprintf(cmd, sizeof(cmd), "mkdir -p \"%s\" && unzip -q -o \"%s\" -d \"%s\"",
-             dest, zip, dest);
-    return (system(cmd) == 0) ? 0 : -1;
+    return vus_zip_unzip_to_dir(zip, dest);   /* 内建 miniz 解包（替代 system unzip） */
 }
 
 /* 拼接包内逻辑库源码（读 vaz.json 清单 logic 数组）；返回 malloc 缓冲 */

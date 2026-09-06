@@ -3463,6 +3463,155 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
         return strdup("vus_plugin_text_lines(vus_string_new(\"\"))");
     }
 
+    /* ============= 哈希内建（rt/vus_hash.c） ============= */
+    if (strcmp(call->func_name, "SHA256") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_hash_sha256(%s)", a);
+            free(a);
+            return strdup(result);
+        }
+        return strdup("vus_hash_sha256(vus_string_new(\"\"))");
+    }
+    if (strcmp(call->func_name, "MD5") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_hash_md5(%s)", a);
+            free(a);
+            return strdup(result);
+        }
+        return strdup("vus_hash_md5(vus_string_new(\"\"))");
+    }
+
+    /* ============= ZIP 内建（rt/vus_zip.c，miniz） ============= */
+    if (strcmp(call->func_name, "解压_zip") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char *b = gen_expr(buf, call->args->items[1]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_zip_unzip(%s, %s)", a, b);
+            free(a); free(b);
+            return strdup(result);
+        }
+        return strdup("vus_string_new(\"-1\")");
+    }
+    if (strcmp(call->func_name, "压缩_zip") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char *b = gen_expr(buf, call->args->items[1]);
+            char result[4096];
+            snprintf(result, sizeof(result),
+                "vus_zip_compress_list((void*)(%s), %s)", a, b);
+            free(a); free(b);
+            return strdup(result);
+        }
+        return strdup("vus_string_new(\"-1\")");
+    }
+
+    /* ============= 图片导出内建（rt/vus_img.c，stb_image_write） ============= */
+    if (strcmp(call->func_name, "图片_保存PNG") == 0) {
+        if (call->args && call->args->count >= 4) {
+            char *p = gen_expr(buf, call->args->items[0]);
+            char *w = gen_expr(buf, call->args->items[1]);
+            char *h = gen_expr(buf, call->args->items[2]);
+            char *d = gen_expr(buf, call->args->items[3]);
+            char *ch = (call->args->count >= 5) ? gen_expr(buf, call->args->items[4]) : NULL;
+            char result[8192];
+            if (ch)
+                snprintf(result, sizeof(result),
+                    "vus_img_png_save(%s, (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), %s, (int)vus_to_int(%s, &_err))",
+                    p, w, h, d, ch);
+            else
+                snprintf(result, sizeof(result),
+                    "vus_img_png_save(%s, (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), %s, 4)",
+                    p, w, h, d);
+            free(p); free(w); free(h); free(d); free(ch);
+            return strdup(result);
+        }
+        return strdup("vus_string_new(\"-1\")");
+    }
+    if (strcmp(call->func_name, "图片_保存JPG") == 0) {
+        if (call->args && call->args->count >= 5) {
+            char *p = gen_expr(buf, call->args->items[0]);
+            char *w = gen_expr(buf, call->args->items[1]);
+            char *h = gen_expr(buf, call->args->items[2]);
+            char *d = gen_expr(buf, call->args->items[3]);
+            char *q = gen_expr(buf, call->args->items[4]);
+            char *ch = (call->args->count >= 6) ? gen_expr(buf, call->args->items[5]) : NULL;
+            char result[8192];
+            if (ch)
+                snprintf(result, sizeof(result),
+                    "vus_img_jpg_save(%s, (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), %s, (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err))",
+                    p, w, h, d, q, ch);
+            else
+                snprintf(result, sizeof(result),
+                    "vus_img_jpg_save(%s, (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), %s, (int)vus_to_int(%s, &_err), 3)",
+                    p, w, h, d, q);
+            free(p); free(w); free(h); free(d); free(q); free(ch);
+            return strdup(result);
+        }
+        return strdup("vus_string_new(\"-1\")");
+    }
+    if (strcmp(call->func_name, "图片_保存BMP") == 0) {
+        if (call->args && call->args->count >= 4) {
+            char *p = gen_expr(buf, call->args->items[0]);
+            char *w = gen_expr(buf, call->args->items[1]);
+            char *h = gen_expr(buf, call->args->items[2]);
+            char *d = gen_expr(buf, call->args->items[3]);
+            char *ch = (call->args->count >= 5) ? gen_expr(buf, call->args->items[4]) : NULL;
+            char result[8192];
+            if (ch)
+                snprintf(result, sizeof(result),
+                    "vus_img_bmp_save(%s, (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), %s, (int)vus_to_int(%s, &_err))",
+                    p, w, h, d, ch);
+            else
+                snprintf(result, sizeof(result),
+                    "vus_img_bmp_save(%s, (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), %s, 4)",
+                    p, w, h, d);
+            free(p); free(w); free(h); free(d); free(ch);
+            return strdup(result);
+        }
+        return strdup("vus_string_new(\"-1\")");
+    }
+
+    /* ============= 正则内建（rt/vus_regex.c，Oniguruma） ============= */
+    if (strcmp(call->func_name, "正则_查找") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char *b = gen_expr(buf, call->args->items[1]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_regex_find(%s, %s)", a, b);
+            free(a); free(b);
+            return strdup(result);
+        }
+        return strdup("vus_string_new(\"0\")");
+    }
+    if (strcmp(call->func_name, "正则_匹配") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char *b = gen_expr(buf, call->args->items[1]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_regex_match(%s, %s)", a, b);
+            free(a); free(b);
+            return strdup(result);
+        }
+        return strdup("vus_string_new(\"\")");
+    }
+    if (strcmp(call->func_name, "正则_替换") == 0) {
+        if (call->args && call->args->count >= 3) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char *b = gen_expr(buf, call->args->items[1]);
+            char *c = gen_expr(buf, call->args->items[2]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_regex_replace(%s, %s, %s)", a, b, c);
+            free(a); free(b); free(c);
+            return strdup(result);
+        }
+        return strdup("vus_string_new(\"\")");
+    }
+
     /* ============= 插件调用内置函数 ============= */
     if (strcmp(call->func_name, "插件_运行") == 0) {
         if (call->args && call->args->count >= 2) {

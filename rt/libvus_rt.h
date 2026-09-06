@@ -405,4 +405,33 @@ VusString* vus_random_int(VusString* min_s, VusString* max_s);
 /* 断言失败：打印消息并以退出码 1 终止进程 */
 void vus_assert_fail(VusString* msg);
 
+/* ============ 哈希（vus_hash.c：SHA-256/MD5 纯 C） ============
+ * 返回小写十六进制串；输入按 VusString len 处理（二进制安全）。 */
+VusString* vus_hash_sha256(VusString* data);
+VusString* vus_hash_md5(VusString* data);
+
+/* ============ ZIP（vus_zip.c：miniz 封装） ============
+ * 解压_zip(zip路径, 目标目录)：自动创建目录、拒绝 zip-slip 条目，返回 "0"/"-1"。
+ * 压缩_zip(文件列表, zip路径)：listobj 为 VUS 列表（元素为文件路径串），
+ * 条目名取 basename，返回 "0"/"-1"。 */
+VusString* vus_zip_unzip(VusString* zippath, VusString* dest);
+VusString* vus_zip_compress_list(void* listobj, VusString* zippath);
+/* C 内部接口（vus_vaz.c 解包 .vaz 专用）：0 成功 / -1 失败 */
+int vus_zip_unzip_to_dir(const char* zippath, const char* dest);
+
+/* ============ 图片导出（vus_img.c：stb_image_write 封装） ============
+ * 像素数据为原始字节缓冲（通道 3=RGB / 4=RGBA），长度须等于 w*h*comp；
+ * PNG/BMP 返回 "0"/"-1"；JPG 附加质量 1~100。 */
+VusString* vus_img_png_save(VusString* path, int w, int h, VusString* data, int comp);
+VusString* vus_img_jpg_save(VusString* path, int w, int h, VusString* data, int quality, int comp);
+VusString* vus_img_bmp_save(VusString* path, int w, int h, VusString* data, int comp);
+
+/* ============ 正则（vus_regex.c：Oniguruma 封装，UTF-8） ============
+ * 正则_查找(文本, 模式) → "1"/"0"；
+ * 正则_匹配(文本, 模式) → 第一个完整匹配串，失败返回空串；
+ * 正则_替换(文本, 模式, 替换) → 全部替换，替换串支持 \0~\9 分组引用。 */
+VusString* vus_regex_find(VusString* text, VusString* pattern);
+VusString* vus_regex_match(VusString* text, VusString* pattern);
+VusString* vus_regex_replace(VusString* text, VusString* pattern, VusString* repl);
+
 #endif // VUS_RT_H

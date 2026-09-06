@@ -1,0 +1,26 @@
+// ext_smoke.vus — 新扩展内建（哈希/ZIP/图片/正则）脚本级冒烟
+文件_写入("/tmp/vus_ext_api/test0.txt", "hello")
+r1 = 压缩_zip(["a", "b"], "/tmp/vus_ext_api/t.zip")
+
+// 准备打包文件
+文件_写入("/tmp/vus_ext_api/src1.txt", "内容一 abc")
+文件_写入("/tmp/vus_ext_api/src2.txt", "内容二 1234567890")
+r2 = 压缩_zip(["/tmp/vus_ext_api/src1.txt", "/tmp/vus_ext_api/src2.txt"], "/tmp/vus_ext_api/t.zip")
+打印("压缩_zip 返回: " .. r2 .. "\n")
+r3 = 解压_zip("/tmp/vus_ext_api/t.zip", "/tmp/vus_ext_api/out")
+打印("解压_zip 返回: " .. r3 .. "\n")
+解压内容 = 文件_读取("/tmp/vus_ext_api/out/src1.txt")
+打印("解压内容: " .. 解压内容 .. "\n")
+
+打印("SHA256(abc): " .. SHA256("abc") .. "\n")
+打印("MD5(abc):    " .. MD5("abc") .. "\n")
+
+打印("正则_查找: " .. 正则_查找("hello 2026 world", "[0-9]+") .. "\n")
+打印("正则_匹配: " .. 正则_匹配("hello 2026 world", "[0-9]+") .. "\n")
+打印("正则_替换: " .. 正则_替换("2026-09-05", "([0-9]{4})-([0-9]{2})-([0-9]{2})", "\\2/\\3/\\1") .. "\n")
+
+// 图片导出：用 文件_写入 生成二进制数据不方便，改用最小像素缓冲 —— 跳过脚本侧构造，
+// 图片_* 已在 C 自检覆盖；这里只验证内建可调用且参数校验生效（数据长度不匹配 → -1）
+打印("图片_保存PNG(长度不匹配): " .. 图片_保存PNG("/tmp/vus_ext_api/bad.png", 4, 4, "xxxx", 4) .. "\n")
+
+打印("[EXT] 冒烟完成\n")

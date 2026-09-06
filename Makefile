@@ -110,7 +110,7 @@ VUA_OBJ  = $(BUILD_DIR)/vua.o
 # 链接编译器（含 yyjson、VUA 运行时与其所需 libvus_rt/协程/EasyLogger：
 # CLI `vus lint` 与 LSP .vua 校验闭环进程内复用 vua.c 严格校验 + 渲染树归一）
 vus: $(OBJS) $(YYJSON_OBJ) $(VUA_OBJ) $(RT_OBJ) $(RT_CORO_OBJ) $(EL_OBJ)
-	$(CC) $(CFLAGS) -o $@ $^ -lm -ldl -lpthread
+	$(CC) $(CFLAGS) -o $@ $^ $(ONIG_OBJ) $(VUS_EXT_OBJ) $(MINIZ_OBJ) -lm -ldl -lpthread
 
 # 编译源文件
 $(BUILD_DIR)/main.o: $(SRC_DIR)/main.c $(MAIN_H) $(COMMON_H) | $(BUILD_DIR)
@@ -177,7 +177,7 @@ $(BUILD_DIR)/vus_chart.o: $(SRC_DIR)/vus_chart.c $(CHART_H) | $(BUILD_DIR)
 VAZ_INT = $(SRC_DIR)/vus_vaz.h
 
 $(BUILD_DIR)/vus_vaz.o: $(SRC_DIR)/vus_vaz.c $(VAZ_INT) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -I$(SRC_DIR) -I$(RT_DIR)/yyjson -c -o $@ $<
+	$(CC) $(CFLAGS) -I$(SRC_DIR) -I$(RT_DIR) -I$(RT_DIR)/yyjson -c -o $@ $<
 
 # APK 打包
 APK_H = $(SRC_DIR)/vus_apk.h
@@ -244,8 +244,57 @@ $(XYZ_OBJ): $(XYZ_SRC) $(RT_H) | $(BUILD_DIR)
 $(YYJSON_OBJ): $(YYJSON_SRC) | $(BUILD_DIR)
 	$(CC) -Wall -Wextra -O0 -std=c11 $(YYJSON_INC) -c -o $@ $<
 
+# miniz：（解压_zip/压缩_zip 与 VAZ 解包，MIT）— O0 最快编译。
+# 3.0.2 拆分为 4 个实现 TU：miniz.c(核心) + miniz_tdef.c(deflate) +
+# miniz_tinfl.c(inflate) + miniz_zip.c(zip)，各自编译后并入静态库。
+MINIZ_SRC = $(RT_DIR)/miniz/miniz.c $(RT_DIR)/miniz/miniz_tdef.c \
+            $(RT_DIR)/miniz/miniz_tinfl.c $(RT_DIR)/miniz/miniz_zip.c
+MINIZ_OBJ = $(BUILD_DIR)/miniz.o $(BUILD_DIR)/miniz_tdef.o \
+            $(BUILD_DIR)/miniz_tinfl.o $(BUILD_DIR)/miniz_zip.o
+$(BUILD_DIR)/miniz.o: $(RT_DIR)/miniz/miniz.c $(RT_DIR)/miniz/miniz.h $(RT_DIR)/miniz/miniz_export.h | $(BUILD_DIR)
+	$(CC) -Wall -Wextra -O0 -std=c11 -I$(RT_DIR) -c -o $@ $<
+$(BUILD_DIR)/miniz_tdef.o: $(RT_DIR)/miniz/miniz_tdef.c $(RT_DIR)/miniz/miniz_tdef.h | $(BUILD_DIR)
+	$(CC) -Wall -Wextra -O0 -std=c11 -I$(RT_DIR) -c -o $@ $<
+$(BUILD_DIR)/miniz_tinfl.o: $(RT_DIR)/miniz/miniz_tinfl.c $(RT_DIR)/miniz/miniz_tinfl.h | $(BUILD_DIR)
+	$(CC) -Wall -Wextra -O0 -std=c11 -I$(RT_DIR) -c -o $@ $<
+$(BUILD_DIR)/miniz_zip.o: $(RT_DIR)/miniz/miniz_zip.c $(RT_DIR)/miniz/miniz_zip.h | $(BUILD_DIR)
+	$(CC) -Wall -Wextra -O0 -std=c11 -I$(RT_DIR) -c -o $@ $<
+
+# Oniguruma：（正则内建，BSD-2）— 核心 + UTF-8 编码，gnu11（xalloca 走 GCC 内置）
+ONIG_SRC = $(RT_DIR)/oniguruma/regcomp.c $(RT_DIR)/oniguruma/regenc.c \
+           $(RT_DIR)/oniguruma/regerror.c $(RT_DIR)/oniguruma/regext.c \
+           $(RT_DIR)/oniguruma/regparse.c $(RT_DIR)/oniguruma/regsyntax.c \
+           $(RT_DIR)/oniguruma/regtrav.c $(RT_DIR)/oniguruma/regversion.c \
+           $(RT_DIR)/oniguruma/regexec.c $(RT_DIR)/oniguruma/st.c \
+           $(RT_DIR)/oniguruma/onig_init.c $(RT_DIR)/oniguruma/unicode.c \
+           $(RT_DIR)/oniguruma/utf8.c $(RT_DIR)/oniguruma/ascii.c \
+           $(RT_DIR)/oniguruma/unicode_fold1_key.c \
+           $(RT_DIR)/oniguruma/unicode_fold2_key.c \
+           $(RT_DIR)/oniguruma/unicode_fold3_key.c \
+           $(RT_DIR)/oniguruma/unicode_unfold_key.c
+ONIG_OBJ = $(ONIG_SRC:$(RT_DIR)/oniguruma/%.c=$(BUILD_DIR)/onig_%.o)
+$(BUILD_DIR)/onig_%.o: $(RT_DIR)/oniguruma/%.c $(RT_DIR)/oniguruma/oniguruma.h | $(BUILD_DIR)
+	$(CC) -Wall -Wextra -O0 -std=gnu11 -Wno-unused-parameter -Wno-sign-compare \
+		-I$(RT_DIR)/oniguruma -c -o $@ $<
+
+# VUS 扩展内建模块（哈希/ZIP/图片/正则的 VusString* 封装，随运行时库编译）
+VUS_EXT_SRC = $(RT_DIR)/vus_hash.c $(RT_DIR)/vus_zip.c \
+              $(RT_DIR)/vus_img.c $(RT_DIR)/vus_regex.c
+VUS_EXT_OBJ = $(VUS_EXT_SRC:$(RT_DIR)/%.c=$(BUILD_DIR)/%.o)
+$(BUILD_DIR)/vus_hash.o: $(RT_DIR)/vus_hash.c $(RT_H) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(RT_DIR) -c -o $@ $<
+$(BUILD_DIR)/vus_zip.o: $(RT_DIR)/vus_zip.c $(RT_H) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(RT_DIR) -I$(RT_DIR)/stb -c -o $@ $<
+$(BUILD_DIR)/vus_img.o: $(RT_DIR)/vus_img.c $(RT_H) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(RT_DIR) -I$(RT_DIR)/stb -c -o $@ $<
+$(BUILD_DIR)/vus_regex.o: $(RT_DIR)/vus_regex.c $(RT_H) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(RT_DIR) -I$(RT_DIR)/oniguruma -c -o $@ $<
+
 # 运行时库静态归档（含 vus_coro.o、yyjson、easylogger elog.o 与 GuiLite 图形库）
-$(RT_LIB): $(RT_OBJ) $(RT_CORO_OBJ) $(YYJSON_OBJ) $(EL_OBJ) $(GUI_OBJ) $(XYZ_OBJ) $(GLES_ARCHIVE_OBJ)
+# 顺序注意：GNU ld 对归档只做单遍扫描，被依赖对象须排在其引用者之后——
+# oniguruma 排在 vus_regex 前；miniz 排在最后（vus_zip 引用 mz_*）。
+$(RT_LIB): $(RT_OBJ) $(RT_CORO_OBJ) $(YYJSON_OBJ) $(EL_OBJ) $(GUI_OBJ) $(XYZ_OBJ) $(GLES_ARCHIVE_OBJ) \
+           $(ONIG_OBJ) $(VUS_EXT_OBJ) $(MINIZ_OBJ)
 	ar rcs $@ $^
 
 # =============================================================================
