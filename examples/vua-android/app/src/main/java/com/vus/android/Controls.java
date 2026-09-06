@@ -28,6 +28,7 @@ import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
+import android.widget.ProgressBar;
 import android.widget.SeekBar;
 import android.widget.Spinner;
 import android.widget.Switch;
@@ -143,6 +144,77 @@ final class Controls {
         r.rememberInput(node, s, false);
         restore(node, s);
         return s;
+    }
+
+    /* ---- 进度条 / 分隔线 / 间距（新增叶子控件） ---- */
+
+    /** 彩色字符串 → int（"0xRRGGBB"/"#RRGGBB"/系统色名），解析失败回退默认。 */
+    private static int parseColor(String s, int def) {
+        if (s == null || s.isEmpty()) return def;
+        try {
+            if (s.startsWith("0x") || s.startsWith("0X")) {
+                return 0xFF000000 | (int) Long.parseLong(s.substring(2), 16);
+            }
+            return android.graphics.Color.parseColor(s);
+        } catch (Throwable t) {
+            return def;
+        }
+    }
+
+    /** 进度条：值/最大值/颜色，可选右侧百分比文本（百分比=1 时显示）。 */
+    void progressView(RenderNode node, ViewGroup parent) {
+        int max = Math.max(1, node.intAttr(100, "最大值"));
+        int val = Math.max(0, Math.min(max, node.intAttr(0, "值")));
+        boolean showPct = node.intAttr(0, "百分比") != 0;
+        LinearLayout row = new LinearLayout(r.ctx);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        ProgressBar pb = new ProgressBar(r.ctx, null, android.R.attr.progressBarStyleHorizontal);
+        pb.setMax(max);
+        pb.setProgress(val);
+        String lv = node.attr("", "标签");
+        if (!lv.isEmpty()) pb.setContentDescription(lv);
+        if (Build.VERSION.SDK_INT >= 21) {
+            pb.setProgressTintList(android.content.res.ColorStateList
+                    .valueOf(parseColor(node.attr("", "颜色"), Theme.accent(r.darkTheme))));
+            pb.setProgressBackgroundTintList(android.content.res.ColorStateList
+                    .valueOf(Theme.stroke(r.darkTheme)));
+        }
+        row.addView(pb, new LinearLayout.LayoutParams(0, r.dp(10), 1f));
+        if (showPct) {
+            TextView tv = r.TextView(r.ctx);
+            tv.setText(Math.round(val * 100f / max) + "%");
+            tv.setTextColor(Theme.sub(r.darkTheme));
+            tv.setTextSize(12);
+            tv.setPadding(r.dp(8), 0, 0, 0);
+            row.addView(tv);
+        }
+        r.rememberInput(node, row, false);
+        parent.addView(row, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+    }
+
+    /** 分隔线：颜色/粗细(px dp)/上下外边距(dp)。 */
+    void dividerView(RenderNode node, ViewGroup parent) {
+        View line = new View(r.ctx);
+        int th = Math.max(1, node.intAttr(1, "粗细"));
+        line.setBackgroundColor(parseColor(node.attr("", "颜色"), Theme.divider(r.darkTheme)));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, r.dp(th));
+        int top = node.intAttr(0, "上边距");
+        int bottom = node.intAttr(0, "下边距");
+        if (top != 0 || bottom != 0) lp.setMargins(0, r.dp(top), 0, r.dp(bottom));
+        parent.addView(line, lp);
+    }
+
+    /** 间距：宽/高(dp) 的空白占位（不可见）。 */
+    void spaceView(RenderNode node, ViewGroup parent) {
+        View sp = new View(r.ctx);
+        sp.setVisibility(View.INVISIBLE);
+        int w = node.intAttr(0, "宽");
+        int h = node.intAttr(0, "高");
+        parent.addView(sp, new LinearLayout.LayoutParams(
+                w > 0 ? r.dp(w) : 0, h > 0 ? r.dp(h) : r.dp(1)));
     }
 
     void sliderView(RenderNode node, ViewGroup parent) {

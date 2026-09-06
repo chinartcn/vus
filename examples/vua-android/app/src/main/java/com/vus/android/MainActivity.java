@@ -83,6 +83,7 @@ public class MainActivity extends Activity {
 
         // 平台能力桥（callJava）解析相对路径/文件目录需要应用 Context
         VuaBridge.appContext = getApplicationContext();
+        VuaBridge.sActivity = this;                    // 屏幕_常亮 等窗口能力
         UpdateManager.init(this);                    // 热更协议初始化（§5.x）
         ImageLoader.get().attach(getApplicationContext());   // 远程图片缓存目录
 

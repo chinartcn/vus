@@ -19,9 +19,19 @@
  */
 package com.vus.android;
 
+import android.app.Activity;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.os.BatteryManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
@@ -75,6 +85,9 @@ public final class VuaBridge {
 
     /** 应用 Context：由 MainActivity.onCreate 注入，供 callJava 平台能力桥解析文件路径/目录。 */
     public static Context appContext = null;
+
+    /** 主 Activity：由 MainActivity.onCreate 注入，供 屏幕_常亮 等窗口相关能力使用。 */
+    public static Activity sActivity = null;
 
     /** native → Java 重绘回调：屏栈变化（界面_显示/返回/返回至）后由 native 调用。
      * MainActivity 在此注册一个 runnable 来重建当前屏的 View。 */
@@ -174,6 +187,12 @@ public final class VuaBridge {
             if ("clipboard.write".equals(api)) { clipboardWrite(str(a, "text")); return ok("0"); }
             if ("device.info".equals(api)) return ok(deviceInfo());
             if ("toast".equals(api)) { toast(str(a, "text"), num(a, 0, "long") != 0); return ok("0"); }
+            /* 系统能力延伸：分享 / 电量 / 屏幕常亮 / 网络类型 / 通知 */
+            if ("share.text".equals(api)) return ok(shareText(str(a, "text")));
+            if ("battery.status".equals(api)) return ok(batteryStatus());
+            if ("screen.keepon".equals(api)) { keepScreenOn(str(a, "flag", "1")); return ok("0"); }
+            if ("network.type".equals(api)) return ok(networkType());
+            if ("notify.send".equals(api)) return ok(sendNotify(str(a, "title"), str(a, "body")));
             // DEX 逻辑拓展：api 形如 "ext.<插件名>.<操作>"，交给 ExtensionLoader 动态加载调用。
             // 插件 dex 位于 filesDir/plugins/<插件名>.dex，支持运行期热更新（配合 http.download）。
             if (api.startsWith("ext.")) {
@@ -345,6 +364,118 @@ public final class VuaBridge {
         final String t = text;
         final int len = isLong ? Toast.LENGTH_LONG : Toast.LENGTH_SHORT;
         sMain.post(() -> Toast.makeText(appContext.getApplicationContext(), t, len).show());
+    }
+
+    /* ---- 系统能力延伸：分享 / 电量 / 屏幕常亮 / 网络类型 / 通知 ---- */
+
+    /** 分享文本（系统分享面板）。无可用面板返回 "-1"，已发起分享返回 "0"。 */
+    private static String shareText(String text) {
+        if (appContext == null || text == null || text.isEmpty()) return "0";
+        try {
+            Intent i = new Intent(Intent.ACTION_SEND);
+            i.setType("text/plain");
+            i.putExtra(Intent.EXTRA_TEXT, text);
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            appContext.startActivity(Intent.createChooser(i, "分享到"));
+            return "0";
+        } catch (Throwable t) {
+            return "-1";
+        }
+    }
+
+    /** 电量 JSON：{"电量":0~100(-1 未知),"充电中":true/false}。 */
+    private static String batteryStatus() {
+        JsonObject o = new JsonObject();
+        int level = -1; boolean charging = false;
+        if (appContext != null) {
+            try {
+                BatteryManager bm = (BatteryManager) appContext.getSystemService(Context.BATTERY_SERVICE);
+                if (bm != null) level = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY);
+                Intent bi = appContext.registerReceiver(null,
+                        new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+                if (bi != null) {
+                    int st = bi.getIntExtra(BatteryManager.EXTRA_STATUS, -1);
+                    charging = (st == BatteryManager.BATTERY_STATUS_CHARGING
+                            || st == BatteryManager.BATTERY_STATUS_FULL);
+                }
+            } catch (Throwable ignored) { }
+        }
+        o.addProperty("电量", level);
+        o.addProperty("充电中", charging);
+        return GSON.toJson(o);
+    }
+
+    /** 屏幕常亮开关（0 关 / 非 0 开）：作用于主窗口 FLAG_KEEP_SCREEN_ON。 */
+    private static void keepScreenOn(String flag) {
+        if (sActivity == null || sActivity.getWindow() == null) return;
+        boolean on = !"0".equals(flag);
+        if (on) sActivity.getWindow().addFlags(
+                android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        else sActivity.getWindow().clearFlags(
+                android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+    }
+
+    /** 网络类型："wifi" / "mobile" / "none"。无权限时返回 "none"。 */
+    private static String networkType() {
+        if (appContext == null) return "none";
+        try {
+            ConnectivityManager cm = (ConnectivityManager) appContext
+                    .getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) return "none";
+            if (Build.VERSION.SDK_INT >= 23) {
+                Network n = cm.getActiveNetwork();
+                if (n == null) return "none";
+                NetworkCapabilities nc = cm.getNetworkCapabilities(n);
+                if (nc == null) return "none";
+                if (nc.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return "wifi";
+                if (nc.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) return "wifi";
+                if (nc.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) return "mobile";
+                return "none";
+            } else {
+                android.net.NetworkInfo ni = cm.getActiveNetworkInfo();
+                if (ni == null || !ni.isConnected()) return "none";
+                int t = ni.getType();
+                if (t == ConnectivityManager.TYPE_WIFI
+                        || t == ConnectivityManager.TYPE_ETHERNET) return "wifi";
+                if (t == ConnectivityManager.TYPE_MOBILE) return "mobile";
+                return "none";
+            }
+        } catch (Throwable t) {
+            return "none";
+        }
+    }
+
+    /** 发送通知栏通知（Android 13+ 需 POST_NOTIFICATIONS 运行时权限，未授予返回 "需要权限"）。 */
+    private static String sendNotify(String title, String body) {
+        if (appContext == null || title == null || title.isEmpty()) return "-1";
+        try {
+            NotificationManager nm = (NotificationManager) appContext
+                    .getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm == null) return "-1";
+            if (Build.VERSION.SDK_INT >= 33) {
+                if (appContext.checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                        == android.content.pm.PackageManager.PERMISSION_DENIED) {
+                    return "需要权限";   // 脚本可提示用户到系统设置开启
+                }
+            }
+            if (Build.VERSION.SDK_INT >= 26) {
+                NotificationChannel ch = new NotificationChannel(
+                        "vus", "VUS 通知", NotificationManager.IMPORTANCE_DEFAULT);
+                nm.createNotificationChannel(ch);
+            }
+            Notification.Builder b = Build.VERSION.SDK_INT >= 26
+                    ? new Notification.Builder(appContext, "vus")
+                    : new Notification.Builder(appContext);
+            b.setSmallIcon(android.R.drawable.ic_dialog_info);
+            b.setContentTitle(title);
+            b.setContentText(body == null ? "" : body);
+            b.setAutoCancel(true);
+            b.setWhen(System.currentTimeMillis());
+            nm.notify((int) (System.currentTimeMillis() & 0x7fffffff), b.build());
+            return "0";
+        } catch (Throwable t) {
+            return "-1";
+        }
     }
 
     /* ---- 网络（VusNet 封装，主线程规避已在 VusNet 内处理） ---- */

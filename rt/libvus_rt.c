@@ -2594,6 +2594,48 @@ VusString* vus_plugin_toast(VusString* text, VusString* is_long) {
     return vus_string_new("0");
 }
 
+VusString* vus_plugin_share_text(VusString* text) {
+    if (text && vus_string_cstr(text)) {
+        char *aj = vus_java_json_kv("text", vus_string_cstr(text));
+        VusString *jr = aj ? vus_java_rpc("share.text", aj) : NULL;
+        free(aj);
+        if (jr) return jr;
+    }
+    return vus_string_new("0");   /* 桌面无分享面板：空操作成功 */
+}
+
+VusString* vus_plugin_battery_status(void) {
+    VusString *jr = vus_java_rpc("battery.status", "{}");
+    if (jr) return jr;
+    return vus_string_new("{\"电量\":-1,\"充电中\":false}");   /* 桌面无电源管理：电量未知 */
+}
+
+VusString* vus_plugin_screen_keepon(VusString* flag) {
+    const char *f = (flag && vus_string_cstr(flag)) ? vus_string_cstr(flag) : "0";
+    char *aj = vus_java_json_kv("flag", f);
+    VusString *jr = aj ? vus_java_rpc("screen.keepon", aj) : NULL;
+    free(aj);
+    if (jr) return jr;
+    return vus_string_new("0");
+}
+
+VusString* vus_plugin_network_type(void) {
+    VusString *jr = vus_java_rpc("network.type", "{}");
+    if (jr) return jr;
+    return vus_string_new("none");
+}
+
+VusString* vus_plugin_notify_send(VusString* title, VusString* body) {
+    if (title && vus_string_cstr(title)) {
+        const char *b = (body && vus_string_cstr(body)) ? vus_string_cstr(body) : "";
+        char *aj = vus_java_json_2("title", vus_string_cstr(title), "body", b);
+        VusString *jr = aj ? vus_java_rpc("notify.send", aj) : NULL;
+        free(aj);
+        if (jr) return jr;
+    }
+    return vus_string_new("0");
+}
+
 /* ---- shell 命令执行（供"终端"使用） ---- */
 VusString* vus_plugin_shell_exec(VusString* cmd) {
     if (!cmd) return vus_string_new("");

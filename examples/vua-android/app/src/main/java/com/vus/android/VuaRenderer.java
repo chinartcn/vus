@@ -314,6 +314,9 @@ public final class VuaRenderer {
             case "开关": case "switch":      { parent.addView(controls.switchView(node)); return; }
             case "滑块": case "slider":      { controls.sliderView(node, parent); return; }
             case "下拉": case "spinner":     { controls.spinnerView(node, parent); return; }
+            case "进度条": case "progress":  { controls.progressView(node, parent); return; }
+            case "分隔线": case "divider":   { controls.dividerView(node, parent); return; }
+            case "间距": case "space":       { controls.spaceView(node, parent); return; }
             case "图片": case "image":       { controls.imageView(node, parent); return; }
             case "图标": case "icon":        { controls.iconView(node, parent); return; }
             case "课表": case "table": case "grid": { controls.classTable(node, parent); return; }

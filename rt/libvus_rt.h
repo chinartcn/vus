@@ -380,6 +380,13 @@ VusString* vus_plugin_clipboard_write(VusString* text);   /* 剪贴板_写(文�
 VusString* vus_plugin_device_info(void);                  /* 设备_信息()：APK 返回 JSON，桌面固定 JSON */
 VusString* vus_plugin_toast(VusString* text, VusString* is_long); /* 提示(文本, 时长)：APK 真 Toast，桌面 "0" */
 
+/* 系统能力延伸（同一平台桥） */
+VusString* vus_plugin_share_text(VusString* text);        /* 分享_文本(文本)：APK 调系统分享面板，桌面 "0" */
+VusString* vus_plugin_battery_status(void);               /* 电源_电量()：APK 返回 {"电量":N,"充电中":b}，桌面固定 JSON */
+VusString* vus_plugin_screen_keepon(VusString* flag);     /* 屏幕_常亮(开关)：APK 切窗口常亮标志，桌面 "0" */
+VusString* vus_plugin_network_type(void);                 /* 网络_类型()：APK 返回 wifi/mobile/none，桌面 "none" */
+VusString* vus_plugin_notify_send(VusString* title, VusString* body); /* 通知_发送(标题, 内容)：APK 发通知栏，桌面 "0" */
+
 /* shell 命令执行：popen 捕获命令标准输出，返回输出文本(上限 64KB) */
 VusString* vus_plugin_shell_exec(VusString* cmd);
 

@@ -3500,6 +3500,49 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
         }
         return strdup("vus_plugin_toast(vus_string_new(\"\"), vus_string_new(\"0\"))");
     }
+    if (strcmp(call->func_name, "分享_文本") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_share_text(%s)", a);
+            free(a);
+            return strdup(result);
+        }
+        return strdup("vus_plugin_share_text(vus_string_new(\"\"))");
+    }
+    if (strcmp(call->func_name, "电源_电量") == 0) {
+        return strdup("vus_plugin_battery_status()");
+    }
+    if (strcmp(call->func_name, "屏幕_常亮") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_screen_keepon(%s)", a);
+            free(a);
+            return strdup(result);
+        }
+        return strdup("vus_plugin_screen_keepon(vus_string_new(\"1\"))");
+    }
+    if (strcmp(call->func_name, "网络_类型") == 0) {
+        return strdup("vus_plugin_network_type()");
+    }
+    if (strcmp(call->func_name, "通知_发送") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            if (call->args->count >= 2) {
+                char *b = gen_expr(buf, call->args->items[1]);
+                char result[4096];
+                snprintf(result, sizeof(result), "vus_plugin_notify_send(%s, %s)", a, b);
+                free(a); free(b);
+                return strdup(result);
+            }
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_notify_send(%s, vus_string_new(\"\"))", a);
+            free(a);
+            return strdup(result);
+        }
+        return strdup("vus_plugin_notify_send(vus_string_new(\"\"), vus_string_new(\"\"))");
+    }
 
     /* shell 命令执行：popen 捕获输出，供"终端"应用使用 */
     if (strcmp(call->func_name, "命令_执行") == 0) {
