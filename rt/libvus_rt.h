@@ -361,6 +361,15 @@ VusString* vus_plugin_file_list(VusString* path);
 /* 判断路径是否为目录：返回 "true"/"false"（供文件管理器区分文件与目录） */
 VusString* vus_plugin_file_isdir(VusString* path);
 
+/* ---------------- Android 轻量能力（APK 走 Java 平台桥；桌面无害降级） ----------------
+ * 纯 Java + JNI 参数内建：振动/剪贴板/设备信息/Toast 由 VuaBridge.callJava 实现，
+ * 桌面侧无对应物时降级返回无害值，脚本无需分支。 */
+VusString* vus_plugin_vibrate(VusString* ms);             /* 振动(毫秒)：APK 真振，桌面 "0" */
+VusString* vus_plugin_clipboard_read(void);               /* 剪贴板_读()：APK 读系统剪贴板，桌面 "" */
+VusString* vus_plugin_clipboard_write(VusString* text);   /* 剪贴板_写(文本)：APK 写系统剪贴板，桌面 "0" */
+VusString* vus_plugin_device_info(void);                  /* 设备_信息()：APK 返回 JSON，桌面固定 JSON */
+VusString* vus_plugin_toast(VusString* text, VusString* is_long); /* 提示(文本, 时长)：APK 真 Toast，桌面 "0" */
+
 /* shell 命令执行：popen 捕获命令标准输出，返回输出文本(上限 64KB) */
 VusString* vus_plugin_shell_exec(VusString* cmd);
 

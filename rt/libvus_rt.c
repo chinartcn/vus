@@ -2547,6 +2547,53 @@ VusString* vus_plugin_file_isdir(VusString* path) {
     return vus_string_new("false");
 }
 
+/* ---- Android 轻量能力（APK：Java 平台桥；桌面：无害降级） ----
+ * 振动/剪贴板/设备信息/Toast 均为纯 Java 实现（VuaBridge.callJava），
+ * 桌面侧无对应硬件/服务，按"空操作成功 / 空值"降级，脚本无需写平台分支。 */
+
+VusString* vus_plugin_vibrate(VusString* ms) {
+    if (ms && vus_string_cstr(ms)) {
+        char *aj = vus_java_json_kv("ms", vus_string_cstr(ms));
+        VusString *jr = aj ? vus_java_rpc("vibrate", aj) : NULL;
+        free(aj);
+        if (jr) return jr;
+    }
+    return vus_string_new("0");   /* 桌面无振动硬件语义：空操作成功 */
+}
+
+VusString* vus_plugin_clipboard_read(void) {
+    VusString *jr = vus_java_rpc("clipboard.read", "{}");
+    if (jr) return jr;
+    return vus_string_new("");    /* 桌面无系统剪贴板：返回空串 */
+}
+
+VusString* vus_plugin_clipboard_write(VusString* text) {
+    if (text && vus_string_cstr(text)) {
+        char *aj = vus_java_json_kv("text", vus_string_cstr(text));
+        VusString *jr = aj ? vus_java_rpc("clipboard.write", aj) : NULL;
+        free(aj);
+        if (jr) return jr;
+    }
+    return vus_string_new("0");
+}
+
+VusString* vus_plugin_device_info(void) {
+    VusString *jr = vus_java_rpc("device.info", "{}");
+    if (jr) return jr;
+    return vus_string_new("{\"品牌\":\"desktop\",\"型号\":\"\",\"系统版本\":\"\",\"SDK\":0}");
+}
+
+VusString* vus_plugin_toast(VusString* text, VusString* is_long) {
+    if (text && vus_string_cstr(text)) {
+        const char *tl = (is_long && vus_string_cstr(is_long) && vus_string_cstr(is_long)[0] == '1') ? "1" : "0";
+        char *aj = vus_java_json_2("text", vus_string_cstr(text), "long", tl);
+        VusString *jr = aj ? vus_java_rpc("toast", aj) : NULL;
+        free(aj);
+        if (jr) return jr;
+    }
+    return vus_string_new("0");
+}
+
 /* ---- shell 命令执行（供"终端"使用） ---- */
 VusString* vus_plugin_shell_exec(VusString* cmd) {
     if (!cmd) return vus_string_new("");

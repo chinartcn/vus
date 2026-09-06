@@ -3426,6 +3426,51 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
         }
     }
 
+    /* ============= Android 轻量能力内建（APK Java 平台桥；桌面无害降级） ============= */
+    if (strcmp(call->func_name, "振动") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_vibrate(%s)", a);
+            free(a);
+            return strdup(result);
+        }
+        return strdup("vus_plugin_vibrate(vus_string_new(\"100\"))");
+    }
+    if (strcmp(call->func_name, "剪贴板_读") == 0) {
+        return strdup("vus_plugin_clipboard_read()");
+    }
+    if (strcmp(call->func_name, "剪贴板_写") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_clipboard_write(%s)", a);
+            free(a);
+            return strdup(result);
+        }
+        return strdup("vus_plugin_clipboard_write(vus_string_new(\"\"))");
+    }
+    if (strcmp(call->func_name, "设备_信息") == 0) {
+        return strdup("vus_plugin_device_info()");
+    }
+    if (strcmp(call->func_name, "提示") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            if (call->args->count >= 2) {
+                char *b = gen_expr(buf, call->args->items[1]);
+                char result[4096];
+                snprintf(result, sizeof(result), "vus_plugin_toast(%s, %s)", a, b);
+                free(a); free(b);
+                return strdup(result);
+            }
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_toast(%s, vus_string_new(\"0\"))", a);
+            free(a);
+            return strdup(result);
+        }
+        return strdup("vus_plugin_toast(vus_string_new(\"\"), vus_string_new(\"0\"))");
+    }
+
     /* shell 命令执行：popen 捕获输出，供"终端"应用使用 */
     if (strcmp(call->func_name, "命令_执行") == 0) {
         if (call->args && call->args->count >= 1) {

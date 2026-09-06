@@ -19,10 +19,17 @@
  */
 package com.vus.android;
 
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
+import android.os.VibratorManager;
 import android.util.Log;
+import android.widget.Toast;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
@@ -161,6 +168,12 @@ public final class VuaBridge {
                 VusIo.writeBytes(f, b, false);
                 return ok("1");
             }
+            /* ---- Android 轻量能力（纯 Java 实现）：振动/剪贴板/设备信息/Toast ---- */
+            if ("vibrate".equals(api)) { vibrate(num(a, 100, "ms")); return ok("0"); }
+            if ("clipboard.read".equals(api)) return ok(clipboardRead());
+            if ("clipboard.write".equals(api)) { clipboardWrite(str(a, "text")); return ok("0"); }
+            if ("device.info".equals(api)) return ok(deviceInfo());
+            if ("toast".equals(api)) { toast(str(a, "text"), num(a, 0, "long") != 0); return ok("0"); }
             // DEX 逻辑拓展：api 形如 "ext.<插件名>.<操作>"，交给 ExtensionLoader 动态加载调用。
             // 插件 dex 位于 filesDir/plugins/<插件名>.dex，支持运行期热更新（配合 http.download）。
             if (api.startsWith("ext.")) {
@@ -262,6 +275,76 @@ public final class VuaBridge {
         File f = new File(name == null ? "" : name);
         if (f.isAbsolute() || appContext == null) return f;
         return new File(appContext.getFilesDir(), name);
+    }
+
+    /* ---- Android 轻量能力（纯 Java）：振动/剪贴板/设备信息/Toast ---- */
+
+    /** 振动（毫秒）。API 26+ 用 VibrationEffect；API 31+ 走 VibratorManager。
+     * 无振动器/无权限时静默失败（VUS 侧只关心调用不报错）。 */
+    private static void vibrate(long ms) {
+        if (appContext == null || ms <= 0) return;
+        try {
+            if (Build.VERSION.SDK_INT >= 31) {
+                VibratorManager vm = (VibratorManager) appContext.getSystemService(Context.VIBRATOR_MANAGER_SERVICE);
+                if (vm != null)
+                    vm.getDefaultVibrator().vibrate(
+                            VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE));
+            } else {
+                Vibrator v = (Vibrator) appContext.getSystemService(Context.VIBRATOR_SERVICE);
+                if (v == null) return;
+                if (Build.VERSION.SDK_INT >= 26)
+                    v.vibrate(VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE));
+                else
+                    //noinspection deprecation
+                    v.vibrate(ms);
+            }
+        } catch (Throwable ignored) { }
+    }
+
+    /** 读系统剪贴板文本；无剪贴板管理器/无内容/读取受限返回 ""。 */
+    private static String clipboardRead() {
+        if (appContext == null) return "";
+        try {
+            ClipboardManager cm = (ClipboardManager) appContext.getSystemService(Context.CLIPBOARD_SERVICE);
+            if (cm == null || !cm.hasPrimaryClip() || cm.getPrimaryClip() == null
+                    || cm.getPrimaryClip().getItemCount() == 0) return "";
+            return String.valueOf(cm.getPrimaryClip().getItemAt(0).coerceToText(appContext));
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    /** 写系统剪贴板（text 为空串则清空）。 */
+    private static void clipboardWrite(String text) {
+        if (appContext == null || text == null) return;
+        try {
+            ClipboardManager cm = (ClipboardManager) appContext.getSystemService(Context.CLIPBOARD_SERVICE);
+            if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("vus", text));
+        } catch (Throwable ignored) { }
+    }
+
+    /** 设备信息（JSON 字符串）：品牌/型号/系统版本/SDK/应用版本。 */
+    private static String deviceInfo() {
+        JsonObject o = new JsonObject();
+        o.addProperty("品牌", Build.MANUFACTURER == null ? "" : Build.MANUFACTURER);
+        o.addProperty("型号", Build.MODEL == null ? "" : Build.MODEL);
+        o.addProperty("系统版本", Build.VERSION.RELEASE == null ? "" : Build.VERSION.RELEASE);
+        o.addProperty("SDK", Build.VERSION.SDK_INT);
+        if (appContext != null) {
+            try {
+                o.addProperty("应用版本", appContext.getPackageManager()
+                        .getPackageInfo(appContext.getPackageName(), 0).versionName);
+            } catch (Throwable ignored) { }
+        }
+        return GSON.toJson(o);
+    }
+
+    /** Toast 提示（isLong=true 约 3.5s，默认 2s）；统一切主线程弹出。 */
+    private static void toast(String text, boolean isLong) {
+        if (appContext == null || text == null || text.isEmpty()) return;
+        final String t = text;
+        final int len = isLong ? Toast.LENGTH_LONG : Toast.LENGTH_SHORT;
+        sMain.post(() -> Toast.makeText(appContext.getApplicationContext(), t, len).show());
     }
 
     /* ---- 网络（VusNet 封装，主线程规避已在 VusNet 内处理） ---- */
