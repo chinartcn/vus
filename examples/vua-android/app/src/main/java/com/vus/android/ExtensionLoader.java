@@ -16,9 +16,6 @@ import android.util.Log;
 import org.json.JSONObject;
 
 import java.io.File;
-import java.io.FileInputStream;
-import java.io.InputStream;
-import java.security.MessageDigest;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -102,47 +99,12 @@ final class ExtensionLoader {
         try {
             File hf = new File(dex.getParentFile(), dex.getName() + ".sha256");
             if (!hf.isFile()) return true;
-            String expect = readText(hf).trim().toLowerCase();
+            String expect = VusIo.readText(hf).trim().toLowerCase();
             if (expect.length() != 64) return false;
-            byte[] digest = sha256(dex);
-            StringBuilder actual = new StringBuilder(digest.length * 2);
-            for (byte x : digest) {
-                actual.append(Character.forDigit((x >> 4) & 0xF, 16));
-                actual.append(Character.forDigit(x & 0xF, 16));
-            }
-            return expect.equals(actual.toString());
+            return expect.equals(VusIo.sha256Hex(dex));
         } catch (Exception e) {
             return false;
         }
-    }
-
-    private static byte[] sha256(File f) throws Exception {
-        MessageDigest md = MessageDigest.getInstance("SHA-256");
-        InputStream in = new FileInputStream(f);
-        try {
-            byte[] buf = new byte[8192];
-            int r;
-            while ((r = in.read(buf)) > 0) md.update(buf, 0, r);
-        } finally {
-            in.close();
-        }
-        return md.digest();
-    }
-
-    private static String readText(File f) throws Exception {
-        byte[] b = new byte[(int) f.length()];
-        InputStream in = new FileInputStream(f);
-        int off = 0;
-        try {
-            while (off < b.length) {
-                int r = in.read(b, off, b.length - off);
-                if (r < 0) break;
-                off += r;
-            }
-        } finally {
-            in.close();
-        }
-        return new String(b, 0, off, "UTF-8");
     }
 
     private static String err(String msg) {

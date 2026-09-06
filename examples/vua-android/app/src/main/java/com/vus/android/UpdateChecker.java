@@ -6,6 +6,8 @@
  *   2. 对比 versionCode（本地 → PackageManager）
  *   3. 若新版存在，下载 APK 到 Downloads 目录
  *   4. 下载完成后调用系统安装器
+ *
+ * 2026-09 重构：网络用 VusNet（含主线程规避），JSON 解析用 Gson。
  */
 package com.vus.android;
 
@@ -20,12 +22,8 @@ import android.net.Uri;
 import android.os.Environment;
 import android.widget.Toast;
 
-import org.json.JSONObject;
-
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
-import java.net.HttpURLConnection;
-import java.net.URL;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 
 public final class UpdateChecker {
 
@@ -49,15 +47,15 @@ public final class UpdateChecker {
             try {
                 int localCode = activity.getPackageManager()
                         .getPackageInfo(activity.getPackageName(), 0).versionCode;
-                JSONObject remote = fetchRemoteVersion();
+                JsonObject remote = fetchRemoteVersion();
                 if (remote == null) {
                     toast("检查更新失败：无法获取远程版本信息");
                     return;
                 }
-                int remoteCode = remote.optInt("versionCode", 0);
-                String remoteName = remote.optString("versionName", "");
-                String apkUrl = remote.optString("apkUrl", "");
-                String changelog = remote.optString("changelog", "");
+                int remoteCode = optInt(remote, "versionCode", 0);
+                String remoteName = optStr(remote, "versionName", "");
+                String apkUrl = optStr(remote, "apkUrl", "");
+                String changelog = optStr(remote, "changelog", "");
 
                 if (remoteCode <= localCode) {
                     toast("已是最新版本 v" + remoteName);
@@ -162,21 +160,30 @@ public final class UpdateChecker {
         activity.runOnUiThread(new DialogTask(title, msg, listener));
     }
 
-    private JSONObject fetchRemoteVersion() throws Exception {
-        HttpURLConnection conn = (HttpURLConnection)
-                new URL(VERSION_URL).openConnection();
-        conn.setConnectTimeout(8000);
-        conn.setReadTimeout(8000);
-        conn.setRequestProperty("User-Agent", "VUS-Android/1.0");
-        int code = conn.getResponseCode();
-        if (code != 200) return null;
-        BufferedReader br = new BufferedReader(
-                new InputStreamReader(conn.getInputStream(), "UTF-8"));
-        StringBuilder sb = new StringBuilder();
-        String line;
-        while ((line = br.readLine()) != null) sb.append(line);
-        br.close();
-        return new JSONObject(sb.toString());
+    /** 拉取远程 version.json（VusNet GET，失败/非 200 返回 null）。 */
+    private JsonObject fetchRemoteVersion() {
+        VusAsync.Holder<byte[]> h = VusNet.get(VERSION_URL, 8);
+        if (h.err != null || h.val == null) return null;
+        try {
+            JsonObject o = JsonParser.parseString(new String(h.val, "UTF-8")).getAsJsonObject();
+            return o == null ? null : o;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static String optStr(JsonObject o, String key, String def) {
+        if (o != null && o.has(key) && !o.get(key).isJsonNull()) {
+            try { return o.get(key).getAsString(); } catch (Throwable ignored) { }
+        }
+        return def;
+    }
+
+    private static int optInt(JsonObject o, String key, int def) {
+        if (o != null && o.has(key) && !o.get(key).isJsonNull()) {
+            try { return o.get(key).getAsInt(); } catch (Throwable ignored) { }
+        }
+        return def;
     }
 
     private void install(Uri apkUri) {

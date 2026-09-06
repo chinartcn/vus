@@ -14,6 +14,7 @@
  *   5. native 屏栈变化时经 vua_notify_rerender → 本类的 onNativeRerender 回调
  *      MainActivity 重建当前屏 View（native → Java 回流，无需 Java 轮询）
  *
+ * 2026-09 重构：网络/文件/线程收敛到 VusNet/VusIo/VusAsync；网络 JSON 改 Gson。
  * 注：包名必须与 APK 包名一致，否则 JNI 符号对不上。下面以 com.vus.android 为例。
  */
 package com.vus.android;
@@ -23,22 +24,16 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 
-import org.json.JSONObject;
+import com.google.gson.Gson;
+import com.google.gson.JsonObject;
 
-import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileOutputStream;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.Map;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 
 public final class VuaBridge {
+
+    private static final Gson GSON = new Gson();
 
     /*
      * 单一真源（热更设计 §5.4）：native 库由 ensureNative() 显式加载——
@@ -75,8 +70,7 @@ public final class VuaBridge {
     public static Context appContext = null;
 
     /** native → Java 重绘回调：屏栈变化（界面_显示/返回/返回至）后由 native 调用。
-     * MainActivity 在此注册一个 runnable 来重建当前屏的 View。
-     */
+     * MainActivity 在此注册一个 runnable 来重建当前屏的 View。 */
     public static Runnable onRerender = null;
 
     /** Java 检查更新回调：由 VuaRenderer 按钮处理触发 */
@@ -112,100 +106,73 @@ public final class VuaBridge {
     /** 被 native 调用的 RPC 入口。保证本方法内不抛异常（错误转成 ok:0 返回）。 */
     public static String callJava(String api, String argsJson) {
         try {
-            JSONObject a = new JSONObject(argsJson == null ? "{}" : argsJson);
+            JsonObject a = args(argsJson);
             if ("file.read".equals(api)) {
-                File f = resolve(a.optString("path"));
+                File f = resolve(str(a, "path"));
                 if (!f.isFile()) return err("文件不存在");
-                return ok(readUtf8(f));
+                return ok(VusIo.readText(f));
             }
             if ("file.write".equals(api) || "file.append".equals(api)) {
-                File f = resolve(a.optString("path"));
-                new File(f.getParent()).mkdirs();
-                byte[] b = a.optString("content").getBytes("UTF-8");
-                writeBytes(f, b, "file.append".equals(api));
+                File f = resolve(str(a, "path"));
+                byte[] b = str(a, "content").getBytes("UTF-8");
+                VusIo.writeBytes(f, b, "file.append".equals(api));
                 return ok("0");
             }
             if ("file.exists".equals(api)) {
-                return ok(resolve(a.optString("path")).exists() ? "1" : "0");
+                return ok(resolve(str(a, "path")).exists() ? "1" : "0");
             }
             if ("file.delete".equals(api)) {
-                return ok(resolve(a.optString("path")).delete() ? "0" : "-1");
+                return ok(resolve(str(a, "path")).delete() ? "0" : "-1");
             }
             if ("file.isdir".equals(api)) {
-                return ok(resolve(a.optString("path")).isDirectory() ? "true" : "false");
+                return ok(resolve(str(a, "path")).isDirectory() ? "true" : "false");
             }
             if ("file.list".equals(api)) {
-                String[] names = resolve(a.optString("path")).list();
+                String[] names = resolve(str(a, "path")).list();
                 if (names == null) return ok("");
                 StringBuilder sb = new StringBuilder();
                 for (String n : names) sb.append(n).append('\n');
                 return ok(sb.toString());
             }
-            if ("http.get".equals(api)) {
-                int timeout = a.optInt("timeout", 30);
-                int retry = a.optInt("retry", 2);
-                byte[] b = runHttp(a.optString("url"), null, timeout,
-                        headersOf(a.optJSONObject("headers")), retry);
-                return ok(b == null ? "" : new String(b, "UTF-8"));
-            }
-            if ("http.post".equals(api)) {
-                int timeout = a.optInt("timeout", 30);
-                int retry = a.optInt("retry", 2);
-                byte[] b = runHttp(a.optString("url"), a.optString("data"), timeout,
-                        headersOf(a.optJSONObject("headers")), retry);
+            if ("http.get".equals(api) || "http.post".equals(api)) {
+                JsonObject hd = obj(a, "headers");
+                byte[] b = http(a, "http.post".equals(api), hd);
                 return ok(b == null ? "" : new String(b, "UTF-8"));
             }
             /* 通用请求：method=GET|POST，headers 自定义请求头（如 Authorization token 认证）、
              * timeout 秒、retry 重试次数。覆盖「认证/超时/重试」类需求。 */
             if ("http.request".equals(api)) {
-                String method = "GET".equalsIgnoreCase(a.optString("method", "GET")) ? "GET" : "POST";
-                int timeout = a.optInt("timeout", 30);
-                int retry = a.optInt("retry", 2);
-                byte[] b = runHttp(a.optString("url"),
-                        "POST".equals(method) ? a.optString("data", "") : null,
-                        timeout, headersOf(a.optJSONObject("headers")), retry);
+                String method = "GET".equalsIgnoreCase(str(a, "method", "GET")) ? "GET" : "POST";
+                byte[] b = http(a, "POST".equals(method), obj(a, "headers"));
                 return ok(b == null ? "" : new String(b, "UTF-8"));
             }
             if ("http.upload".equals(api)) {
                 // multipart/form-data 文件上传：url + 本地文件 path + 附加字段 fields + 头 headers
-                boolean up = uploadMultipart(a.optString("url"), a.optString("path"),
-                        a.optJSONObject("fields"), headersOf(a.optJSONObject("headers")),
-                        a.optInt("timeout", 60));
+                Map<String, String> fields = stringsOf(obj(a, "fields"));
+                boolean up = upload(str(a, "url"), str(a, "path"),
+                        fields, headersOf(obj(a, "headers")), num(a, 60, "timeout"));
                 return up ? ok("1") : err("上传失败");
             }
             if ("http.download".equals(api)) {
-                byte[] b = runHttp(a.optString("url"), null, 60, null, 2);
+                VusAsync.Holder<byte[]> h = VusNet.requestBytes(str(a, "url"), null, null, 60, 2);
+                byte[] b = h.err != null ? null : h.val;
                 if (b == null) return ok("0");
-                File f = resolve(a.optString("path"));
-                new File(f.getParent()).mkdirs();
-                writeBytes(f, b, false);
+                File f = resolve(str(a, "path"));
+                VusIo.writeBytes(f, b, false);
                 return ok("1");
             }
             // DEX 逻辑拓展：api 形如 "ext.<插件名>.<操作>"，交给 ExtensionLoader 动态加载调用。
             // 插件 dex 位于 filesDir/plugins/<插件名>.dex，支持运行期热更新（配合 http.download）。
             if (api.startsWith("ext.")) {
-                return ExtensionLoader.dispatch(api.substring(4), a);
+                return ExtensionLoader.dispatch(api.substring(4), toOrgJson(a));
             }
             // 热更协议：应用含新 .so/.vua/.dex 的更新包（UpdateManager.applyUpdate）。
             // vars: {"url":"<manifest.json 地址>"}，返回 data: 0=已应用 1=无更新 -1=宿主过低 -2=失败。
             if ("hotupdate.apply".equals(api)) {
-                final String url = a.optString("url");
-                final int[] rc = new int[1];
-                final Throwable[] terr = new Throwable[1];
-                Runnable job = () -> {
-                    try { rc[0] = UpdateManager.applyUpdate(url); }
-                    catch (Throwable t) { terr[0] = t; }
-                };
-                if (!isMainThread()) {
-                    job.run();
-                } else {
-                    final CountDownLatch latch = new CountDownLatch(1);
-                    new Thread(() -> { job.run(); latch.countDown(); }).start();
-                    try { latch.await(200L, TimeUnit.SECONDS); }
-                    catch (InterruptedException e) { return err("更新请求超时"); }
-                }
-                if (terr[0] != null) return err(String.valueOf(terr[0]));
-                return ok(String.valueOf(rc[0]));
+                final String url = str(a, "url");
+                VusAsync.Holder<Integer> h = VusAsync.bg(new ApplyUpdateJob(url), 200L);
+                if (h.err != null) return err(String.valueOf(h.err));
+                return ok(String.valueOf(h.val));
             }
             return err("未知能力: " + api);
         } catch (Exception e) {
@@ -213,23 +180,82 @@ public final class VuaBridge {
         }
     }
 
-    private static String ok(String data) {
+    /* ---- JSON 帮助器（Gson） ---- */
+
+    /** 热更应用任务（命名类：规避 d8 dev 泛型匿名类 desugar bug）。 */
+    private static final class ApplyUpdateJob implements VusAsync.Job<Integer> {
+        private final String url;
+        ApplyUpdateJob(String url) { this.url = url; }
+        @Override public Integer run() throws Throwable {
+            return UpdateManager.applyUpdate(url);
+        }
+    }
+
+    private static JsonObject args(String json) {
         try {
-            JSONObject o = new JSONObject();
-            o.put("ok", true);
-            o.put("data", data == null ? "" : data);
-            return o.toString();
-        } catch (Exception e) { return "{\"ok\":false,\"err\":\"encode\"}"; }
+            JsonObject o = GSON.fromJson(json == null ? "{}" : json, JsonObject.class);
+            return o != null ? o : new JsonObject();
+        } catch (Throwable t) {
+            return new JsonObject();
+        }
+    }
+
+    /** 按键读字符串，缺省 ""。 */
+    private static String str(JsonObject o, String key) { return str(o, key, ""); }
+    private static String str(JsonObject o, String key, String def) {
+        if (o != null && o.has(key) && !o.get(key).isJsonNull()) return o.get(key).getAsString();
+        return def;
+    }
+
+    private static int num(JsonObject o, int def, String key) {
+        if (o != null && o.has(key) && !o.get(key).isJsonNull()) {
+            try { return o.get(key).getAsInt(); } catch (Throwable ignored) { }
+        }
+        return def;
+    }
+
+    private static JsonObject obj(JsonObject o, String key) {
+        if (o != null && o.has(key) && !o.get(key).isJsonNull()) {
+            try { return o.getAsJsonObject(key); } catch (Throwable ignored) { }
+        }
+        return null;
+    }
+
+    private static Map<String, String> stringsOf(JsonObject o) {
+        Map<String, String> out = new HashMap<>();
+        if (o != null) {
+            for (Map.Entry<String, com.google.gson.JsonElement> e : o.entrySet()) {
+                out.put(e.getKey(), e.getValue() == null || e.getValue().isJsonNull()
+                        ? "" : e.getValue().getAsString());
+            }
+        }
+        return out.isEmpty() ? null : out;
+    }
+
+    /** 保持既有 RPC 契约（插件期望 org.json）——转换入参对象。 */
+    private static org.json.JSONObject toOrgJson(JsonObject o) {
+        try {
+            return o == null ? new org.json.JSONObject() : new org.json.JSONObject(GSON.toJson(o));
+        } catch (Exception e) {
+            return new org.json.JSONObject();
+        }
+    }
+
+    private static String ok(String data) {
+        JsonObject o = new JsonObject();
+        o.addProperty("ok", true);
+        o.addProperty("data", data == null ? "" : data);
+        return GSON.toJson(o);
     }
 
     private static String err(String msg) {
-        try {
-            JSONObject o = new JSONObject();
-            o.put("ok", false);
-            o.put("err", msg == null ? "" : msg);
-            return o.toString();
-        } catch (Exception e) { return "{\"ok\":false}"; }
+        JsonObject o = new JsonObject();
+        o.addProperty("ok", false);
+        o.addProperty("err", msg == null ? "" : msg);
+        return GSON.toJson(o);
     }
+
+    /* ---- 相对路径解析 ---- */
 
     /** 相对名 → 应用文件目录下的绝对文件；绝对路径则原样使用。 */
     private static File resolve(String name) {
@@ -238,188 +264,26 @@ public final class VuaBridge {
         return new File(appContext.getFilesDir(), name);
     }
 
-    /* ---- 文件 IO ---- */
-    private static String readUtf8(File f) throws Exception {
-        byte[] b = new byte[(int) f.length()];
-        InputStream in = new java.io.FileInputStream(f);
-        int off = 0;
-        while (off < b.length) {
-            int r = in.read(b, off, b.length - off);
-            if (r < 0) break;
-            off += r;
-        }
-        in.close();
-        return new String(b, 0, off, "UTF-8");
+    /* ---- 网络（VusNet 封装，主线程规避已在 VusNet 内处理） ---- */
+
+    private static byte[] http(JsonObject a, boolean post, JsonObject headers) {
+        String data = post ? str(a, "data") : null;
+        VusAsync.Holder<byte[]> h = VusNet.requestBytes(str(a, "url"), data,
+                headersOf(headers), num(a, 30, "timeout"), num(a, 2, "retry"));
+        return h.err != null ? null : h.val;
     }
 
-    private static void writeBytes(File f, byte[] b, boolean append) throws Exception {
-        FileOutputStream fo = new FileOutputStream(f, append);
-        fo.write(b);
-        fo.close();
-    }
-
-    /* ---- HTTP（主线程规避：Android 禁止主线程联网时转子线程同步等待） ---- */
-    private static boolean isMainThread() {
-        return Looper.myLooper() == Looper.getMainLooper();
-    }
-
-    /** 线程安全请求入口：headers 自定义请求头、retry 重试；主线程自动转子线程等待。 */
-    private static byte[] runHttp(final String url, final String data, final int timeoutSec,
-                                  final Map<String, String> headers, final int retry) throws Exception {
-        if (!isMainThread()) return doHttp(url, data, timeoutSec, headers, retry);
-        final byte[][] holder = new byte[1][];
-        final Throwable[] terr = new Throwable[1];
-        final CountDownLatch latch = new CountDownLatch(1);
-        new Thread(() -> {
-            try { holder[0] = doHttp(url, data, timeoutSec, headers, retry); }
-            catch (Throwable t) { terr[0] = t; }
-            finally { latch.countDown(); }
-        }).start();
-        try {
-            latch.await((long) timeoutSec + 60L, TimeUnit.SECONDS);
-        } catch (InterruptedException ie) {
-            return null;
-        }
-        if (terr[0] != null) return null;
-        return holder[0];
-    }
-
-    private static byte[] doHttp(String url, String data, int timeoutSec,
-                                 Map<String, String> headers, int retry) throws Exception {
-        if (retry < 1) retry = 1;
-        Throwable last = null;
-        for (int attempt = 0; attempt < retry; attempt++) {
-            try {
-                return doHttpOnce(url, data, timeoutSec, headers);
-            } catch (Throwable t) {
-                last = t;                       // 超时/IO 错误：按 retry 次数重试
-            }
-        }
-        if (last != null) throw new Exception(last);
-        return null;
-    }
-
-    private static byte[] doHttpOnce(String url, String data, int timeoutSec,
-                                     Map<String, String> headers) throws Exception {
-        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-        conn.setConnectTimeout(timeoutSec * 1000);
-        conn.setReadTimeout(timeoutSec * 1000);
-        conn.setRequestProperty("User-Agent", "VUS-Android/1.0");
-        if (headers != null) {
-            for (Map.Entry<String, String> e : headers.entrySet()) {
-                if (e.getKey() != null && e.getValue() != null)
-                    conn.setRequestProperty(e.getKey(), e.getValue());
-            }
-        }
-        if (data != null) {
-            conn.setRequestMethod("POST");
-            conn.setDoOutput(true);
-            conn.getOutputStream().write(data.getBytes("UTF-8"));
-        } else {
-            conn.setRequestMethod("GET");
-        }
-        int code = conn.getResponseCode();
-        if (code != 200) return null;
-        ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        InputStream in = conn.getInputStream();
-        byte[] buf = new byte[8192];
-        int r;
-        while ((r = in.read(buf)) > 0) bos.write(buf, 0, r);
-        in.close();
-        return bos.toByteArray();
+    private static boolean upload(String url, String path, Map<String, String> fields,
+                                  Map<String, String> headers, int timeoutSec) {
+        File file = resolve(path);
+        VusAsync.Holder<Boolean> h = VusNet.upload(url, file, fields, headers, timeoutSec);
+        if (h.err != null || h.val == null) return false;
+        return h.val.booleanValue();
     }
 
     /** JSON 对象 → 请求头 Map（{"Authorization":"Bearer x", ...}）。 */
-    private static Map<String, String> headersOf(JSONObject h) {
-        if (h == null) return null;
-        Map<String, String> out = new HashMap<>();
-        Iterator<String> keys = h.keys();
-        while (keys.hasNext()) {
-            String k = keys.next();
-            out.put(k, h.optString(k));
-        }
-        return out.isEmpty() ? null : out;
-    }
-
-    /** multipart/form-data 文件上传（无第三方库，手写 multipart body）。
-     * path 为本地文件（相对 filesDir 或绝对路径）；fields 为附加表单字段。 */
-    private static boolean uploadMultipart(final String url, final String path,
-                                           final JSONObject fields,
-                                           final Map<String, String> headers,
-                                           final int timeoutSec) {
-        if (url == null || url.isEmpty() || path == null || path.isEmpty()) return false;
-        final boolean[] holder = new boolean[1];
-        if (!isMainThread()) {
-            try { holder[0] = doUpload(url, path, fields, headers, timeoutSec); }
-            catch (Throwable t) { holder[0] = false; }
-            return holder[0];
-        }
-        final CountDownLatch latch = new CountDownLatch(1);
-        new Thread(() -> {
-            try { holder[0] = doUpload(url, path, fields, headers, timeoutSec); }
-            catch (Throwable t) { holder[0] = false; }
-            finally { latch.countDown(); }
-        }).start();
-        try { latch.await((long) timeoutSec + 60L, TimeUnit.SECONDS); }
-        catch (InterruptedException ie) { return false; }
-        return holder[0];
-    }
-
-    private static boolean doUpload(String url, String path, JSONObject fields,
-                                    Map<String, String> headers, int timeoutSec) throws Exception {
-        File file = resolve(path);
-        if (!file.isFile()) return false;
-        String boundary = "----VUS" + System.currentTimeMillis();
-
-        ByteArrayOutputStream body = new ByteArrayOutputStream();
-        byte[] CRLF = "\r\n".getBytes("UTF-8");
-        // 附加表单字段
-        if (fields != null) {
-            Iterator<String> ks = fields.keys();
-            while (ks.hasNext()) {
-                String k = ks.next();
-                body.write(("--" + boundary + CRLF).getBytes("UTF-8"));
-                body.write(("Content-Disposition: form-data; name=\"" + k + "\"" + CRLF + CRLF).getBytes("UTF-8"));
-                body.write(fields.optString(k).getBytes("UTF-8"));
-                body.write(CRLF);
-            }
-        }
-        // 文件部分
-        body.write(("--" + boundary + CRLF).getBytes("UTF-8"));
-        String filename = file.getName();
-        body.write(("Content-Disposition: form-data; name=\"file\"; filename=\"" + filename + "\"" + CRLF).getBytes("UTF-8"));
-        body.write(("Content-Type: application/octet-stream" + CRLF + CRLF).getBytes("UTF-8"));
-        InputStream in = new java.io.FileInputStream(file);
-        byte[] buf = new byte[16384];
-        int r;
-        while ((r = in.read(buf)) > 0) body.write(buf, 0, r);
-        in.close();
-        body.write(CRLF);
-        body.write(("--" + boundary + "--" + CRLF).getBytes("UTF-8"));
-        byte[] payload = body.toByteArray();
-
-        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-        conn.setConnectTimeout(timeoutSec * 1000);
-        conn.setReadTimeout(timeoutSec * 1000);
-        conn.setRequestMethod("POST");
-        conn.setDoOutput(true);
-        conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
-        conn.setRequestProperty("User-Agent", "VUS-Android/1.0");
-        if (headers != null) {
-            for (Map.Entry<String, String> e : headers.entrySet()) {
-                if (e.getKey() != null && e.getValue() != null)
-                    conn.setRequestProperty(e.getKey(), e.getValue());
-            }
-        }
-        OutputStream os = conn.getOutputStream();
-        os.write(payload);
-        os.flush();
-        os.close();
-        int code = conn.getResponseCode();
-        InputStream resp = conn.getInputStream();
-        while (resp.read() != -1) { }            // 读完响应便于连接复用
-        resp.close();
-        return code >= 200 && code < 300;
+    private static Map<String, String> headersOf(JsonObject h) {
+        return stringsOf(h);
     }
 
     /* ---- WebView JS 桥 → VUA 事件（反馈「JS 回调要接回 vuaTrigger 事件」） ----

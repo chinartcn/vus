@@ -22,6 +22,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"          # examples/vua-android
 OUT_DIR="$ROOT/dist"
 
 JAVA_SRC="$ROOT/app/src/main/java/com/vus/android"
+# Gson（vendored 单一 jar）：网络层 JSON 解析（2026-09 引入，javac -cp 与 dex 输入）
+GSON_JAR="${GSON_JAR:-$ROOT/libs/gson-2.10.1.jar}"
 # 资产以仓库 testdata/ 为单一可信来源（.vua/.json），每次构建前自动同步，
 # 避免 app/src/main/assets 里的副本过期导致 APK 打包到旧页面。
 TESTDATA_SRC="${TESTDATA_SRC:-$ROOT/../../testdata}"
@@ -184,19 +186,25 @@ done
 
 # ---------- 2. 编译 Java -> classes.dex ----------
 echo "[2/6] 编译 Java -> classes.dex"
-"$JAVAC" "${JAVAC_ARGS[@]}" -cp "$AJ" -d "$WORK/classes" "$JAVA_SRC"/*.java 2>&1
+if [ ! -f "$GSON_JAR" ]; then
+  echo "错误: 缺少 vendored Gson jar: $GSON_JAR（下载 gson-2.10.1.jar 放入 libs/）" >&2
+  exit 1
+fi
+"$JAVAC" "${JAVAC_ARGS[@]}" -cp "$AJ:$GSON_JAR" -d "$WORK/classes" "$JAVA_SRC"/*.java 2>&1
 rm -rf "$WORK/dex"; mkdir -p "$WORK/dex"
 # dex 工具：SDK 下已有 R8 jar 则优先（build-tools 自带 d8 8.2.2-dev 对此工程的嵌套类
 # 有 NPE 崩溃 bug，R8 正式版正常；无 jar 时回退 d8）。--lib android.jar 为 desugar
 # lambda/默认接口方法提供 java.lang.Runnable 等平台类型。
 # 探测放宽：文件名可能是 r8.jar/r8-8.x.jar，深度可到 4+（cmdline-tools/latest/lib）（反馈 3.2）
+# Gson jar 作为额外输入一并 dex（无 shrink，全部类进 classes.dex）。
 R8_JAR_FOUND="$(find "$SDK" -maxdepth 5 -name 'r8*.jar' 2>/dev/null | head -1)"
 if [ -n "$R8_JAR_FOUND" ] && command -v java >/dev/null 2>&1; then
   echo "[2/6] 用 R8 jar 做 dex: $R8_JAR_FOUND"
   java -cp "$R8_JAR_FOUND" com.android.tools.r8.D8 --release --min-api 21 --lib "$AJ" \
-      --output "$WORK/dex" "$WORK/classes"/com/vus/android/*.class
+      --output "$WORK/dex" "$WORK/classes"/com/vus/android/*.class "$GSON_JAR"
 else
-  "$BT/d8" --release --min-api 21 --lib "$AJ" --output "$WORK/dex" "$WORK/classes"/com/vus/android/*.class
+  "$BT/d8" --release --min-api 21 --lib "$AJ" --output "$WORK/dex" \
+      "$WORK/classes"/com/vus/android/*.class "$GSON_JAR"
 fi
 
 # ---------- 3. 编译资源并打包 ----------
