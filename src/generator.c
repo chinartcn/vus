@@ -371,6 +371,23 @@ static int         s_region_seq = 1;  /* 块编号生成器（0=函数体） */
 static int         s_lit_seq = 1;  /* R2：字面量 static 缓存唯一序号 */
 static long long   s_call_seq = 1; /* R1：调用点临时变量唯一序号 */
 
+/* A3：字面量容器模板统一（R2 static 缓存）。text 为已转义、可直接放进
+ * vus_literal("..") 的内容；返回新分配的 C 表达式，调用方负责 free。
+ * 精确长度单次分配（模板固定 72 字节 + 6 处序号位数 + text），杜绝旧实现
+ * "strlen+96" 在大序号（_L10000+）下 snprintf 截断丢尾的隐患。 */
+static char *gen_static_lit(int n, const char *text) {
+    char nd[16];
+    int ndl = snprintf(nd, sizeof(nd), "%d", n);
+    size_t tl = strlen(text);
+    size_t sz = 72 + (size_t)ndl * 6 + tl + 1;
+    char *r = (char *)malloc(sz);
+    if (!r) return NULL;
+    snprintf(r, sz,
+        "({static VusString* _L%d=NULL;if(!_L%d){_L%d=vus_literal(\"%s\");vus_ref(_L%d);}_L%d;})",
+        n, n, n, text, n, n);
+    return r;
+}
+
 static int gen_is_param_name(VusAstFunctionDef *func, const char *name); /* 前向声明 */
 
 static void scope_reset(void) {
@@ -1433,16 +1450,25 @@ static char *gen_concat_flatten(GenBuf *buf, VusAstNode *node, int *count) {
         free(parts[0]); free(parts[1]); free(parts);
         return r;
     }
-    /* n>=3：平铺多段 → 单次分配 */
-    size_t need = 96;
-    for (int i = 0; i < n; i++) need += strlen(parts[i]) + 8;
+    /* n>=3：平铺多段 → 精确单次分配 + memcpy（替代多次 snprintf 与过分配） */
+    long long seq = s_call_seq++;
+    char head[64];
+    int hlen = snprintf(head, sizeof(head), "({VusString* _vp%lld[%d]={", seq, n);
+    char tail[80];
+    int tlen = snprintf(tail, sizeof(tail), "};vus_string_concat_n(_vp%lld, %d);})", seq, n);
+    size_t need = (size_t)hlen + (size_t)tlen + 1;
+    for (int i = 0; i < n; i++) need += strlen(parts[i]) + 1;   /* 内容 + ',' 分隔位（末尾个别富余） */
     char *r = (char *)malloc(need);
     size_t pos = 0;
-    long long seq = s_call_seq++;
-    pos += snprintf(r + pos, need - pos, "({VusString* _vp%lld[%d]={", seq, n);
-    for (int i = 0; i < n; i++)
-        pos += snprintf(r + pos, need - pos, "%s%s", i ? "," : "", parts[i]);
-    pos += snprintf(r + pos, need - pos, "};vus_string_concat_n(_vp%lld, %d);})", seq, n);
+    memcpy(r + pos, head, (size_t)hlen); pos += (size_t)hlen;
+    for (int i = 0; i < n; i++) {
+        if (i) r[pos++] = ',';
+        size_t plen = strlen(parts[i]);
+        memcpy(r + pos, parts[i], plen);
+        pos += plen;
+    }
+    memcpy(r + pos, tail, (size_t)tlen); pos += (size_t)tlen;
+    r[pos] = '\0';
     for (int i = 0; i < n; i++) free(parts[i]);
     free(parts);
     return r;
@@ -4456,11 +4482,7 @@ static char *gen_expr_string(GenBuf *buf, VusAstString *str) {
     gen_string_escape(str->value, escaped, sizeof(escaped));
     /* R2：static 缓存字面量指针（首次 vus_literal 一次，热路径仅一次判空）；
      * 静态持有自己的引用，即使池槽被其它字面量换出也不悬垂。 */
-    char *result = (char *)malloc(strlen(escaped) + 96);
-    int n = s_lit_seq++;
-    snprintf(result, 96 + strlen(escaped),
-        "({static VusString* _L%d=NULL;if(!_L%d){_L%d=vus_literal(\"%s\");vus_ref(_L%d);}_L%d;})",
-        n, n, n, escaped, n, n);
+    char *result = gen_static_lit(s_lit_seq++, escaped);
     return result;
 }
 
@@ -4468,12 +4490,7 @@ static char *gen_expr_number(GenBuf *buf, VusAstNumber *num) {
     (void)buf;
     if (num->is_float) {
         /* 浮点数作为字符串处理（内容不可变 → 驻留池 + static 缓存） */
-        char *result = (char *)malloc(strlen(num->value) + 96);
-        int n = s_lit_seq++;
-        snprintf(result, strlen(num->value) + 96,
-            "({static VusString* _L%d=NULL;if(!_L%d){_L%d=vus_literal(\"%s\");vus_ref(_L%d);}_L%d;})",
-            n, n, n, num->value, n, n);
-        return result;
+        return gen_static_lit(s_lit_seq++, num->value);
     }
     /* 整数常量归一化为十进制后进字面量池：vus_to_string(0x0F) 输出
      * "15"，故不能用原文（"0x0F"）；先按前缀解析再 snprintf，语义与
@@ -4488,12 +4505,9 @@ static char *gen_expr_number(GenBuf *buf, VusAstNumber *num) {
         else
             v = strtoll(num->value, &end, 10);
         if (end && *end == '\0') {
-            char *result = (char *)malloc(128);
-            int n = s_lit_seq++;
-            snprintf(result, 128,
-                "({static VusString* _L%d=NULL;if(!_L%d){_L%d=vus_literal(\"%lld\");vus_ref(_L%d);}_L%d;})",
-                n, n, n, (long long)v, n, n);
-            return result;
+            char nbuf[32];
+            snprintf(nbuf, sizeof(nbuf), "%lld", (long long)v);
+            return gen_static_lit(s_lit_seq++, nbuf);
         }
     }
     size_t sz = strlen(num->value) + 64;
@@ -4504,19 +4518,7 @@ static char *gen_expr_number(GenBuf *buf, VusAstNumber *num) {
 
 static char *gen_expr_bool(GenBuf *buf, VusAstBool *b) {
     (void)buf;
-    int n = s_lit_seq++;
-    if (b->value) {
-        char *r = (char *)malloc(128);
-        snprintf(r, 128,
-            "({static VusString* _L%d=NULL;if(!_L%d){_L%d=vus_literal(\"true\");vus_ref(_L%d);}_L%d;})",
-            n, n, n, n, n);
-        return r;
-    }
-    char *r = (char *)malloc(128);
-    snprintf(r, 128,
-        "({static VusString* _L%d=NULL;if(!_L%d){_L%d=vus_literal(\"false\");vus_ref(_L%d);}_L%d;})",
-        n, n, n, n, n);
-    return r;
+    return gen_static_lit(s_lit_seq++, b->value ? "true" : "false");
 }
 
 static char *gen_expr(GenBuf *buf, VusAstNode *node) {
