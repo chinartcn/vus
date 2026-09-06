@@ -4446,13 +4446,18 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
             "vus_unref(_vus_args[%zu]);", (size_t)i);
     }
     /* R6：确证新建实参 → 补还出生份（上一轮 unref 只配平函数入口 vus_ref）。
-     * 但函数若直接返回参数（身份/直通），实参与返回值共享引用——贸然收割会把
-     * 返回槽同一对象提前 free → UAF，故按函数定义跳过（gen_fn_borrows_param）。 */
+     * 但函数可能在本次调用把实参原样返回（身份/直通，含经其他函数转发的
+     * 转发链如「返回 身份(x)」），返回槽与实参共享同一对象——贸然收割会把
+     * 返回槽里的对象提前 free → UAF（转发链回归，ASAN heap-use-after-free）。
+     * 静态 gen_fn_borrows_param 只识别「返回 x」裸参数，无法覆盖转发链，故在
+     * 静态门内叠加与 调用(函数值,…) 路径同型的运行时指针身份判定：仅当返回
+     * 对象 != 实参才收割出生份；相等说明返回槽正借用该对象，跳过。 */
     if (nargs > 0 && !gen_fn_borrows_param(call->func_name)) {
         for (size_t i = 0; i < nargs; i++) {
             if (gen_expr_owned(buf, call->args->items[i]) == GEN_OWNED_NEW)
                 GEN_APPEND(args_buf, pos,
-                    "vus_unref(_vus_args[%zu]);", (size_t)(i + 1));
+                    "if (_vus_args[%zu] != _vus_args[0]) vus_unref(_vus_args[%zu]);",
+                    (size_t)(i + 1), (size_t)(i + 1));
         }
     }
     long long seq = s_call_seq++;
