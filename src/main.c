@@ -793,7 +793,6 @@ static void print_help(void) {
     printf("  vusx list              列出项目中的 vusx 依赖\n");
     printf("  vusx info   <路径>     查看 vusx 插件信息\n");
     printf("  vusx build  <路径>     编译 vusx 插件\n");
-    printf("  vus vus                 破解教程番外篇（05-番外篇.md.enc）\n");
     printf("  vaz expand <页面目录> -v <包.vaz|目录>   展开 .vaz 扩展包\n\n");
     printf("开发服务:\n");
     printf("  lsp                    启动语言服务器（JSON-RPC 补全）\n");
