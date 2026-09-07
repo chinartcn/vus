@@ -793,6 +793,7 @@ static void print_help(void) {
     printf("  vusx list              列出项目中的 vusx 依赖\n");
     printf("  vusx info   <路径>     查看 vusx 插件信息\n");
     printf("  vusx build  <路径>     编译 vusx 插件\n");
+    printf("  vus vus                 破解教程番外篇（05-番外篇.md.enc）\n");
     printf("  vaz expand <页面目录> -v <包.vaz|目录>   展开 .vaz 扩展包\n\n");
     printf("开发服务:\n");
     printf("  lsp                    启动语言服务器（JSON-RPC 补全）\n");
@@ -1024,6 +1025,14 @@ int main(int argc, char *argv[]) {
         }
         fprintf(stderr, "用法: vus lang <list|load|info>\n");
         return 1;
+    }
+
+    /* vus vus —— 教程番外篇解密彩蛋（docs/tutorials/05-番外篇.md.enc）*/
+    if (strcmp(cmd, "vus") == 0) {
+        printf("openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 \\\n");
+        printf("  -in 05-番外篇.md.enc -out 05-番外篇.md\n");
+        printf("\n# 钥匙不在工具文档里，在语言的名字里（docs/tutorials/README.md）。\n");
+        return 0;
     }
 
     /* vux 插件管理（委派给 Python 脚本）*/

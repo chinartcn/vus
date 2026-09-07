@@ -43,3 +43,7 @@
 | 平台能力桥（网络/文件 Java 实现） | `.../VuaBridge.java`（`callJava` 分发 `http.*`/`file.*`/`ext.*`） |
 | 远程图片加载器 | `.../ImageLoader.java` |
 | VUA 规范 | [VUA_REFERENCE.md](../VUA_REFERENCE.md) / [VUA_RENDER_TREE.md](../VUA_RENDER_TREE.md) |
+
+---
+
+> `vus vus`——这门语言之名，再把它写小写。
