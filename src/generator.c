@@ -2198,8 +2198,24 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
             gen_emit_linef(g_cdis_fwd, "static void _cdis_ck_%d(void*, void*);", id);
             gen_emit_linef(g_cdis_premain, "static void _cdis_ck_%d(void* _env, void* _args){", id);
             gen_emit_linef(g_cdis_premain, "    (void)_env;");
-            gen_emit_linef(g_cdis_premain, "    VusString* _va[2] = { NULL, (VusString*)_args };");
-            gen_emit_linef(g_cdis_premain, "    vus_%s(_va);", hs);
+            /* 闭包参数数组按回调参数个数开（固定 _va[2] 会在回调参数≥2 时越界
+             * 读栈上垃圾并经 vus_ref 段错误——与 界面_绑定 修复过的同一类缺陷） */
+            {
+                VusAstFunctionDef *hfunc = gen_vua_find_func(handler->name);
+                size_t cbn = hfunc && hfunc->params ? hfunc->params->count : 1;
+                if (cbn > 16) cbn = 16;
+                if (cbn < 1) cbn = 1;
+                gen_emit_linef(g_cdis_premain, "    VusString* _va[%zu]={NULL};", cbn + 1);
+                if (cbn >= 1)
+                    gen_emit_linef(g_cdis_premain, "    _va[1] = (VusString*)_args;");
+                gen_emit_linef(g_cdis_premain, "    vus_%s(_va);", hs);
+                /* 对称归还回调函数入口 ref（函数体入口对参数 vus_ref 一次，与普通调用
+                 * 点 vus_unref(_vus_args[i]) 同型）。仅当回调确实声明参数才归还：
+                 * 零参回调未取引用，无条件 unref 会把发射侧 NEW 出生份提前释放，
+                 * 发射点随后再 unref 即 UAF。 */
+                if (hfunc && hfunc->params && hfunc->params->count >= 1)
+                    gen_emit_linef(g_cdis_premain, "    vus_unref((VusString*)_args);");
+            }
             gen_emit_linef(g_cdis_premain, "}");
             size_t sz = strlen(ev) + strlen(mode_expr) + 512;
             char *r = (char *)malloc(sz);
@@ -2213,13 +2229,17 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
         return strdup("(void)0; /* 监听事件: 参数不足 */");
     }
 
-    /* 发射事件(事件名, 参数) → EMIT 广播；管线事件(事件名, 参数, 模式) → SERIAL/WATERFALL */
+    /* 发射事件(事件名, 参数) → EMIT 广播；管线事件(事件名, 参数, 模式) → SERIAL/WATERFALL。
+     * 事件载荷收割（R6）：vus_ctx_fire/pipeline 只借用参数不持有引用，NEW 出生份
+     * （如 i+1 新建串、缺省 vus_string_new("")）必须当场归还，否则循环发射事件时
+     * RSS 无界增长直至 OOM（tests/test_cordis_leak.vus 复现）；池借用实参不收割。 */
     if (strcmp(call->func_name, "发射事件") == 0 || strcmp(call->func_name, "管线事件") == 0) {
         g_uses_cordis = 1;
         int is_pipeline = strcmp(call->func_name, "管线事件") == 0;
         if (call->args && call->args->count >= 1) {
             char *ev = gen_expr(buf, call->args->items[0]);
             char *args_expr = call->args->count >= 2 ? gen_expr(buf, call->args->items[1]) : NULL;
+            int owned = call->args->count >= 2 ? gen_expr_owned(buf, call->args->items[1]) : GEN_OWNED_NEW;
             char *mode_expr = NULL;
             if (is_pipeline) {
                 if (call->args->count >= 3 && call->args->items[2]->type == VUS_AST_STRING_LITERAL) {
@@ -2231,16 +2251,40 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
                     mode_expr = strdup("VUS_EV_WATERFALL");
                 }
             }
-            size_t sz = strlen(ev) + (args_expr ? strlen(args_expr) : 0) + 320;
+            const char *arg_src = args_expr ? args_expr : "vus_string_new(\"\")";
+            long long seq = s_call_seq++;
+            size_t sz = strlen(ev) + strlen(arg_src) + (mode_expr ? strlen(mode_expr) : 0) + 512;
             char *r = (char *)malloc(sz);
-            if (is_pipeline) {
-                snprintf(r, sz,
-                    "({vus_ctx_pipeline(_vus_ctx(), vus_string_cstr(%s), (void*)(%s), %s); });",
-                    ev, args_expr ? args_expr : "vus_string_new(\"\")", mode_expr);
-            } else {
-                snprintf(r, sz,
-                    "({vus_ctx_fire(_vus_ctx(), vus_string_cstr(%s), (void*)(%s)); });",
-                    ev, args_expr ? args_expr : "vus_string_new(\"\")");
+            if (owned == GEN_OWNED_BORROW) {
+                if (is_pipeline) {
+                    snprintf(r, sz,
+                        "({vus_ctx_pipeline(_vus_ctx(), vus_string_cstr(%s), (void*)(%s), %s); });",
+                        ev, arg_src, mode_expr);
+                } else {
+                    snprintf(r, sz,
+                        "({vus_ctx_fire(_vus_ctx(), vus_string_cstr(%s), (void*)(%s)); });",
+                        ev, arg_src);
+                }
+            } else if (owned == GEN_OWNED_NEW) {
+                if (is_pipeline) {
+                    snprintf(r, sz,
+                        "({VusString* _rev%lld=(%s); vus_ctx_pipeline(_vus_ctx(), vus_string_cstr(%s), _rev%lld, %s); vus_unref(_rev%lld); });",
+                        seq, arg_src, ev, seq, mode_expr, seq);
+                } else {
+                    snprintf(r, sz,
+                        "({VusString* _rev%lld=(%s); vus_ctx_fire(_vus_ctx(), vus_string_cstr(%s), _rev%lld); vus_unref(_rev%lld); });",
+                        seq, arg_src, ev, seq, seq);
+                }
+            } else { /* GEN_OWNED_UNKNOWN：运行时容器判定收割（容器初值 ref=0 免收割） */
+                if (is_pipeline) {
+                    snprintf(r, sz,
+                        "({VusString* _rev%lld=(%s); vus_ctx_pipeline(_vus_ctx(), vus_string_cstr(%s), _rev%lld, %s); if (_rev%lld && !vus_is_container(_rev%lld)) vus_unref(_rev%lld); });",
+                        seq, arg_src, ev, seq, mode_expr, seq, seq, seq);
+                } else {
+                    snprintf(r, sz,
+                        "({VusString* _rev%lld=(%s); vus_ctx_fire(_vus_ctx(), vus_string_cstr(%s), _rev%lld); if (_rev%lld && !vus_is_container(_rev%lld)) vus_unref(_rev%lld); });",
+                        seq, arg_src, ev, seq, seq, seq, seq);
+                }
             }
             free(ev);
             free(args_expr);
