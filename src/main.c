@@ -330,7 +330,28 @@ VusResult vus_compile_to_exe(const char *vus_file_path, VusConfig *config) {
             _VUS_MTIM_NS(cex_st) >= _VUS_MTIM_NS(csrc_st)) {
             struct stat clib_st;
             char crt[1024];
-            snprintf(crt, sizeof(crt), "%s/build/libvus_rt.a", config->project_dir);
+            /* 动态链接以 libvus_rt.so 为绑定（缺失即视为失效，回退静态 .a 判断）；
+               与 vus_compile_c 的回退语义保持一致，避免缓存命中错误产物。 */
+            int dyn_ct = config->dynamic_link;
+            const char *ed = getenv("VUS_DYNAMIC");
+            if (ed && (ed[0] == '1' || ed[0] == '0')) dyn_ct = (ed[0] == '1');
+            int dyn_so_missing = 0;
+            if (dyn_ct) {
+                const char *se = getenv("VUS_RT_SO");
+                if (se && se[0]) {
+                    snprintf(crt, sizeof(crt), "%s", se);
+                } else {
+                    snprintf(crt, sizeof(crt), "%s/build/libvus_rt.so", config->project_dir);
+                }
+                if (stat(crt, &clib_st) != 0) { dyn_ct = 0; dyn_so_missing = 1; }
+            }
+            if (!dyn_ct) snprintf(crt, sizeof(crt), "%s/build/libvus_rt.a", config->project_dir);
+            /* 动态请求但 .so 已缺失：旧产物必为动态链接，复用即运行失败；
+               视为缓存失效强制重编，由 vus_compile_c 回退静态。 */
+            if (dyn_so_missing) {
+                /* 指向不存在路径：stat 必然失败 → 走重编分支回退静态 */
+                snprintf(crt, sizeof(crt), "/nonexistent/vus_rt_invalid");
+            }
             if (stat(crt, &clib_st) != 0 || _VUS_MTIM_NS(clib_st) <= _VUS_MTIM_NS(cex_st)) {
                 /* C1：被导入模块（递归）更新同样触发重编，避免复用过期产物；
                    仅主文件未变时才扫描依赖，保持快速路径开销最小。 */
@@ -350,7 +371,7 @@ VusResult vus_compile_to_exe(const char *vus_file_path, VusConfig *config) {
                         }
                     }
                 }
-                if (c1_ok) {
+                if (c1_ok && !dyn_so_missing) {
                     result.success = 1;
                     strncpy(result.exe_output_path, cexe, sizeof(result.exe_output_path) - 1);
                     result.exe_output_path[sizeof(result.exe_output_path) - 1] = '\0';

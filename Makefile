@@ -5,7 +5,10 @@
 # --- 变量 ---
 CC       = gcc
 CXX      = g++
-CFLAGS   = -Wall -Wextra -g -O2 -std=c11 -Wno-format-truncation $(VERSION_DEF)
+# -fPIC：运行时对象统一位置无关，静态归档照常，同时允许 install 直接用
+# 同一批对象二次链接出共享库 build/libvus_rt.so（动态链接可选）。
+CFLAGS   = -Wall -Wextra -g -O2 -std=c11 -Wno-format-truncation -fPIC $(VERSION_DEF)
+PIC      = -fPIC
 SRC_DIR  = src
 RT_DIR   = rt
 BUILD_DIR = build
@@ -45,6 +48,13 @@ RT_OBJ   = $(BUILD_DIR)/libvus_rt.o
 RT_CORO_OBJ = $(BUILD_DIR)/vus_coro.o
 RT_C_IMPL_OBJ = $(BUILD_DIR)/vus_rt_c_impl.o
 RT_LIB   = $(BUILD_DIR)/libvus_rt.a
+RT_SO    = $(BUILD_DIR)/libvus_rt.so
+
+# 共享库二次链接所需的外部库探测（未装齐时留空：-shared 允许未定义符号，
+# 缺失的运行时依赖按需在最终产物上体现；生成不了的场景由编译器回退静态）
+CURL_LIBS := $(shell pkg-config --libs libcurl 2>/dev/null)
+IMG_LIBS  := $(shell pkg-config --libs libpng zlib 2>/dev/null)
+FT_LIBS   := $(shell pkg-config --libs x11 xft fontconfig freetype2 2>/dev/null)
 
 # yyjson 单头/源：纯 C JSON 解析/生成（并入运行时静态库）
 YYJSON_SRC = $(RT_DIR)/yyjson/yyjson.c
@@ -96,7 +106,7 @@ CONFIG_H = $(SRC_DIR)/config.h
 RT_H     = $(RT_DIR)/libvus_rt.h
 
 # --- 伪目标 ---
-.PHONY: all clean test run-tests run build-c build-exe install uninstall format
+.PHONY: all clean test run-tests run build-c build-exe install uninstall format shared
 
 # --- 默认目标 ---
 all: vus $(RT_LIB)
@@ -237,7 +247,7 @@ $(RT_OBJ): $(RT_SRC) $(RT_H) $(RT_DIR)/vus_coro.h | $(BUILD_DIR)
 
 # 编译协程模块（独立，避免 libvus_rt.c 里做 inline asm 时跟 C11 冲突）
 $(RT_CORO_OBJ): $(RT_CORO) $(RT_DIR)/vus_coro.h | $(BUILD_DIR)
-	$(CC) -Wall -Wextra -g -O2 -Wno-format-truncation -I$(RT_DIR) -c -o $@ $<
+	$(CC) -Wall -Wextra -g -O2 -Wno-format-truncation $(PIC) -I$(RT_DIR) -c -o $@ $<
 
 # 编译 FFI Bridge C 域实现（dlopen 装载，随运行时库归档）
 $(RT_C_IMPL_OBJ): $(RT_C_IMPL) $(RT_H) | $(BUILD_DIR)
@@ -264,7 +274,7 @@ $(BUILD_DIR)/guilite_gles.o: $(RT_DIR)/guilite_gles.c $(RT_DIR)/guilite_gles.h |
 	$(CC) $(CFLAGS) $(PY_DEF) $(PY_INC) -I$(RT_DIR) -DVUS_GUI_X11 -DVUS_GUI_GLES -c -o $@ $<
 
 $(BUILD_DIR)/guilite_wrapper.o: $(RT_DIR)/guilite_wrapper.cpp $(GUI_DIR)/GuiLite.h | $(BUILD_DIR)
-	$(CXX) -Wall -Wextra -g -O2 $(GUI_INC) -c -o $@ $<
+	$(CXX) -Wall -Wextra -g -O2 $(PIC) $(GUI_INC) -c -o $@ $<
 
 # 编译 gifdec（CC0 单驱动 GIF 解码库，随 GUI 桥接链入静态库）
 $(BUILD_DIR)/gifdec.o: $(RT_DIR)/gifdec/gifdec.c $(RT_DIR)/gifdec/gifdec.h | $(BUILD_DIR)
@@ -279,22 +289,22 @@ $(XYZ_OBJ): $(XYZ_SRC) $(RT_H) | $(BUILD_DIR)
 #       该库仅做 JSON 解析/生成，对整体运行性能影响可忽略；如仍嫌慢可再提
 #       到 -O1，需要运行时极致性能时才改回 -O2。
 $(YYJSON_OBJ): $(YYJSON_SRC) | $(BUILD_DIR)
-	$(CC) -Wall -Wextra -O0 -std=c11 $(YYJSON_INC) -c -o $@ $<
+	$(CC) -Wall -Wextra -O0 -std=c11 $(PIC) $(YYJSON_INC) -c -o $@ $<
 
 # miniz 编译规则（变量定义见 vus 规则前的 MINIZ_SRC/MINIZ_OBJ）
 $(BUILD_DIR)/miniz.o: $(RT_DIR)/miniz/miniz.c $(RT_DIR)/miniz/miniz.h $(RT_DIR)/miniz/miniz_export.h | $(BUILD_DIR)
-	$(CC) -Wall -Wextra -O0 -std=c11 -I$(RT_DIR) -c -o $@ $<
+	$(CC) -Wall -Wextra -O0 -std=c11 $(PIC) -I$(RT_DIR) -c -o $@ $<
 $(BUILD_DIR)/miniz_tdef.o: $(RT_DIR)/miniz/miniz_tdef.c $(RT_DIR)/miniz/miniz_tdef.h | $(BUILD_DIR)
-	$(CC) -Wall -Wextra -O0 -std=c11 -I$(RT_DIR) -c -o $@ $<
+	$(CC) -Wall -Wextra -O0 -std=c11 $(PIC) -I$(RT_DIR) -c -o $@ $<
 $(BUILD_DIR)/miniz_tinfl.o: $(RT_DIR)/miniz/miniz_tinfl.c $(RT_DIR)/miniz/miniz_tinfl.h | $(BUILD_DIR)
-	$(CC) -Wall -Wextra -O0 -std=c11 -I$(RT_DIR) -c -o $@ $<
+	$(CC) -Wall -Wextra -O0 -std=c11 $(PIC) -I$(RT_DIR) -c -o $@ $<
 $(BUILD_DIR)/miniz_zip.o: $(RT_DIR)/miniz/miniz_zip.c $(RT_DIR)/miniz/miniz_zip.h | $(BUILD_DIR)
-	$(CC) -Wall -Wextra -O0 -std=c11 -I$(RT_DIR) -c -o $@ $<
+	$(CC) -Wall -Wextra -O0 -std=c11 $(PIC) -I$(RT_DIR) -c -o $@ $<
 
 # Oniguruma 编译规则（变量定义见 vus 规则前的 ONIG_SRC/ONIG_OBJ）
 $(BUILD_DIR)/onig_%.o: $(RT_DIR)/oniguruma/%.c $(RT_DIR)/oniguruma/oniguruma.h | $(BUILD_DIR)
 	$(CC) -Wall -Wextra -O0 -std=gnu11 -Wno-unused-parameter -Wno-sign-compare \
-		-I$(RT_DIR)/oniguruma -c -o $@ $<
+		$(PIC) -I$(RT_DIR)/oniguruma -c -o $@ $<
 
 # VUS 扩展内建模块编译规则（哈希/ZIP/图片/正则的 VusString* 封装，随运行时库编译；
 # 变量定义见 vus 规则前的 VUS_EXT_SRC/VUS_EXT_OBJ）
@@ -314,6 +324,16 @@ $(RT_LIB): $(RT_OBJ) $(RT_CORO_OBJ) $(RT_C_IMPL_OBJ) $(YYJSON_OBJ) $(EL_OBJ) $(G
            $(ONIG_OBJ) $(VUS_EXT_OBJ) $(MINIZ_OBJ)
 	ar rcs $@ $^
 
+# 运行时共享库（动态链接可选，install 时生成；对象已统一 -fPIC，直接二次链接）
+# 未定义的外部符号（curl/X11/png/freetype 等）按探测结果携带；pkg-config 缺失时
+# 留空并用 -Wl,--allow-shlib-undefined 兜底，无法链成的场景由编译器回退静态。
+$(RT_SO): $(RT_OBJ) $(RT_CORO_OBJ) $(RT_C_IMPL_OBJ) $(YYJSON_OBJ) $(EL_OBJ) $(GUI_OBJ) $(XYZ_OBJ) $(GLES_ARCHIVE_OBJ) \
+          $(ONIG_OBJ) $(VUS_EXT_OBJ) $(MINIZ_OBJ)
+	$(CC) -shared -fPIC -o $@ $^ -lm -ldl -lpthread -lstdc++ \
+		$(CURL_LIBS) $(IMG_LIBS) $(FT_LIBS) $(GLES_LIBS) -Wl,--allow-shlib-undefined
+
+shared: $(RT_SO)
+
 # =============================================================================
 # 目录创建
 # =============================================================================
@@ -332,7 +352,11 @@ clean:
 # 安装 / 卸载
 # =============================================================================
 
+# 运行时共享库（动态链接可选）：install 时生成并安装。无法生成的场景（如
+# 缺外部库）不中断安装——命令行工具照常部署，使用侧（vus run/build）找不到
+# libvus_rt.so 时自动回退静态链接 libvus_rt.a。
 install: all
+	$(MAKE) shared || echo "警告: 无法生成 libvus_rt.so，动态链接将自动回退静态"
 	install -m 755 vus /usr/local/bin/vus
 	install -d /usr/local/share/vus/scripts
 	install -m 644 scripts/vux_plugin_manager.py /usr/local/share/vus/scripts/
@@ -349,6 +373,14 @@ install: all
 	install -d /usr/local/share/vus/rt
 	install -m 644 rt/libvus_rt.h /usr/local/share/vus/rt/
 	install -m 644 build/libvus_rt.a /usr/local/share/vus/rt/
+	@if [ -f $(RT_SO) ]; then \
+		mkdir -p /usr/local/lib/vus; \
+		if [ -n "$(STRIP)" ]; then strip --strip-unneeded $(RT_SO); fi; \
+		install -m 755 $(RT_SO) /usr/local/lib/vus/; \
+		echo "已安装共享库 /usr/local/lib/vus/libvus_rt.so"; \
+	else \
+		echo "提示: libvus_rt.so 未生成，动态链接不可用（将回退静态）"; \
+	fi
 
 uninstall:
 	rm -f /usr/local/bin/vus

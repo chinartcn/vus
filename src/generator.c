@@ -6368,6 +6368,16 @@ static int cached_has_curl(void) {
     return v;
 }
 
+/* strip 工具可用性（vus.json.strip / VUS_STRIP=1 时用于链接后瘦身；缺工具则跳过） */
+static int cached_has_strip(void) {
+    static int v = -1;
+    if (v < 0) {
+        FILE *f = popen("command -v strip >/dev/null 2>&1", "r");
+        v = (f && pclose(f) == 0) ? 1 : 0;
+    }
+    return v;
+}
+
 static void cached_py_config(char *inc, size_t inc_cap, char *ld, size_t ld_cap) {
     static int done = 0;
     static char s_inc[1024], s_ld[2048];
@@ -6450,6 +6460,16 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
         }
     }
 
+    /* 动态链接 / strip 开关（均可选，缺省关闭）：环境变量显式覆盖 vus.json，
+       与 VUS_OPT 同风格（如 VUS_DYNAMIC=1 ./vus run … 或 vus.json 编译选项）。
+       动态模式下 .so 缺失/无法生成时自动回退静态链接，见下方 use_dyn_rt。 */
+    int dyn_link = config->dynamic_link;
+    const char *e_dyn = getenv("VUS_DYNAMIC");
+    if (e_dyn && (e_dyn[0] == '1' || e_dyn[0] == '0')) dyn_link = (e_dyn[0] == '1');
+    int do_strip = config->strip_syms;
+    const char *e_strip = getenv("VUS_STRIP");
+    if (e_strip && (e_strip[0] == '1' || e_strip[0] == '0')) do_strip = (e_strip[0] == '1');
+
     /* 将 rt_dir 解析为绝对路径（相对于 project_dir） */
     char abs_rt_dir[2048];
     if (config->rt_dir[0] == '/') {
@@ -6500,6 +6520,28 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
     if (config->rt_dir[0]) {
         FILE *lib_check = fopen(static_rt_lib, "r");
         if (lib_check) { use_static_rt = 1; fclose(lib_check); }
+    }
+
+    /* 共享库探测（动态链接可选）：VUS_RT_SO > 项目 build/libvus_rt.so > 安装目录
+       /usr/local/lib/vus/libvus_rt.so。找到则动态链接；找不到/无法生成（安装时
+       make shared 失败）自动回退静态，绝不因缺 .so 编译失败。 */
+    char rt_so[2048] = "";
+    int use_dyn_rt = 0;
+    if (dyn_link && config->rt_dir[0]) {
+        const char *so_env = getenv("VUS_RT_SO");
+        if (so_env && so_env[0]) {
+            snprintf(rt_so, sizeof(rt_so), "%s", so_env);
+        } else {
+            snprintf(rt_so, sizeof(rt_so), "%s/../build/libvus_rt.so", abs_rt_dir);
+        }
+        FILE *so_check = fopen(rt_so, "r");
+        if (!so_check) {
+            /* 未在项目 build 下找到，回退到安装目录 */
+            snprintf(rt_so, sizeof(rt_so), "/usr/local/lib/vus/libvus_rt.so");
+            so_check = fopen(rt_so, "r");
+        }
+        if (so_check) { use_dyn_rt = 1; fclose(so_check); }
+        else rt_so[0] = '\0';
     }
 
     /* 检测系统是否安装了 libcurl 开发头文件（A4：结果进程级缓存） */
@@ -6554,7 +6596,38 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
         if (g_uses_gui) { strcat(gui_lib, " -lpng -lz -lfreetype"); }
     }
 
-    if (use_static_rt) {
+    if (use_dyn_rt) {
+        /* ---- 动态链接路径（可选）：运行时为共享库 libvus_rt.so ----
+           多程序共享一份运行时（升级替换 .so 即全部生效）；curl/X11/python 等
+           外部依赖已由 .so 自行携带，主程序仅需 -lm -lpthread（+GUI 时 -ldl/-rdynamic
+           供 dlsym 反查事件回调）。-Wl,-rpath 指向 .so 所在目录，免 LD_LIBRARY_PATH。 */
+        const char *slash = strrchr(rt_so, '/');
+        char so_dir[2048];
+        if (slash && slash != rt_so) {
+            size_t dlen = (size_t)(slash - rt_so);
+            snprintf(so_dir, sizeof(so_dir), "%.*s", (int)dlen, rt_so);
+        } else {
+            snprintf(so_dir, sizeof(so_dir), "./");
+        }
+        const char *dyn_opts = g_uses_gui ? " -ldl -rdynamic" : "";
+        const char *dyn_gles = "";
+        if (g_uses_gui && getenv("VUS_GUI_GLES") && getenv("VUS_GUI_GLES")[0]) {
+            dyn_gles = " -lEGL -lGLESv2";
+        }
+        n = snprintf(cmd, sizeof(cmd),
+            "gcc %s -I\"%s\" %s \"%s\"%s -L\"%s\" -Wl,-rpath,\"%s\" -lvus_rt -o \"%s\" -lm -lpthread%s %s%s 2>&1",
+            opt_level,
+            abs_rt_dir,
+            xft_inc,
+            c_source_path,
+            extra_objects && extra_objects[0] ? extra_objects : "",
+            so_dir,
+            so_dir,
+            output_path,
+            dyn_opts,
+            gui_def,
+            dyn_gles);
+    } else if (use_static_rt) {
         /* ---- 静态库路径（推荐）：仅编译用户 C，运行时从 build/libvus_rt.a 链接 ----
            libvus_rt.a 已在 make 时以匹配的 PY/GUI flags 编译，故无需再拼 py_inc/gui 源。
            仅 GUI 用例需要追加 X11/Xft/-rdynamic/-ldl 与 -lstdc++（链接 .a 内的 C++ 包装）。 */
@@ -6639,6 +6712,22 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
             snprintf(error_msg, error_size, "Command line too long");
         }
         return -1;
+    }
+
+    /* strip（可选）：链接成功后瘦身。三个分支模板统一以 " 2>&1" 结尾，这里替换为
+       " && strip --strip-unneeded <输出> 2>&1"——链错即短路，绝不影响原失败诊断；
+       GUI 场景 -rdynamic 的导出符号在 dynsym 中，--strip-unneeded 不会误删。 */
+    if (do_strip && cached_has_strip()) {
+        char *tail = strstr(cmd, " 2>&1");
+        if (tail) {
+            char strip_suffix[1100];
+            snprintf(strip_suffix, sizeof(strip_suffix),
+                     " && strip --strip-unneeded \"%s\" 2>&1", output_path);
+            size_t prefix_len = (size_t)(tail - cmd);
+            if (prefix_len + strlen(strip_suffix) < sizeof(cmd)) {
+                memcpy(tail, strip_suffix, strlen(strip_suffix) + 1);
+            }
+        }
     }
 
     /* 执行编译 */
