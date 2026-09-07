@@ -1,11 +1,11 @@
 > 文档版本：v1.0_apk（APK 功能时代）
-> 最后更新时间：2026-09-04
+> 最后更新时间：2026-09-06
 
 
 # VUS 插件系统使用指南
 
 > 版本：v3.0.20260904150204（正式版）
-> 覆盖：四层插件体系（`.vus` / `.vusx` / `.vux` / `.vulage`）、`vus vux`/`vus vusx`/`vus lang` CLI、进程内调用（`VUS_USE_PY`）、VUS 侧 `插件_*` 调用、`vaz` 扩展包与 LSP 生态命令。
+> 覆盖：四层插件体系（`.vus` / `.vusx` / `.vux` / `.vulage`）、`vus vux`/`vus vusx`/`vus lang` CLI、进程内调用（`VUS_USE_PY`）、VUS 侧 `插件_*` 调用、`vaz` 扩展包与 LSP 生态命令、Android 端（APK 构建）各插件层可用性。
 
 ## 一、四层插件体系一览
 
@@ -211,7 +211,32 @@ vus vaz expand 页面目录 -v 包.vaz   # 构建期展开到页面目录
 | `examples/gui-designer/` | 可视化 GUI 设计器（控件拖拽 → 导出 `.vus`，`server.py` + `api.py`） |
 | `scripts/build_lsp_android.sh` | LSP 服务端构建为 Android 可执行 |
 
-## 八、常见问题（FAQ）
+## 八、Android 端（APK 构建）可用性
+
+`vus build --apk` 链路由 `src/vus_apk.c` 生成工程：`vus_compile_to_c` 产出 C → 复制为 `jni/vus_app.c`（`main`→`vus_main`）→ `gen_jni_bridge.py` 生成 JNI 桥 → 固定源码列表的 `Android.mk` 交叉编译。各插件层在 Android 端的可用性如下：
+
+| 系统 | 机制 | Android 可用性 | 说明 |
+|------|------|:---:|------|
+| `.vux`（功能插件） | Python 实现，运行期 `插件_运行*` 调用 | ✗ | 无 Python 运行时 |
+| `.vusx`（依赖插件） | 编译期编 `.o` 并追加 GCC 链接 | ✗ | APK 链路不参与链接 |
+| `.vulage`（语言插件） | 编译前 dlopen + 词法预处理 | ✓ | 构建期生效，产物无运行时依赖 |
+| `vua`（UI 标记） | 构建期解析渲染树 | ✓ | `vua.c` 在 `Android.mk` 源码列表内 |
+| `.vaz`（扩展包） | 构建期模板展开合并为纯 VUS 源码 | ✓ | 展开产物无运行时依赖 |
+| 通用 `.so` 插件（`vus_register_plugin`） | dlopen 加载进编译器进程 | ✓（构建机） | 与 APK 产物无关 |
+
+### 8.1 不可用的根因
+
+- **`.vux` 两条运行路径在 Android 上都走不通**：
+  1. 进程内嵌入：由 `VUS_USE_PY` 条件编译控制（`rt/libvus_rt.c` 的 `vus_plugin_run_vux_inproc`，dlopen 惰性加载 libpython）；APK 的 `Android.mk` 中 `LOCAL_CFLAGS` 仅含 `-DVUS_HAVE_CURL`，未定义 `VUS_USE_PY`，`vus_py_init()` 恒失败；
+  2. 子进程回退：`vus_plugin_run_vux` 通过 popen 执行 `python3 vux_plugin_manager.py`，Android 上无 python3 可执行文件 → 返回空/失败。
+- **`.vusx` 不参与 APK 链接**：`--exe` 路径会把 vusx 编译出的 `.o` 追加到 GCC 命令（`main.c`），但 `--apk` 仅做 `vus_compile_to_c` + 固定源码列表的 `Android.mk`（`vus_app.c libvus_rt.c vua.c yyjson.c jni_bridge.c`），vusx 的 `.o` 不会进入产物——引用 vusx 的工程在 APK 构建下会缺符号/功能缺失。
+
+### 8.2 可行的替代方案
+
+- 需要 `.vux` 能力（如搜索、网络增强）→ 改用**内建库**（哈希/ZIP/正则/网络等已内置于 `libvus_rt`）或编译为 `.vusx`、`.vaz` 逻辑库（构建期展开，APK 可用）。
+- 需要 `.vusx` 复用 → 将插件源码以 `vus`/`vaz` 逻辑库形式合并进主脚本再构建 APK。
+
+## 九、常见问题（FAQ）
 
 **Q：`插件_运行JSON` 在无 Python 环境下可用吗？**
 A：可用——子进程方案不依赖编译期 Python；`VUS_USE_PY` 只是把调用升级为进程内嵌入式解释器（更快）。`typeof` 在无 `VUS_USE_PY` 时恒返回 `"空"`；`JSON_*` 基于 yyjson，始终可用。
