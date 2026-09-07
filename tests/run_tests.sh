@@ -45,7 +45,13 @@ for test_file in "${TEST_DIR}/test_"*.vus; do
 
     # 编译并运行 VUS 文件
     # 先尝试 build --c-only，再编译运行；或直接 run
-    if output="$("$VUS" run "$test_file" 2>&1)"; then
+    # FFI Python 域用例：模块 ext_py.samplemath 位于 ../examples，注入
+    # VUS_PLUGIN_DIR 使其进入 sys.path（与 C 单测段 test_plugin_inproc 同风格）
+    RUN_ENV=()
+    if [ "$test_name" = "test_ext_py.vus" ] || [ "$test_name" = "test_ext_py_vars.vus" ]; then
+        RUN_ENV=(env VUS_PLUGIN_DIR="../examples")
+    fi
+    if output="$("${RUN_ENV[@]}" "$VUS" run "$test_file" 2>&1)"; then
         echo "✅ 通过"
         PASS=$((PASS + 1))
     else
