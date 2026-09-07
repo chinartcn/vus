@@ -6,6 +6,9 @@
 #include <string.h>
 #include <stdbool.h>
 
+// FFI Bridge 公共结构体（VusRTValue/VusRTModule 等 C 域接口类型）
+#include "../include/vus/vus_rt_bridge.h"
+
 // ============ 类型标记常量 ============
 #define TYPE_INT     1
 #define TYPE_FLOAT   2
@@ -478,5 +481,11 @@ int vus_ext_set_v(const char *ns, const char *vname, void *val_vus, VusError **e
 int vus_ext_export_v(const char *name, void **ptr);                              /* 导出变量：注册全局槽 */
 const char *vus_ext_last_error(void);                                            /* 最近一次桥错误文本 */
 void vus_ext_shutdown_all(void);                                                 /* 程序退出：清理全部外部域 */
+
+/* ---- C 域接入访问器（rt/vus_rt_c_impl.c 使用；尾部扩展，不改既有布局） ---- */
+void vus_ext_seterr(const char *fmt, ...);                 /* 写最近桥错误文本（与 vus_ext_last_error 配对） */
+int vus_ext_c_register(const char *ns, VusRTModule *mod, void *handle);  /* 登记 C 域模块 + dlopen 句柄（幂等） */
+VusRTModule *vus_ext_c_module(const char *ns);             /* 按别名取 C 域模块描述符（未加载返回 NULL） */
+void *vus_ext_c_handle(const char *ns);                    /* 按别名取 C 域 dlopen 句柄 */
 
 #endif // VUS_RT_H

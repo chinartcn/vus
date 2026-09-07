@@ -24,6 +24,9 @@ tests/vua_smoke
 # 插件打包产物
 *.vux
 
+# FFI Bridge C 域示例插件构建产物（dlopen 目标文件）
+examples/ext_c_plugin/c_math.so
+
 # 系统文件
 .DS_Store
 Thumbs.db

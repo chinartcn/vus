@@ -40,8 +40,10 @@ SRCS     = $(SRC_DIR)/main.c $(SRC_DIR)/token.c $(SRC_DIR)/lexer.c \
 OBJS     = $(SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
 RT_SRC   = $(RT_DIR)/libvus_rt.c
 RT_CORO  = $(RT_DIR)/vus_coro.c
+RT_C_IMPL = $(RT_DIR)/vus_rt_c_impl.c
 RT_OBJ   = $(BUILD_DIR)/libvus_rt.o
 RT_CORO_OBJ = $(BUILD_DIR)/vus_coro.o
+RT_C_IMPL_OBJ = $(BUILD_DIR)/vus_rt_c_impl.o
 RT_LIB   = $(BUILD_DIR)/libvus_rt.a
 
 # yyjson 单头/源：纯 C JSON 解析/生成（并入运行时静态库）
@@ -139,7 +141,7 @@ VUS_EXT_OBJ = $(VUS_EXT_SRC:$(RT_DIR)/%.c=$(BUILD_DIR)/%.o)
 # CLI `vus lint` 与 LSP .vua 校验闭环进程内复用 vua.c 严格校验 + 渲染树归一）
 # 注：Oniguruma/扩展内建/miniz 对象同时被 libvus_rt.a 与 vus 引用，必须同时
 # 列入 vus 的前置依赖，否则 `make vus`/`make` 单独构建时缺对象链接失败。
-vus: $(OBJS) $(YYJSON_OBJ) $(VUA_OBJ) $(RT_OBJ) $(RT_CORO_OBJ) $(EL_OBJ) \
+vus: $(OBJS) $(YYJSON_OBJ) $(VUA_OBJ) $(RT_OBJ) $(RT_CORO_OBJ) $(RT_C_IMPL_OBJ) $(EL_OBJ) \
       $(ONIG_OBJ) $(VUS_EXT_OBJ) $(MINIZ_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^ -lm -ldl -lpthread
 
@@ -237,6 +239,10 @@ $(RT_OBJ): $(RT_SRC) $(RT_H) $(RT_DIR)/vus_coro.h | $(BUILD_DIR)
 $(RT_CORO_OBJ): $(RT_CORO) $(RT_DIR)/vus_coro.h | $(BUILD_DIR)
 	$(CC) -Wall -Wextra -g -O2 -Wno-format-truncation -I$(RT_DIR) -c -o $@ $<
 
+# 编译 FFI Bridge C 域实现（dlopen 装载，随运行时库归档）
+$(RT_C_IMPL_OBJ): $(RT_C_IMPL) $(RT_H) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(RT_DIR) -c -o $@ $<
+
 # 编译 EasyLogger 核心源码
 $(BUILD_DIR)/elog.o: $(EL_DIR)/src/elog.c $(EL_DIR)/inc/elog.h $(EL_DIR)/inc/elog_cfg.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(EL_INC) -c -o $@ $<
@@ -304,7 +310,7 @@ $(BUILD_DIR)/vus_regex.o: $(RT_DIR)/vus_regex.c $(RT_H) | $(BUILD_DIR)
 # 运行时库静态归档（含 vus_coro.o、yyjson、easylogger elog.o 与 GuiLite 图形库）
 # 顺序注意：GNU ld 对归档只做单遍扫描，被依赖对象须排在其引用者之后——
 # oniguruma 排在 vus_regex 前；miniz 排在最后（vus_zip 引用 mz_*）。
-$(RT_LIB): $(RT_OBJ) $(RT_CORO_OBJ) $(YYJSON_OBJ) $(EL_OBJ) $(GUI_OBJ) $(XYZ_OBJ) $(GLES_ARCHIVE_OBJ) \
+$(RT_LIB): $(RT_OBJ) $(RT_CORO_OBJ) $(RT_C_IMPL_OBJ) $(YYJSON_OBJ) $(EL_OBJ) $(GUI_OBJ) $(XYZ_OBJ) $(GLES_ARCHIVE_OBJ) \
            $(ONIG_OBJ) $(VUS_EXT_OBJ) $(MINIZ_OBJ)
 	ar rcs $@ $^
 
@@ -355,7 +361,13 @@ uninstall:
 test: all
 	./vus test
 
-run-tests: all
+# FFI Bridge C 域示例插件（test_ext_c.vus 依赖；构建产物不入库不安装）
+EXT_C_PLUGIN_DIR = examples/ext_c_plugin
+EXT_C_PLUGIN_SO  = $(EXT_C_PLUGIN_DIR)/c_math.so
+$(EXT_C_PLUGIN_SO): $(EXT_C_PLUGIN_DIR)/c_math.c include/vus/vus_rt_bridge.h
+	$(CC) -shared -fPIC -Iinclude/vus -o $@ $<
+
+run-tests: all $(EXT_C_PLUGIN_SO)
 	cd $(TEST_DIR) && bash run_tests.sh
 
 # =============================================================================

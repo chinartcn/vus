@@ -5,7 +5,7 @@
 # VUS 插件系统使用指南
 
 > 版本：v3.0.20260904150204（正式版）
-> 覆盖：四层插件体系（`.vus` / `.vusx` / `.vux` / `.vulage`）、`vus vux`/`vus vusx`/`vus lang` CLI、进程内调用（`VUS_USE_PY`）、VUS 侧 `插件_*` 调用、`vaz` 扩展包与 LSP 生态命令、Android 端（APK 构建）各插件层可用性。
+> 覆盖：四层插件体系（`.vus` / `.vusx` / `.vux` / `.vulage`）、`vus vux`/`vus vusx`/`vus lang` CLI、进程内调用（`VUS_USE_PY`）、VUS 侧 `插件_*` 调用、`vaz` 扩展包与 LSP 生态命令、Android 端（APK 构建）各插件层可用性、运行期外部桥（`导入外部`/`导出变量`/`别名.成员` 的 C 域与 Python 域）。
 
 ## 一、四层插件体系一览
 
@@ -236,7 +236,83 @@ vus vaz expand 页面目录 -v 包.vaz   # 构建期展开到页面目录
 - 需要 `.vux` 能力（如搜索、网络增强）→ 改用**内建库**（哈希/ZIP/正则/网络等已内置于 `libvus_rt`）或编译为 `.vusx`、`.vaz` 逻辑库（构建期展开，APK 可用）。
 - 需要 `.vusx` 复用 → 将插件源码以 `vus`/`vaz` 逻辑库形式合并进主脚本再构建 APK。
 
-## 九、常见问题（FAQ）
+## 九、运行期外部桥·C 域（`导入外部`，dlopen 插件）
+
+> 完整 ABI 见 `docs/designs/2026-09-06-runtime-ffi-abi-design.md`（总纲）与
+> `docs/designs/2026-09-06-runtime-ffi-c-impl.md`（C 域实现规格）。本节目录用途。
+
+**运行期外部桥**让 VUS 程序在运行时直接调用外部代码的函数并双向读写变量：
+C 域（`.so`，dlopen 装载，本文）与 Python 域（模块路径，见 py-impl 规格）共用同一
+`导入外部`/`导出变量`/`别名.成员` 语法。C 域在桌面与构建机可用；APK 运行期默认不加载。
+
+### 9.1 插件形态（只依赖 `vus_rt_bridge.h`，纯 C）
+
+```c
+#include "vus_rt_bridge.h"
+
+static VusRTValue g_slot = { .t = VUS_RT_INT, .v = { .i64 = 0 } };  /* 指针槽 */
+static int g_ratio = 3;                                             /* 回调槽私有存储 */
+
+static int add(VusRTValue *v, int n, VusRTValue *out, VusRTEnv *e) {
+    if (n != 2 || v[0].t != VUS_RT_INT || v[1].t != VUS_RT_INT) {
+        snprintf(e->errs, sizeof(e->errs), "add 需要两个整数");
+        return -1;
+    }
+    out->t = VUS_RT_INT; out->v.i64 = v[0].v.i64 + v[1].v.i64;
+    return 0;
+}
+static VusRTFunc g_funcs[] = {
+    { "加法", 2, 2, add }, { "", 0, 0, NULL }                       /* 空名哨兵 */
+};
+static VusRTVar g_vars[] = {
+    { "计数", VUS_RT_INT, 0, &g_slot, NULL, NULL },
+    { "", 0, 0, NULL, NULL, NULL }
+};
+VUS_RT_EXPORT void vus_rt_module_entry(VusRTModule **m) {
+    static VusRTModule mod = { .name = "c_math", .version = "1.0.0",
+                               .funcs = g_funcs, .vars = g_vars };
+    *m = &mod;
+}
+```
+
+构建（不链接 libvus，仅头文件接口）：
+
+```bash
+gcc -shared -fPIC -I<include> -o c_math.so c_math.c     # include 含 vus_rt_bridge.h
+```
+
+### 9.2 VUS 侧使用
+
+```
+导入外部 (cm, {源: "./c_math.so", 参数: {基准: 10}})   # 惰性加载；参数传给 init
+断言(cm.加法(3, 4) == "7", "函数调用")
+cm.计数 = 42                                            # 变量写 → 指针槽
+断言(cm.计数 == "42", "变量读")
+导出变量 (["我的计数"])                                 # 反向：外部读 VUS 全局
+我的计数 = 100
+断言(cm.我的计数 == "100", "宿主槽双向同步")
+```
+
+### 9.3 变量三种机制与约束
+
+| 机制 | 声明方式 | 语义 |
+|------|----------|------|
+| 指针槽 | `slot` 非 NULL | 桥层按 `VusRTValue` 布局直接读写该内存，零拷贝 |
+| 回调槽 | `slot` 为 NULL + `get`/`set` | 两侧各一次值转换；`readonly=1` 拦截 VUS 侧写 |
+| 宿主转换槽 | VUS `导出变量` | C 侧经桥读写 VUS 全局（`vus_var_set` 引用安全），双向同步零缓存 |
+
+约束：函数表/变量表以**空名哨兵**结尾；域内重名（函数/函数、变量/变量、函数/变量交叉）→ 加载报错；
+字符串跨界按 UTF-8 复制；容器深拷贝、深度上限 64；数值不做隐式转换；`VUS_RT_NIL` ⇄ VUS 空。
+
+### 9.4 与既有 C 插件（`vus_register_plugin`）的区别
+
+| | 旧 C 插件 | 运行期外部桥·C 域 |
+|---|---|---|
+| 时机 | 编译期注册（`vus_register_plugin`） | 运行期 `导入外部` 惰性 dlopen |
+| 接口 | 编译器内建插件 API | `vus_rt_bridge.h` 独立 ABI（可独立构建） |
+| 场景 | 编译器/生态扩展 | 用 VUS 脚本驱动任意 `.so` |
+
+## 十、常见问题（FAQ）
 
 **Q：`插件_运行JSON` 在无 Python 环境下可用吗？**
 A：可用——子进程方案不依赖编译期 Python；`VUS_USE_PY` 只是把调用升级为进程内嵌入式解释器（更快）。`typeof` 在无 `VUS_USE_PY` 时恒返回 `"空"`；`JSON_*` 基于 yyjson，始终可用。

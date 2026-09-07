@@ -7,6 +7,9 @@
 #include <errno.h>
 #include <unistd.h>
 
+/* dlopen/dlsym/dlclose：FFI Bridge C 域装载（无条件编译；Python 域嵌入段也复用） */
+#include <dlfcn.h>
+
 #include <elog.h>
 
 /* 运行期外部桥公共头（FFI Bridge：VUS ↔ Python / C 插件） */
@@ -2114,7 +2117,6 @@ static void* vus_plugin_run_vux_json_fallback(VusString* plugin, VusString* cmd)
 
 /* ---- 进程内嵌入 Python ---- */
 #ifdef VUS_USE_PY
-#include <dlfcn.h>
 
 /* PyRun_String 的起始语法模式：Py_file_input（编译完整语句）。
  * 值为 CPython 头文件 pgenheader 中定义的枚举，此处命名化避免裸魔数。 */
@@ -2807,26 +2809,46 @@ int vus_py_ext_set(const char *ns, const char *vname, const VusRTValue *val);
 #define vus_py_ext_set  NULL
 #endif
 
-/* C 域（c-impl 接入点；当前桩） */
-int vus_c_ext_load(const char *ns, const char *src, const VusRTValue *params) {
-    (void)ns; (void)src; (void)params;
-    ext_set_err("C 域尚未实现");
-    return -1;
+/* C 域（c-impl 接入点；实现在 rt/vus_rt_c_impl.c，此处仅前向声明） */
+int vus_c_ext_load(const char *ns, const char *src, const VusRTValue *params);
+int vus_c_ext_call(const char *ns, const char *fname, const VusRTValue *args, int nargs, VusRTValue *out);
+int vus_c_ext_get(const char *ns, const char *vname, VusRTValue *out);
+int vus_c_ext_set(const char *ns, const char *vname, const VusRTValue *val);
+
+/* C 域接入访问器（c-impl 填充/读取域描述符；尾部扩展，不改既有字段布局） */
+
+/* 写入最近桥错误文本（与 vus_ext_last_error() 配对；C 域加载/调用失败时上报） */
+void vus_ext_seterr(const char *fmt, ...) {
+    if (!fmt) { s_ext_err[0] = '\0'; return; }
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(s_ext_err, sizeof(s_ext_err), fmt, ap);
+    va_end(ap);
 }
-int vus_c_ext_call(const char *ns, const char *fname, const VusRTValue *args, int nargs, VusRTValue *out) {
-    (void)ns; (void)fname; (void)args; (void)nargs; (void)out;
-    ext_set_err("C 域尚未实现");
-    return -1;
+
+/* 加载成功后登记 C 域模块描述符与 dlopen 句柄（幂等：已登记同模块直接成功） */
+int vus_ext_c_register(const char *ns, VusRTModule *mod, void *handle) {
+    VusExtDomain *d = ns ? ext_find_ns(ns) : NULL;
+    if (!d) { ext_set_err("外部域 %s 未导入", ns ? ns : "(空)"); return -1; }
+    d->type = VUS_EXT_DOMAIN_C;
+    d->c_mod = mod;
+    d->c_handle = handle;
+    d->loaded = 1;
+    return 0;
 }
-int vus_c_ext_get(const char *ns, const char *vname, VusRTValue *out) {
-    (void)ns; (void)vname; (void)out;
-    ext_set_err("C 域尚未实现");
-    return -1;
+
+/* 按别名取 C 域模块描述符（未加载/非 C 域返回 NULL） */
+VusRTModule *vus_ext_c_module(const char *ns) {
+    VusExtDomain *d = ns ? ext_find_ns(ns) : NULL;
+    if (!d || d->type != VUS_EXT_DOMAIN_C) return NULL;
+    return d->c_mod;
 }
-int vus_c_ext_set(const char *ns, const char *vname, const VusRTValue *val) {
-    (void)ns; (void)vname; (void)val;
-    ext_set_err("C 域尚未实现");
-    return -1;
+
+/* 按别名取 C 域 dlopen 句柄（清理用） */
+void *vus_ext_c_handle(const char *ns) {
+    VusExtDomain *d = ns ? ext_find_ns(ns) : NULL;
+    if (!d || d->type != VUS_EXT_DOMAIN_C) return NULL;
+    return d->c_handle;
 }
 
 /* 域内变量可见性（py 白名单 / c 变量表） */
@@ -3124,12 +3146,19 @@ void vus_ext_shutdown_all(void) {
     }
 #endif
     for (int i = 0; i < s_ext_n_ns; i++) {
-        char **arrs[3] = { s_ext_ns[i].py_funcs, s_ext_ns[i].py_vars, s_ext_ns[i].py_ros };
+        VusExtDomain *d = &s_ext_ns[i];
+        char **arrs[3] = { d->py_funcs, d->py_vars, d->py_ros };
         for (int a = 0; a < 3; a++)
             for (int j = 0; arrs[a] && arrs[a][j]; j++) free(arrs[a][j]);
         for (int a = 0; a < 3; a++) free(arrs[a]);
-        if (s_ext_ns[i].src) { free(s_ext_ns[i].src); s_ext_ns[i].src = NULL; }
-        if (s_ext_ns[i].has_params) { vus_rtval_free(&s_ext_ns[i].params); s_ext_ns[i].has_params = 0; }
+        if (d->src) { free(d->src); d->src = NULL; }
+        if (d->has_params) { vus_rtval_free(&d->params); d->has_params = 0; }
+        /* C 域：cleanup 回调 + dlclose（资源/共存清单 #12） */
+        if (d->type == VUS_EXT_DOMAIN_C && d->c_mod) {
+            if (d->c_mod->cleanup) d->c_mod->cleanup();
+            if (d->c_handle) { dlclose(d->c_handle); d->c_handle = NULL; }
+            d->c_mod = NULL;
+        }
     }
     s_ext_n_ns = 0;
     for (int i = 0; i < s_ext_n_exports; i++) {

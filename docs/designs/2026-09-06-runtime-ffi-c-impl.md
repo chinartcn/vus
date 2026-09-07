@@ -1,6 +1,6 @@
 # Runtime FFI Bridge — C 域实现规格（c-impl）
 
-> 版本：impl-1.0
+> 版本：impl-1.0 → impl-1.0.1（2026-09-07：C 域已实现并验收，见 §11）
 > 日期：2026-09-06
 > 依赖总纲：[2026-09-06-runtime-ffi-abi-design.md](2026-09-06-runtime-ffi-abi-design.md)
 > 协作文档（并行）：[2026-09-06-runtime-ffi-py-impl.md](2026-09-06-runtime-ffi-py-impl.md)
@@ -344,3 +344,30 @@ cm.计数 = 42
 3. `make`、示例 `.so` 构建与运行通过；
 4. 与 py-impl 共用 `vus_rt_bridge.h` 无冲突（公共件裁决唯一类型源）；
 5. 与总纲 §7.4、§8、§9 无冲突。
+
+---
+
+## 11. 实现记录（2026-09-07，commit 见仓库）
+
+**交付物（均已验收）**
+| # | 交付物 | 状态 |
+|---|--------|:---:|
+| 1 | `include/vus/vus_rt_bridge.h` | ✅ 公共件（Python 侧提交，直接取用） |
+| 2 | `rt/vus_rt_c_impl.c`（本域实现） | ✅ `vus_c_ext_load/call/get/set` 全实现 |
+| 3 | `examples/ext_c_plugin/c_math.c` + `vus.json` | ✅（`make run-tests` 自动构建 `.so`） |
+| 4 | `tests/test_ext_c.vus` | ✅ 正向 + 负向全绿 |
+| 5 | `docs/PLUGIN_USAGE.md` §九 | ✅ 运行期外部桥·C 域 |
+
+**公共件尾部扩展（按 §0 规则，不改既有字段布局）**
+- `rt/libvus_rt.c/.h`：新增访问器 `vus_ext_seterr` / `vus_ext_c_register` /
+  `vus_ext_c_module` / `vus_ext_c_handle`；`vus_ext_shutdown_all` 补 C 域
+  `cleanup` + `dlclose`（资源清单 #12）；`dlfcn.h` 提升为无条件 include。
+- 原 `vus_c_ext_*` 桩（"C 域尚未实现"）由上述访问器 + `rt/vus_rt_c_impl.c` 取代。
+
+**实现要点**
+- 桩四函数迁移到 `rt/vus_rt_c_impl.c`；`Makefile` 将 `vus_rt_c_impl.o` 同时
+  并入 `vus` 与 `libvus_rt.a`。
+- 类型校验：slot 写前校验 `readonly` + 类型严格匹配；s 字符串桥层 strdup 副本
+  交公共层释放（与 Python 域对齐），插件输出内存归插件。
+- 测试消息核对：`外部函数 <别名>.<名> 不存在` / `<别名>.<名> 需要 N..M 个参数` /
+  `类型不匹配` / `为只读` 与 §7 逐条一致（见 test_ext_c.vus 断言 `捕获 外部错误`）。

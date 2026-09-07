@@ -1,0 +1,8 @@
+{
+  "名称": "ext_c_plugin",
+  "版本": "1.0.0",
+  "描述": "FFI Bridge C 域示例插件：c_math（加法/乘法/拼接/求和 + 指针槽/回调槽/只读变量）",
+  "入口": "vus_rt_module_entry",
+  "构建": "gcc -shared -fPIC -I../../include -o c_math.so c_math.c",
+  "用法": "导入外部 (cm, {源: \"<路径>/c_math.so\"})"
+}
