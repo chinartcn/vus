@@ -489,3 +489,7 @@ VusRTModule *vus_ext_c_module(const char *ns);             /* 按别名取 C 域
 void *vus_ext_c_handle(const char *ns);                    /* 按别名取 C 域 dlopen 句柄 */
 
 #endif // VUS_RT_H
+
+/* Cordis 式运行时上下文元框架（服务容器/DI/effect/事件四模式，路线 A）
+ * 置于文件末尾：全部 VUS 核心类型就绪后展开，生成 C 自动获得 vus_ctx_*。 */
+#include "vus_cordis.h"
