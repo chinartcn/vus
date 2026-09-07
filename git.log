@@ -1,0 +1,2452 @@
+commit d0f79a6dd3a6253ccb59374d3e527a44e216ba66
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Sun Sep 6 08:49:42 2026 +0000
+
+    refactor: Android 侧 A 类重构 + Gson 引入（瘦身 300+ 行）
+
+commit 48c41ad5e4a68a20caa46af4a5c1949853857c4d
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Sun Sep 6 08:58:17 2026 +0000
+
+    feat: 扩展内建库（哈希/ZIP/图片导出/正则）+ 依赖精简
+    
+    按依赖盘点结论落地三项高价值新增 + 正则（全部 vendored 进 rt/）：
+    
+    - rt/miniz（MIT 3.0.2）：内建 解压_zip/压缩_zip；vus_vaz.c 解包
+      .vaz 由 system unzip 改为进程内 miniz（含 zip-slip 路径穿越防护、
+      自动建目录），消除外部 unzip 命令依赖与跨平台行为差异。
+    - rt/vus_hash.c：SHA-256（FIPS 180-4）/ MD5（RFC 1321）纯 C 实现，
+      内建 SHA256()/MD5()，二进制安全，用于热更新与文件完整性校验。
+    - rt/stb/stb_image_write.h（public domain/MIT）：内建
+      图片_保存PNG/图片_保存JPG/图片_保存BMP，补齐只解码不编码缺口。
+    - rt/oniguruma（6.9.9 BSD-2）：核心 + UTF-8 编码最小集，内建
+      正则_查找/正则_匹配/正则_替换（\0~\9 分组回引），替换串回引支持。
+    - Makefile：四组新编译目标并入 libvus_rt.a 与 vus 主程序（归档成员
+      按依赖序排列，规避 GNU ld 单遍扫描的符号顺序问题）；miniz 3.0.2
+      缺省 miniz_export.h 用占位头补齐（源码无引用其宏）。
+    - LSP 内置元数据表补 10 条；新增回归用例 tests/test_ext_builtins.vus。
+    
+    验证：20 项 C 自检（哈希已知向量/ZIP 往返与 zip-slip/PNG·JPG·BMP 导出/
+    正则匹配替换）全过；ASAN 无内存错误；全量回归无新增失败（71 个 .vus+
+    C 单测全过，GUI 系 11 个失败为沙箱无显示环境所致，与基线一致）。
+
+commit c11cb2609817b5f42cd4a063f1c2ee887d4f1588
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Sat Sep 5 16:26:53 2026 +0000
+
+    fix: 函数返回容器 heap-use-after-free（R1 引用计数不对称）
+    
+    R1 优化在函数返回处经 vus_var_set 多加一 ref、调用点再 vus_unref，对
+    容器返回值（初值 ref=0）会把 ref 从 1 降回 0 提前释放，调用方解引用
+    即 UAF；对字面量池字符串执行 unref 还会破坏池。
+    
+    改为返回值所有权直接转移：返回处直接赋给返回槽，调用点与列表遍历调用
+    不再对返回值做 vus_unref。ASAN 下 multi_return/container/json_dict 等
+    容器测试无堆错误，普通构建 63/63 测试通过。
+    
+    补充 docs/buglog 缺陷日志与说明文档。
+
+commit ff3529d1f01abc6fbe1de0554e44b8ef0198f80f
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Sat Sep 5 14:53:06 2026 +0000
+
+    fix: B1-B4 运行时与结构体生成缺陷
+    
+    B1 结构体字段释放缺失：vus_unref 对非容器单块 free 不递归释放字段引用。
+      生成器为结构体类型生成 _magic(VUS_STRUCT_MAGIC) + _release 字段递归释放
+      钩子，归零释放时先 vus_unref 各字段再 free 主体（与已修复 UAF 同源）。
+    
+    B2 gen_expr_access 空值防护无效：成员访问模板中 -> 无条件执行，NULL obj
+      直接解引用。改写为 if(_o){...}else{空串} 语句表达式，空对象安全返回空串。
+    
+    B3 vus_to_float 未做容器解包：与 vus_to_int 不对称，容器/结构体传入读野
+      偏移。接入 vus_value_unwrap，容器/结构体返回解析错误而非野指针读取。
+    
+    B4 全局池/句柄表/引用计数无锁：g_lit_pool/g_numstr_pool/g_rel_chain 并发
+      读写构成数据竞争。引入进程级递归互斥锁保护共享池与释放链，ref 增减改
+      原子操作，池借出对象回收前校验引用计数避免释放仍被借用对象；头文件补
+      充单线程契约说明（对象级 ref 语义由宿主保证）。
+
+commit 043e0f7fbbcfc12db5db2e6debd5e606f17ef561
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Sat Sep 5 14:47:28 2026 +0000
+
+    feat: 编译器前端优化 A1-A5（名称哈希化/缓存前移/探测缓存/上限守卫）
+    
+    - A1 名称查表哈希化：scope/namereg/global_names 全部 256 槽链式哈希桶，
+      消除巨型函数 O(n²) 线性扫描；修复符号表未取模哈希比对恒不等导致
+      scope_find 恒 miss 的隐藏缺陷（蓄积重复声明，大文件 redefinition），
+      500 局部×5 函数规模文件从无法编译到可编译可运行
+    - A2 增量缓存判断前移至前端编译之前：命中缓存直接返回 exe，
+      二次运行 ≈1.0s → ≈8ms
+    - A4 外部探测子进程结果缓存：curl-config/python3-config/X11/Xft/
+      pkg-config 六项探测 static 一次性缓存，同进程多次编译零子进程开销
+    - A5 硬上限静默截断改显式报错（全局 8192/局部 4096/提升 4096），
+      GEN_APPEND 杜绝 args_buf size_t 下溢写栈；scope_reset 清零每层 count
+    - vus_literal 字面量池换出不释放借用，消除 static/容器持久化悬垂
+    - docs/PERFORMANCE.md 新增 A1-A5 专项记录与收益基准（A3 评估结论暂缓）
+
+commit db4248422d48ad46a71d0a6f20c3e6a650028e31
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Sat Sep 5 14:31:37 2026 +0000
+
+    feat: 工具链五项优化（import 缓存依赖/.vus 诊断/C 错误行映射/clean/语言服务补全）
+    
+    - C1: 增量编译缓存纳入 import 依赖：被导入模块(.vus/.vaz)更新即重编，消除过期产物
+    - C2: LSP .vus 语法/词法诊断进 IDE（复用 .vua publishDiagnostics 模板，行号精确提取）
+    - C3: 生成代码注入 #line 指令，GCC 编译错误直接指向 .vus 源行（generator 增 source_name 参数）
+    - C4: 新增 vus clean 清理构建产物；缓存命中时 stderr 提示（替代静默复用）
+    - C5: LSP 补齐 definition 跳转（符号表行列）、didChange 增量合并、formatting 空白归一、watch 诊断刷新；能力声明同步
+
+commit b995f8e04c371536d342f2ca793798dff117911a
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Sat Sep 5 14:01:50 2026 +0000
+
+    perf: GUI 渲染管线四项优化（字形缓存/图片解码缓存/32bpp 快路径/脏矩形增量重绘）
+    
+    - G1: FreeType 按 (码点,字号) 建 LRU 字形缓存（512 槽），避免每帧重复 FT_Load_Char 栅格化
+    - G2: PNG/SVG/GIF 解码结果按路径 LRU 缓存（16 槽），避免重复整文件重解码
+    - G3: X11 校验 32bpp+字节序后按行 memcpy 直传，异常（BPP/掩码/翻转/字节序不符）自动回退逐像素
+    - G8: 脏矩形区域跟踪 + 增量上屏：region 级双缓冲拷贝、XPutImage 局部上传、glTexSubImage2D 局部纹理更新
+
+commit fc1517af88803d7b6162153cee73139aab70de42
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Sat Sep 5 13:54:23 2026 +0000
+
+    feat: 性能优化 R1-R5（引用计数/字面量缓存/拼接链/序列化/赋值短路）
+    
+    - R1 调用点引用计数对称归还：实参配平函数入口 vus_ref、返回槽配平
+      var_set，消除函数调用路径计数虚高/动态实参泄漏
+    - R2 字面量 static 缓存：热路径一次判空替代每次 hash（+43%）
+    - R3 连续拼接链折叠：vus_string_concat_n 一次分配（+44%），f-string 链同受益
+    - R4 容器序列化缓冲化 + 字典真实序列化（修 "{}" 占位）
+    - R5 vus_var_set 同指针短路：循环内重复赋值免 ref/unref 抖动
+    - 文档：PERFORMANCE.md 2.8-2.11/3.7，STATUS.md 限制表
+
+commit 3c382b1bdc8ded1d704a0d7c0831076b394673b0
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Sat Sep 5 13:43:15 2026 +0000
+
+    perf: VUA 渲染链路五项优化（Bitmap 缓存/变量快照/骨架注入/子树复用/JNI 减负）
+    
+    - G1: VuaRenderer 本地图片按路径 LruCache 复用，不再每次全量重建都 decodeFile
+    - G2: buildInto 构建期顺带收集变量快照，去掉整树重建后的第二遍 collectVars 扫描
+    - G3: vua.c 渲染树骨架+变量占位符，界面_设置 仅单遍占位符替换，不再整树重序列化（含指纹/长度缓存联动）
+    - G4: VuaRenderer id 键控子树复用 diff：快照相同的 id 子树直接复用 View 实例（登记表差集归因并回），非文本局部变化不再 removeAllViews+整树重建
+    - G5: pageCache 上限参数化（构造器重载）；jni_bridge.c 渲染树长度走 native 缓存 + 指纹不变复用 jbyteArray 零拷贝（顺带修复 vuaTriggerById 生成产物参数名）
+
+commit 7b07624e3044da2a6e5aa42aed4acc97336dbe41
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Sat Sep 5 13:15:14 2026 +0000
+
+    feat: vus lint 独立 .vua 离线校验 + LSP 校验闭环
+    
+    - 新增 src/vua_lint.c/h：复用 rt/vua.c 严格校验（控件表 type/字段词典）+ 渲染树归一，输出渲染树指纹
+    - CLI：vus lint [--controls <控件表.json>] [--dict <词典.json>] <file.vua>...
+    - LSP：打开/编辑/保存 .vua 发布 textDocument/publishDiagnostics（source=vua-lint），关闭清空诊断
+    - 文档：VUA_REFERENCE.md 离线校验节落地；测试：lint_smoke.sh + lsp_smoke.sh 冒烟覆盖
+
+commit c7cc6f74d6283b67bdf125be8283404c8adb8eef
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Sat Sep 5 13:11:41 2026 +0000
+
+    feat: 内建异常类型系统 + 文档一致性收尾
+    
+    - 异常类型：VusError 新增 type 字段（默认"错误"），抛出 支持
+      [类型,] [消息] 三形态；捕获 经 vus_error_matches 按类型名
+      匹配（兼容旧「消息即类型」），多类型/通配/冒泡均支持
+    - 修复多捕获子句作用域错位；新增 test_exception_types.vus 7 场景
+    - 文档：修正 ! 取反误标、网络回退表述，同步异常类型说明
+
+commit a704fec16b407f53d74635f95147cf6f2c847481
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Sat Sep 5 12:46:48 2026 +0000
+
+    feat: 泛型真实实例化(单态化) + 词法/块级作用域 + 类型注解强校验
+    
+    - 泛型函数按 (函数, 类型实参列表) 单态化为独立 C 符号 vus_名_实参，
+      预发现阶段闭包收集所有实际调用实例（含泛型调泛型的类型形参映射解析、
+      递归/互递归、线程协程内嵌套），实例前向声明置于函数区前，函数体追加在
+      main 之后，调用点改指实例符号；未使用的泛型定义不发射符号。
+    - 类型注解强校验：调用泛型函数时类型实参个数与声明不符报编译错误；
+      泛型形参/体内变量注解引用未声明类型参数报编译错误（允许内建类型关键字、
+      已声明类型形参与历史别名 string/number，边界已注明）。
+    - 词法/块级作用域：区块建 scope、局部变量在首次赋值处声明、遮蔽语义
+      （取代函数顶收集式），配合参数遮蔽回归用例。
+    - 新增用例：泛型单态化/嵌套解析/递归、未使用泛型不发射、块级作用域；
+      新增错误用例：类型实参个数不符、省略类型实参、注解引用未声明类型参数。
+
+commit 5fece90bceb92b2816b714fc92baf34ebc8b03f6
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Sat Sep 5 12:47:21 2026 +0000
+
+    feat: JSON/网络回退增强 + 文档校订
+    
+    - 网络_*：无 libcurl 开发库时自动回退系统 curl 命令（GET/POST/下载/上传/请求），
+      新增 shell 单引号转义防注入；网络_请求 桌面回退应用超时参数
+    - 插件_运行JSON：无进程内 Python（或 dlopen 失败）时回退子进程并解析 JSON，不再返回 NULL；
+      插件_运行 进程内失败同样回退子进程
+    - 修复 JSON_查询 容器输入段错误（兼容 JSON_解析 结果直接查询）
+    - 修复 tests/run_tests.sh C 单测缺 yyjson 链接导致编译降级
+    - 文档：STATUS/README/PROJECT_BRIEFING 标记等待(协程句柄)已实现；
+      LSP 文本_长度 示例修正为字节长度；网络章节补回退说明并纠正下载返回约定(0/-1)
+
+commit 7637dee6b2578766bafcff1c0f8052dda4d35969
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Sat Sep 5 12:27:54 2026 +0000
+
+    feat: 真抽屉控件侧边栏（DrawerLayout 语义）落地
+    
+    控件表登记 侧边栏（字段：菜单/内容/事件/宽度/侧）；VuaRenderer 以
+    FrameLayout 手写 Drawer 容器（菜单面板+主内容+遮罩，侧边缘拖出/遮罩
+    点击收起，菜单项点击载荷与列表一致 {"下标","值"}）；vua_smoke 新增
+    侧边栏用例（控件表加载、校验、渲染树透传）；同步文档（VUA_REFERENCE
+    / VUA_RENDER_TREE / 布局模板设计文档 §4 / 教程 01 控件清单）。
+
+commit 6f2fb7c2e03026cf00ef5cf0d61c108431f0d124
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Sat Sep 5 11:59:01 2026 +0000
+
+    feat: 旧式标准库接线
+    
+    设计文档 §10.1 核心库的 27 个旧式名称（长度/拼接/分割/替换/取子串/取整/
+    取随机数/创建列表/添加元素/取元素/删除元素/列表长度/遍历列表/创建字典/
+    字典设值/字典取值/字典删除/字典长度/读取文件/写入文件/追加文件/删除文件/
+    文件是否存在/当前时间/调试输出/退出/断言）映射到文本_*/列表_*/字典_* /
+    文件_*/日期_* 现代实现；运行时新增 vus_length/vus_string_replace/vus_random_int/
+    vus_assert_fail；LSP 补全表新增旧式条目；新增回归测试 test_legacy_stdlib。
+    等待(毫秒) 为协程保留语义，睡眠请用 睡眠。
+
+commit 61a2d2cc2da6a6ac1eb21c11a1ecd59ad14d4b4c
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Sat Sep 5 11:43:52 2026 +0000
+
+    feat: LSP 补全补全 VUA 界面_* 内建（12 个）
+    
+    vus_builtin 表新增 VUS_BUILTIN_VUA 类别与全部 12 个界面_* 内建
+    （显示/显示_JSON/返回/返回至/绑定/解绑/触发/按ID触发/设置/取/
+    全局置/全局取），ACode/IDE 编辑 .vus 时可补全 VUA 驱动函数；
+    lsp_smoke.sh 增加界面_ 前缀补全断言。
+
+commit 8295a7f7c67f63d06542397563bfea278d4160ca
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Sat Sep 5 11:39:59 2026 +0000
+
+    fix: 类型注解支持类型关键字并修复顶层注解冒号未消费
+    
+    parser 三处类型注解解析统一改用 parser_try_type_annotation
+    （接受标识符或 int/float/str/bool/list/dict 及中文别名）：
+    - 函数参数：原 expect(标识符)，`计数: int = 0` 必报错；
+    - 顶层赋值：原未消费冒号就 expect(标识符)，`姓名: string = ...` 必报错；
+    - 结构体字段：原只吃标识符，类型关键字注解被静默丢弃。
+    修后 tests/test_type_annot.vus 回归通过，错误路径 9/9 不受影响。
+
+commit 654119d7faf03b84209081312e4f4e461172bdaa
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Sat Sep 5 11:33:13 2026 +0000
+
+    feat: 界面_* 接线补全（界面_触发/界面_按ID触发/界面_解绑/界面_全局置/界面_全局取）
+    
+    生成器接入 5 个 VUA 会话级内建函数（对应 vua.c 已有 native API）：
+    触发类支持可选变量 JSON（vua_dict_from_json 转 VusDict，用后 unref），
+    全局变量读写走 vus_string_intern 驻留路径；新增 tests/vua_api_ext.vus
+    桌面验证用例并接入 run_tests.sh C 单测段；同步 API_REFERENCE §13.2。
+
+commit 53b67acbde216f4b2f9507e4241f5fe9a33d1e29
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Sat Sep 5 08:39:01 2026 +0000
+
+    docs: 新增贡献者指南(CONTRIBUTING)与综合/发展两份分析报告
+
+commit 34c5a16a1d9d043f5a3f5747003e72f32991fdae
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Sat Sep 5 08:05:03 2026 +0000
+
+    install: 新增可选 Android SDK 安装（询问+多来源架构探测+按架构从 release 下载合并分卷解压）
+
+commit c6a4a4fa3c74987d94bf033c09536d83b2352605
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sat Sep 5 06:43:25 2026 +0000
+
+    docs: 新增检查更新 version.json（VersionCode 16 / v2.5，指向 dist/VUS.apk）
+
+commit 4922de30407862f501065b8013af22df6fa3d931
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sat Sep 5 06:31:25 2026 +0000
+
+    实现 vua-android 热更新测试并打包 APK 上传
+    
+    - 参照 docs.vus 在 com.vus.android 加热更测试页：更新插件(DEX 实时)/测拓展(greet)/加载SO(.so 重启生效)
+    - 新增 VUS 内置 热更_应用(url) → vus_plugin_hotupdate_apply → hotupdate.apply → UpdateManager.applyUpdate
+    - SamplePlugin v2 新增 greet；构建新版 sample.dex(v2)
+    - 一并提交多返回值/真await/闭包/复合赋值/f-string 等功能与测试
+    - 产出 dist/VUS.apk、sample.dex、vus_update_2.zip、manifest.json
+
+commit 27e186bfb14206edc92d3b829b32ed959f8d3b90
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Sat Sep 5 05:21:00 2026 +0000
+
+    [REDACTED]
+
+commit 8461d167b16f88a1b415e621bbdfce8710906a5a
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Sat Sep 5 03:33:24 2026 +0000
+
+    feat: 热更加载器落地（UpdateManager 更新协议 / 单一真源 .so 加载 / pack_update.sh 打包）
+    
+    - UpdateManager：拉 manifest（版本单调+最低宿主版本）→ 路径穿越校验 → sha256 →
+      .new+rename 原子提交 → needs_rollback 回滚；last-good 于 .so 加载验证成功后晋升
+    - VuaBridge.ensureNative 单一真源：filesDir/lib/libvus_app.so 优先，缺失回退 APK 内置
+    - extractAssets 缺失才写（内置版本 = 版本 0 的 patch），MainActivity 接启动钩子
+    - scripts/pack_update.sh 打包更新包（zip + manifest + 逐文件 sha256）
+    - 设计文档：docs/designs/2026-09-05-hotupdate-loader-design.md
+
+commit c065cb249e627c03e644bd9ae0d7f8ef09cf2d98
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Sat Sep 5 03:33:17 2026 +0000
+
+    feat: 资源能力与布局模板（图标/字体/资产全量释放 + vaz 结构占位符与侧边栏等四模板）
+    
+    - 图标控件 + 文本字体属性（.ttf/.otf），extractAssets 全量放行白名单
+    - vaz 展开器：结构占位符 splice（{菜单}/{内容} 数组整体注入）+ 模板默认参数
+    - 新增布局模板包 testdata/vaz/layout/：侧边栏/顶栏/宫格/分组列表
+    - 列表控件支持分组头（节标题字段），容器支持宽/高/权重布局参数
+    - 文档：PLUGIN_USAGE §六 结构占位符与模板清单、VUA_REFERENCE 列表节标题
+
+commit a87cc6892e4dfdb8b4ad53e9968793b8350f8e44
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Sat Sep 5 02:29:12 2026 +0000
+
+    docs: 新增页面布局模板设计（.vaz 声明式布局 + 后续抽屉控件）
+    
+    侧边栏/顶栏/宫格/分组列表布局模板走 .vaz 构建期展开（机制现成），
+    结构占位符与默认值需扩展 vaz 展开器；真抽屉交互作为渲染器控件后续单列。
+
+commit 8f256d9251357ace77f4746c9362a4f5ecdeb9fc
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Sat Sep 5 01:58:49 2026 +0000
+
+    fix+docs: 按《VUS 文档 APK》开发体验反馈修复（1.1/3.1/3.2/3.5/四.1）
+    
+    - 1.1 顶层控制流块内赋值收集为全局变量：gen_globals_walk 递归扫描顶层
+      if/elif/else/for/while/try 子块，生成全局声明并登记全局名（函数内不收集
+      为局部）；新增 tests/test_toplevel_global.vus 回归
+    - 3.1 build_apk.sh JNI 符号校验：nm 输出先落临时文件再 grep，消除
+      `nm | grep -q` 的 SIGPIPE 中断导致"缺少导出符号"误报
+    - 3.2 build_apk.sh R8 jar 探测：`r8*.jar` + maxdepth 5（覆盖 r8.jar 与
+      cmdline-tools 深层路径），避免回退崩溃的内置 d8
+    - 四.1 消除生成代码 -Wincompatible-pointer-types：vus_var_set 值参改 void*
+      （列表/字典字面量装箱 VusObject* 传参不再告警）
+    - 1.2 改进「期望 缩进」报错：注明不支持 `如果 条件: 单行语句` 写法及正确姿势
+    - 3.5 文档补 gitee raw 分支名与目标仓库默认分支一致的说明
+
+commit d7028485583cdf1962000cc858968c1850e0d432
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Sat Sep 5 01:16:46 2026 +0000
+
+    docs: 新增 .vus 组件流脚本编写分册（第 4 册）
+    
+    - 事件三要素（.vua 声明 → 界面_绑定 注册 → 定义函数）与参数来源约定
+      （列表行自动带 下标/值、回调变量=键、网页 JS 桥 JSON 键）
+    - 状态读写：界面_设置/取 + variable 通道、View diff 只更新变化控件
+    - 数据流模式：网络+JSON→界面_设置 回显、界面_显示_JSON 动态列表/分页
+    - 网页 JS→VUS 回传、换屏生命周期与重绑定清单、调试三板斧（桌面编译验语法/打印埋点/纯逻辑先行）、模式与反模式
+    - 附完整帖子列表分页示例；tutorials/README 与 TUTORIAL.md 第 0 章同步登记
+
+commit 695f873cc6b958d76d04d2938c398b64bb5cc9b8
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Sat Sep 5 01:06:28 2026 +0000
+
+    docs: 新增 tutorials/ 实战教程分册（VUA 组件流 / 网络与文件 / APK 构建）
+    
+    - docs/tutorials/README.md：分册导航 + 学习路径 + 素材对照地图
+    - 01-VUA-组件流-从零到高级.md：.vua 页面、界面_* 驱动、事件/变量链路、
+      多屏缓存、列表(LV 复用+加载更多)、网页(Markdown+JS 事件桥)、远程图片缓存、
+      课表、动态渲染树(界面_显示_JSON)、DEX 拓展；代码均对照真实实现
+    - 02-网络与文件实战.md：token 认证、超时/重试、multipart 上传、下载、
+      文件全家桶、登录→拉数据→下载→上传全流程；明确返回体解包与桌面/APK 差异
+    - 03-APK-构建与发布.md：build_apk.sh 六步全链路解读、R8/d8 差异、
+      常见故障表、日常改包流程
+    - TUTORIAL.md 目录新增第 0 章指向分册；README 文档列表挂教程目录
+
+commit f1f5786fb37d43c9b207f6714fc6984a6b759c82
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Sat Sep 5 00:57:44 2026 +0000
+
+    docs: 同步 README/API/教程等六份文档，补 网络_请求、文件_上传 与列表/网页控件能力
+    
+    - API_REFERENCE §8：新增 网络_请求（认证/超时/重试）、文件_上传（multipart）两节，
+      并注明桌面 libcurl 与 APK Java 平台桥双实现
+    - TUTORIAL 12.2：网络函数表加两行 + 带 token 认证与文件上传的完整示例
+    - LANGUAGE_REFERENCE 11.4 / ECOSYSTEM 4.2 / STATUS 插件函数表：同步两张网络函数表
+    - STATUS 组件解析流：补 列表（ListView 复用/加载更多）、网页（WebView+JS 桥）、
+      远程图异步缓存 控件能力清单
+    - README：能力总览补组件流新控件与 网络_请求/文件_上传
+
+commit b645cd3b4e24b814848885361d05b026c5e2a914
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Fri Sep 4 17:40:42 2026 +0000
+
+    feat: APK 渲染器四大增强（长列表虚拟化/富文本/远程图缓存/网络层补全）
+    
+    - VuaRenderer 列表 type 由整树 LinearLayout 改为 ListView+Adapter（convertView 复用），
+      只渲染可视区，长列表不卡；滚动到底触发「加载更多」事件（分页由 .vus 控制）
+    - 新增 网页 type（WebView）：url/html/Markdown 三种输入，
+      window.vus.onEvent/triggerById JS 桥回接 vuaTrigger（统一切主线程再进 native）
+    - ImageLoader：远程图片异步下载 + 内存 LruCache + 磁盘缓存、ImageView tag 防错位复用
+    - VuaBridge http.request（自定义头/超时/重试，认证必用）与 http.upload（手写 multipart）；
+      rt/generator/LSP 同步 网络_请求、文件_上传 内建函数（桌面回退 curl）
+    - 控件表登记 列表/网页；vua_home 新增高级演示入口 + vua_advanced.vua 示例页
+    - 构建链修复：gen_jni_bridge 模板参数名与 Java 声明对齐（event_name->eventName）、
+      d8 崩溃（缺 --lib / d8 8.2.2-dev 嵌套类 NPE，优先用 R8 jar）、vua_advanced.vua 入资产
+
+commit 5e4812c4a1ad1900f898e4918cea664d6f9390f8
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Fri Sep 4 16:59:52 2026 +0000
+
+    fix: 按《安卓计算器 APK 开发体验反馈》逐一全部修复（P1-P7）
+    
+    - P1 全局变量在事件函数内不可用：generator 收集顶层全局名，函数内不再生成同名局部遮蔽（含回归测试）
+    - P2 渲染树协议文档化：VUA_RENDER_TREE.md 增加 .vua 键↔渲染树键唯一契约对照表 + 参考渲染器说明
+    - P3 JNI 桥自动生成与符号核对：scripts/gen_jni_bridge.py 从 Java native 声明生成 jni_bridge.c（符号随包名自动对齐），build_apk.sh 构建后 nm 校验导出
+    - P4 vus build --apk 完整构建链：build_apk.sh JDK 自动探测（JDK9+ 自动 --release 8 降级）、--abi all 多 ABI 一次产出
+    - P5 native 运行时单一真源：删除 examples/vua-android/jni/ 下全部 vua/libvus_rt/yyjson/easylogger 副本（两副本已分叉），构建全部从 rt/ 编译
+    - P6 事件派发日志与参数校验：vua_trigger_event 打印事件名+参数；collect 键与形参不匹配打 stderr 告警
+    - P7 字符串标准库增强：文本_分割 直接返回列表 + 新增 文本_行（旧写法 JSON_解析(文本_分割()) 幂等兼容）；字符串+字符串 编译期警告提示用 ..
+    - 测试：vua_smoke / driver_vua_global 接入 run_tests.sh（修预热 exit 早退）；全量 60/71 通过（11 个 GUI 用例需显示环境）
+
+commit 2af52ccf776c3e3ec21e8a89a70ebbec58008e6e
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Fri Sep 4 16:21:08 2026 +0000
+
+    docs: 归档安卓计算器 APK 实战体验两份文档（特点与优点 + 开发体验反馈）
+    
+    - VUS特点与优点：差异化定位（中文语法/编译到 C/JSON 全栈统一）、VUA 声明式 UI、指纹增量协议、平台桥、381K 双 ABI
+    - VUS开发体验反馈：7 条优先级改进建议（全局变量/字符串库/事件校验/渲染树契约/JNI 生成/构建链/单一真源）+ 踩坑时间线
+    - README 文档索引新增两篇
+
+commit 8d31003c2efba2847e714d34ee799c69606b2a86
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Fri Sep 4 15:46:36 2026 +0000
+
+    fix: vux install 从官方插件包仓库安装（修默认仓库 URL + 中文路径编码 + 限流重试）
+    
+    - 默认仓库指向 official-vus.vux-package（原 vus-plugins 已失效）
+    - 通过 packages.json 索引解析 <repo>/<name>.vux 目录结构（兼容旧平铺结构）
+    - 中文包名路径做百分号编码：经代理下载时 urllib 需纯 ASCII URL
+    - 索引/下载失败打印原因并重试，规避 gitee 间歇 429 限流
+    - 实测：示例/易语言/meilisearch/meilisearch_localdeployment 四包安装并运行成功
+
+commit 368c329dbe08dc397c93211e5a1b70a8e277fc47
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Fri Sep 4 15:12:37 2026 +0000
+
+    release: VUS v3.0.20260904150204 首个正式版上线
+    
+    - 版本号全网统一为 v3.0.20260904150204（Makefile/main.c/install.sh/README/build_release.sh）
+    - 全部文档新增头部：文档版本 v1.0_apk（APK 功能时代）+ 最后更新时间
+    - build_release.sh 新增 x86 32 位(i686) 目标；交叉编译一律纯运行时，修复 arm32 GuiLite time_t 位宽编译失败
+    - 新增 docs/PERFORMANCE.md、docs/PLUGIN_USAGE.md，补入插件实时调用测试
+
+commit 6c21f2d0c5c3099a55a63bd80d3ec7819ed45f17
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Fri Sep 4 14:15:01 2026 +0000
+
+    fix: 插件系统三处致命缺陷（vus.json 死循环/vusx 空函数名/重复 main）
+    
+    - config.c: 修复 vus_config_load 解析多字段 vus.json 时 json_skip_value
+      无法推进导致的死循环（任何带 vus.json 的项目 build/run 将挂死）
+    - vus_vusx.c: 修复 vusx 插件编译过早 free(source) 导致标识符 Token
+      悬垂、导出函数解析为空名（生成 vus_()）的问题，源延后至 AST 生成
+    - generator.c/config.h: 新增 omit_main，vusx 插件库式编译不再生成
+      main 入口，消除与宿主程序 multiple definition of 'main' 冲突；
+      同时扩大 GCC 错误缓冲避免链接错误信息被截断
+
+commit 6a9d559a1a63cc69d0f7aa8a54c0e9cf7736bc72
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Fri Sep 4 13:34:44 2026 +0000
+
+    perf: 整数常量池化 + 单块字符串分配 + 循环模板收敛
+    
+    - 生成代码：整数字面量/常量折叠结果归一化后进字面量池（vus_literal），
+      免除每步 vus_to_string 的运行时分配；return/函数尾部返回统一走
+      vus_var_set 单行模板；for_range/for_each 循环值只构造一次不再泄漏
+    - 运行时：VusString 头+负载单块 malloc（省一次分配，三端同步）；
+      vus_to_string 整数值 128 槽驻留缓存（计数器/索引命中免分配）；
+      throw 对池字面量不再误 unref
+    - 效果：big.vus 生成 C 1.49MB→1.15MB，exe 编译 11.1s→10.2s，
+      热循环 1.67s→0.88s
+
+commit d2eeefe62798ce3b970a24bc50f04c8a03a24dee
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Fri Sep 4 12:56:14 2026 +0000
+
+    perf: 转文本转发 + 列表/字典装箱 helper + concat 免二重复制
+    
+    生成器（src/generator.c）：
+    - 转文本(x)：直接转发入参表达式（VusString 不可变，共享实例与副本
+      等价），省去 vus_string_new(vus_string_cstr(x)) 整串复制
+    - 列表/字典字面量：装箱（VusObject 分配+magic+type）收敛为
+      vus_object_list()/vus_object_dict() 一行，减少多行内联
+    
+    运行时（rt/libvus_rt.c/h）：
+    - vus_object_list/vus_object_dict：字面量装箱 helper（ref 初始 0，与
+      旧内联模板完全等价）
+    - vus_string_concat：直接写入新串 data，免中间缓冲 + 二次复制
+    - vus_to_string：snprintf 返回值作长度，免二次 strlen 扫描
+    
+    基准（210KB/1000 函数，累计）：生成 C 2.10→1.71MB(-18%)，
+    exe 编译 14.3→10.1s(-29%)，exe 1.90→1.70MB(-11%)；tests 57 绿不变。
+
+commit ad3772ca8d4b02b8b3b70e2bfc06a0547bf1850f
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Fri Sep 4 12:50:21 2026 +0000
+
+    perf: VUS 编译器/生成代码/运行时加速
+    
+    编译器生成路径（src/generator.c）：
+    - if/elif/while 条件布尔化：比较/逻辑/取反直接编译成 C 布尔，
+      替代「转 "true"/"false" 字符串再 strcmp」三层包装
+    - 整数常量折叠：纯整数字面量子树（1*3+7 等）编译期算结果；
+      单常量算术（x%11 等）常量侧用裸数字，省 vus_to_string(int)
+      字符串往返
+    - 字符串/布尔/浮点字面量生成改 vus_literal 常驻池引用
+    
+    运行时（rt/libvus_rt.c/h）：
+    - vus_literal 字符串常量池：同内容字面量返回同一常驻实例，
+      高频路径免每次 malloc+复制（VusString 不可变，安全）
+    - vus_add 首字符短路：两参都非数字起始直接拼接，省两次 strtoll
+    
+    基准（210KB/1000 函数）：生成 C 2.10MB→1.85MB(-12%)，
+    exe 编译 14.3s→11.1s(-22%)，exe 1.90MB→1.74MB(-8%)；
+    tests 68 例 57 绿不变（11 例 GUI 需显示环境）。
+
+commit e80522290ddcdf3f4884326b405ddef39978a070
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Fri Sep 4 12:30:42 2026 +0000
+
+    fix: 2.5 空屏根治 + View diff/byte[] 渲染加速
+    
+    - vua_validate 放宽：未知控件类型/字段降级为占位透传，不再整屏加载失败白屏
+      （.vaz 模板漏展开等场景之前直接把 界面_显示 打回 → 无屏空页面）
+    - 渲染树以 byte[] 传输，省 NewStringUTF 全量校验/UTF-16 转换
+    - vuaScreenId 屏序号 + 变量文本 View diff 增量更新（同屏不重建整树）
+    - 字符串驻留（界面_设置/取 cstr 高频键）+ vus_compare 相等短路
+    - AES 版本 2.5 (versionCode 16)
+
+commit 225032a1c2353d99405fd253cf828d4cc91b90e9
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Fri Sep 4 12:08:25 2026 +0000
+
+    fix: 2.3 空屏 - 渲染树指纹符号位误判无屏
+    
+    vuaRenderHash 把 FNV-1a 64 值直接转有符号 jlong：高位为 1 时变成负数，
+    Java 端把"负数=无屏"误判，页面全被当成空界面。屏蔽符号位（&0x7FF...）
+    后返回非负指纹；无屏仍返回 -1。版本升 2.4 (versionCode 15)。
+
+commit a221b9cc36f41a61d743be17b25fb7dca5add455
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Fri Sep 4 12:03:32 2026 +0000
+
+    perf: 版本号协议 - Java 只凭渲染树指纹决定动作
+    
+    - native: 渲染树缓存顺带算 64 位 FNV-1a 指纹，新增 vuaRenderHash JNI/内建
+    - Java: render() 改吃指纹——指纹未变零动作；页面 View 缓存命中直接显缓存，
+      连渲染树 JSON 都不用传（跨屏实例复用同指纹）
+    - 版本升 2.3 (versionCode 14)
+
+commit 56f6bb8e1cd4881f9e62a7cf86502ba0ef711daa
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Fri Sep 4 11:58:10 2026 +0000
+
+    perf: 页面 View 缓存（LRU）- 再次进入同页免解析免重建
+    
+    渲染树 JSON 作 key：内容相同（重新进入同页且状态未变）时直接把缓存
+    View 子树挂回 root，跳过 JSONObject 解析与整树 buildInto；输入控件
+    引用随缓存快照恢复。最多 6 页 LRU 逐出。
+    版本升 2.2 (versionCode 13)
+
+commit c8f76dcab1a1749291396f5b4e1f01b4e6a82794
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Fri Sep 4 11:51:15 2026 +0000
+
+    perf: 渲染树缓存 - 无变化渲染零开销
+    
+    - native: vua_screen_dump_rendertree 缓存序列化结果，state 未变直接复用，
+      所有权归 screen（vua_state_set 置脏、vua_screen_free 释放）；JNI 不再 free
+    - Java: VuaRenderer 渲染内容与上次相同则跳过全量重建（省 JSON 解析+View 构建）
+    - 版本升 2.1 (versionCode 12)
+
+commit fc76b66e927e51c19588d3a8fd0e4d8f968edab1
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Fri Sep 4 11:45:18 2026 +0000
+
+    perf: VUA 运行时加速 - 渲染合并 + 数值解析短路
+    
+    - 渲染请求合并：native 换屏回调与按钮本地 refresh 合并为一次全量重建，
+      消除一次点击两次重建（先排队再立即刷新）
+    - vus_to_int/vus_to_float 快速路径：非数字起始字符串直接跳过 strtoll/strtod
+    - 版本升 2.0 (versionCode 11)；桌面比较/转换语义用例全部通过
+
+commit a0668b37367ff88583d57f709103cab76454f401
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Fri Sep 4 11:33:24 2026 +0000
+
+    fix: DEX 拓展调用崩溃 - vus_compare/vus_to_int 野指针解引用
+    
+    JSON_查询 返回 VusObject（结构化对象），直接参与 == 比较/转数字时被当
+    VusString 解引用导致 SIGSEGV。修复：
+    - vus_value_unwrap：比较/转数字前自动解包结构值（标量取文本、容器转 JSON）
+    - vua_test.vus 按设计规范改用 对象文本() 包裹 JSON_查询 结果
+    版本升 1.9 (versionCode 10)
+
+commit 7d80d7dbc4f56d32db5602f6d0adf05147644b72
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Fri Sep 4 11:28:17 2026 +0000
+
+    feat: DEX 逻辑拓展 - 拓展_调用 内建 + ExtensionLoader 热加载
+    
+    - VusExtension 契约 + ExtensionLoader（DexClassLoader 单例复用、SHA-256 校验、dex 变更自动重建）
+    - callJava 新增 ext.* 分发；VUS 新增 拓展_调用 内建（仅 APK，桌面返回空串）
+    - 示例 sample 插件（sum/factorial/upper/echo）打包 sample.dex 入 APK assets
+    - assets 释放改递归（支持 plugins/ 子目录）；逻辑页新增拓展演示
+    - 版本升 1.8 (versionCode 9)
+
+commit bcbe45429298cb1a419d534d0aef071af9bf6cd1
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Fri Sep 4 11:05:00 2026 +0000
+
+    feat: 新增「课表」控件 - TableLayout 表格渲染
+    
+    课表页从逐行拼接文本改为输出「课表」控件节点：表头(星期)/节次/课程格，支持深浅色主题。版本升到 1.7 (versionCode 8)，manifest 同步。
+
+commit 494e264ff6faf68ff6504dde90a4cbd330c57273
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Fri Sep 4 10:54:02 2026 +0000
+
+    feat: 课表测试 APK + Java 平台能力桥（网络/文件由 Java 暴露、VUS 调用）
+    
+    - Java 平台桥：libvus_rt 新增 vus_java_call RPC（vus_set_java_callback 注册），
+      网络_GET/文件_* 内建在 APK 自动走 VuaBridge.callJava（file.*/http.*），桌面回退 stdio/curl
+    - 动态渲染树：新增 界面_显示_JSON 内建（vua_show_json，JSON 字符串直接上屏），
+      事件表改会话级全局（多屏切页事件可命）
+    - 课表测试能力：首页→课表页→下载并显示：VUS 网络_GET 拉 gitee apk_class.json →
+      JSON_查询/列表_长度 解析 → 循环拼接渲染树 → 界面_显示_JSON 动态成表
+    - gitee 新增 apk_class.json（2026 秋季课表 6x5）
+    - build_apk.sh：native 编译前同步 rt→jni，资产含 vua_class.vua
+    - 重打包 VUS.apk v1.6（versionCode 7）
+
+commit e71716addaa0a259db87f96bfeefd5c7c30bb842
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Fri Sep 4 10:33:00 2026 +0000
+
+    feat: 测试APK引入 Google Material 原生 UI 主题
+    
+    - 新增 res/values/styles.xml：Theme.VUS 继承平台 Theme.Material.Light，
+      主色 colorAccent/#1565C0 + Colored 按钮样式（主色填充白字水波纹），无需第三方库。
+    - AndroidManifest application 挂载主题。
+    - VuaRenderer：页面浅灰底 + 竖容器圆角白色卡片(elevation)；
+      标题文字主题色；★ 星级幽灵按钮（透明底主色大字号）；
+      输入框圆角描边、聚焦主色高亮；按钮统一 44dp 触控高度。
+    - 重打包 VUS.apk v1.5（versionCode 6）。
+
+commit ed30c98fe8d02e6793f44efb8913c014c852c64f
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Fri Sep 4 10:27:38 2026 +0000
+
+    fix: 调整星级事件崩溃 - 闭包参数数组越界导致段错误
+    
+    崩溃根因（真机 tombstone: vus_dict_set+316, fault addr 0x8）：
+    界面_绑定 生成的闭包固定 VusString* _va[1]={NULL}，但带参与事件函数
+    从 _vus_params[1..N] 读参，数组越界访问栈垃圾指针，vus_ref(垃圾) 段错误。
+    
+    - generator.c 界面_绑定：按事件函数参数个数分配 _va[N+1]，并新增参数填充：
+      1) 事件 dict 键与参数名匹配时按值注入；
+      2) "键=值"字面量单键值对回退：参数1=键、参数2=值（星级评分场景）。
+    - rt/libvus_rt.c/h：补 vus_cli_* 命令行参数函数（自举引入，APK 链接必需）。
+    - jni/ 镜像同步主仓 rt；VUS.apk 重打包 v1.4（versionCode 5）。
+
+commit 864185786dcb9b86be118b6f1f303e062cbcdb18
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Fri Sep 4 10:14:34 2026 +0000
+
+    feat: .VAZ 扩展包合并到默认分支 - 控件模板/逻辑库依赖导入
+    
+    - 新增 src/vus_vaz.c/h：.vaz 扩展包解压、控件模板展开、逻辑库依赖导入（vus_vaz_import 支持"导入 包名"）
+    - Makefile 添加 vus_vaz 模块编译规则
+    - rt/vua.c：事件参数支持"键=值"字面量传递，vua_state_set 防御 NULL
+    - VuaRenderer：重建时保存/恢复输入控件状态，修复下拉选择复位；支持收集回调变量
+    - testdata/vaz/：通用控件包示例（星级评分/搜索栏控件 + utils.vus 逻辑库）
+
+commit 8a0946ae0bda75d0265ddeb988452e22b3f995b4
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Fri Sep 4 10:06:13 2026 +0000
+
+    fix: 测试APK v1.3 - 修复星级评分点击崩溃
+    
+    同步修复后的 arm32 APK，版本升至 versionCode 4 / 1.3
+
+commit e40f9c9edaaaa13836248f39dc102fa5550365a7
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Fri Sep 4 09:58:19 2026 +0000
+
+    fix: 测试APK回归 testdata/ 目录（与既有约定一致）
+    
+    version.json apkUrl 恢复指向 raw/master/testdata/VUS.apk，
+    同步放置修复 vus_main 符号后的 arm32 APK
+
+commit 14d6a2f32ba728210fc7be0d4857308804297d08
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Fri Sep 4 09:55:40 2026 +0000
+
+    fix: 同步修复 vus_main 符号后的 arm32 测试 APK
+
+commit 92bda727e514df19c2ec3851ba0b42c915a14c99
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Fri Sep 4 09:49:15 2026 +0000
+
+    feat: 更新远程版本清单 - 指向 arm32 测试 APK
+    
+    versionCode 3 / versionName 1.2，APK 下载路径切换为
+    examples/vua-android/dist/VUS.apk（armeabi-v7a）
+
+commit 3f57b0853af9f2feccd489798246c5777d7cd9be
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Thu Sep 3 11:03:45 2026 +0000
+
+    feat: 添加VUS自举铺垫内置函数 - 文本/列表/字典操作
+
+commit bd332c3145519cd1a5136b3e97b1563da75d5ef6
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Thu Sep 3 10:20:10 2026 +0000
+
+    fix: FileUriExposedException - Android 7+放行file:// URI安装APK
+
+commit e9dacb85fd933e423cbe3212cd7e9d77e58ea281
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Thu Sep 3 10:15:10 2026 +0000
+
+    fix: 使用Java8编译并修复UpdateChecker编译错误
+
+commit a58b0524dc0ba82203cead41d03f774ebb24c1a6
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Thu Sep 3 10:08:15 2026 +0000
+
+    feat: 检查更新功能完整实现-网络检查/下载/安装
+
+commit 9cd7981099fdd16a5a42517bcc0661f49aa9d199
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Thu Sep 3 10:07:13 2026 +0000
+
+    feat: 添加检查更新功能(UpdateChecker+version.json+网络权限)
+
+commit 32ea3b0ec60f4cd86dc014813aebe33e0253b1df
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Thu Sep 3 09:54:09 2026 +0000
+
+    feat: 添加真实图片显示，支持 ImageView 渲染 sample_logo.jpg
+
+commit 9d0ebcb1ade1d2426469cbf3d3056b3df176fb4b
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Thu Sep 3 09:35:36 2026 +0000
+
+    fix: 下拉控件缺少标签字段导致strict校验失败
+
+commit 59c174242f149d15629d90fe36b96ec2b6a19756
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Thu Sep 3 09:24:37 2026 +0000
+
+    feat: 添加滑块/下拉框/图片控件到 Android 组件流
+    
+    - VuaRenderer.java: 新增 sliderView/spinnerView/imageView 渲染
+    - vua_logic.vua: 添加滑块/下拉框/图片控件演示
+    - vua_test.vus: 清理不需要的事件处理器
+    - collectVars 支持 SeekBar/Spinner 取值
+
+commit cecd915bf17977bef8aecda2511270c84475da4d
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Thu Sep 3 09:00:14 2026 +0000
+
+    fix: 点击"打开逻辑测试"无反应 — extractAssets 漏拷 vua_logic.vua
+    
+    - 根因: MainActivity.extractAssets() 硬编码 {home,settings,controls},
+      未释放 vua_logic.vua, native 无法打开该页
+    - 改为 am.list("") 动态枚举 assets 全部 .vua/.json 释放, 后续新增页面不再漏
+    - 重建 ARM32 APK
+
+commit 95ba21209cb918ffc4f482603f6a2f2316b52413
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Thu Sep 3 08:53:17 2026 +0000
+
+    fix: APK 资产过期 — vua_home.vua 未同步新版, 主页缺"打开逻辑测试"
+    
+    - 根因: app/src/main/assets 副本停留在旧版, APK 打包到旧主页
+    - build_apk.sh: 资产以仓库 testdata/ 为单一来源, 每次构建自动同步+生成 vus_app.c
+    - 重建 ARM32 APK, 内嵌 vua_home.vua 已验证含 btn_logic 入口
+
+commit 42910068421ddd6ddd0980407ed3036778209d82
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Wed Sep 2 22:41:02 2026 +0000
+
+    feat: VUA 逻辑测试页 — 状态回填 + 界面_设置/界面_取
+    
+    - vua.c: 渲染树变量回填(文本 variable 显示状态值), 无重复键; 新增 vua_state_get_or_empty
+    - generator.c: 新增 界面_设置/界面_取 内建; 修复 转文本 误用 vus_to_string(int64) 导致指针当整数
+    - testdata: vua_logic.vua 计数演示页(加1/减1/翻倍/清零/检查奇偶), 主页加入口
+    - 重建 ARM32 APK; 主机+ASan 冒烟: 计数 0→3→6→5、奇偶 偶数 正确, 零堆错误
+
+commit e268c4a66523c49f9cb2069357b03fc0f75cdbf5
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Wed Sep 2 22:23:00 2026 +0000
+
+    fix: native 改用完整 libvus_rt 修复 APK SIGSEGV 崩溃
+    
+    - 弃用 vus_rt_shim.c(引用计数与 vua.c 不匹配导致 vus_unref double-free)
+    - 编入 rt/libvus_rt.c + vus_coro.c + easylogger(elog.c/elog_utils.c/elog_port.c)
+    - 不加 VUS_HAVE_CURL, 无 curl 依赖
+    - 主机端 + ASan 冒烟验证: 两屏导航/事件派发/会话释放无堆错误
+
+commit bd1b09dd0ff4f159c7721595b0c7fc52e6a4df81
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Wed Sep 2 13:47:27 2026 +0000
+
+    fix: APK classes.dex 移到根目录修复 INSTALL_FAILED_INVALID_APK
+    
+    - classes.dex 必须位于 APK 根目录, 否则安装报 "code is missing"
+    - aapt 打包 manifest 生成二进制 AndroidManifest.xml + resources.arsc
+    - 新增 res/values/strings.xml 使 aapt 走标准资源编译流程
+
+commit 27afbcaefc5b05ae8be80871bda50f2312356bc8
+Author: rtccn_mc <rtccn_mc@users.noreply.gitee.com>
+Date:   Wed Sep 2 13:39:51 2026 +0000
+
+    feat: 新增 VUA 组件流 Android 运行时并实编 ARM32 APK
+    
+    - rt/vua.c + vua.h: 多屏 .vua 界面运行时, 产出规范化渲染树 + 事件索引
+    - rt/vus_rt_shim.c: 精简运行时, 无 elog/curl 依赖, 可交叉编译
+    - src/generator.c / src/vus_apk.c: VUA 事件绑定与 APK 生成接口
+    - examples/vua-android/: MainActivity + VuaBridge + VuaRenderer + JNI桥 + 构建脚本
+    - testdata/: vua 两屏导航示例, 附可安装 ARM32(armeabi-v7a) 签名 APK
+    - docs: VUA_REFERENCE.md / VUA_RENDER_TREE.md
+
+commit 8df763af82e63c413d9cbf1433cbf02e764636d0
+Merge: 50a072e 9ad1b95
+Author: chinartcn <rtcn_0523@qq.com>
+Date:   Mon Aug 31 11:40:08 2026 +0800
+
+    Merge pull request #1 from chinartcn/lsp
+    
+    fix: 修复字符串比较语义错误与 0x/0b 缺数字词法错误
+
+commit 9ad1b95b91fa528c8ead04653dbc427cfac2452d
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Wed Aug 19 11:17:13 2026 +0000
+
+    fix: 修复字符串比较语义错误与 0x/0b 缺数字词法错误
+    
+    - 代码生成器比较运算符改用 vus_compare 智能比较，避免非数字字符串
+      均被转 0 导致 "abc"=="xyz" 误判为真
+    - 词法分析器对 0x/0b 前缀后无数字的情况报错
+    - 补充两个错误测试用例覆盖 0x/0b 缺数字场景
+
+commit 50a072e5725bc1b93baa8486bc52be443b53fc69
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Wed Aug 19 10:46:34 2026 +0000
+
+    fix: Brooks-Lint 魔法数字修复 + Tailtest 补充测试覆盖
+    
+    - 将 lsp.c 中 LSP CompletionItemKind/SymbolKind 硬编码值替换为命名常量
+    - 将 vus_apk.c 中 main 函数签名字符串替换为命名常量
+    - 新增 test_vus_abi / test_vus_chart / test_vus_lang / test_vus_plugin 测试
+    - 68/68 测试全部通过，健康评分 94→96
+
+commit 6d038f980ecaa56b3347b5db06518e48bd0cf0fb
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Wed Aug 19 10:37:09 2026 +0000
+
+    fix: 全面审查修复 — 测试覆盖 + 函数拆分
+    
+    测试覆盖（tailtest）：
+      - tests/test_file_io.vus: 文件_写入/读取/追加/存在/删除/列表/是目录
+        + 命令_执行 + 文本_分割 + 循环遍历
+      - tests/test_network.vus: 网络_GET/POST（httpbin.org）
+      - tests/test_tui.vus: tui_清屏/重置/设置颜色/定位/进度条
+    
+    重构（brooks-lint 健康仪表盘）：
+      - gen_expr_binary (126行 → 50行主函数 + 5个辅助函数):
+        gen_binary_concat, gen_binary_compare, gen_binary_arith,
+        gen_binary_add, gen_binary_logical — 按输出模式分组，
+        降低认知负荷（R1 Long Method）
+    
+    64/64 测试全部通过，综合健康评分 94/100
+
+commit 154f6faf768d94081fd8b6e28049d3f3038acba8
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Wed Aug 19 10:28:30 2026 +0000
+
+    docs: 完整内置函数参考 + LSP 补全表补全
+    
+    vus_builtin.h / vus_builtin.c:
+      - 新增 VUS_BUILTIN_LOG / AUDIO / TUI / NET / FILE / SHELL / PLUGIN / TERMUX 分类
+      - 补全所有缺失的 40+ 内置函数元数据：
+        日志_* / 音频_* / 传感器_读 / 时钟 / tui_* / 网络_* /
+        文件_* / 命令_执行 / 文本_分割 / 插件_* / Termux_*
+    
+    API_REFERENCE.md:
+      重写为完整的内置函数参考文档，12 大类、覆盖全部 ~80 个内置函数，
+      每个函数包含签名、说明、参数、返回值、可运行示例。
+
+commit df47a3736356d9e59ed52c877178ec1dd1dce52b
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Wed Aug 19 06:35:57 2026 +0000
+
+    fix(gen): 循环 元素 在 列表 支持 VusObject 包装的列表
+    
+    JSON_解析 返回 VusObject*（结构化容器，内包 VusList），
+    但 gen_stmt_for_each 之前直接强转为 VusList*——内存布局不同，
+    访问即 segfault。
+    修复：先 vus_is_object 判断，若是则解包 ->u.list 再迭代。
+    修复点 Files 文件管理器 -> segfault 的 bug。
+
+commit 6c1f42e60ad58dc3a025ba64527a2a7970ea6844
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Wed Aug 19 04:59:04 2026 +0000
+
+    perf(run): 为 vus run/build 增加产物编译缓存，命中时跳过编译+链接
+    
+    之前每次运行都无条件重编并链接生成的 C（Termux 低性能设备上
+    链接大静态库+X11 库尤慢）。现按源脚本与 build/libvus_rt.a 的
+    纳秒级 mtime 判断是否复用已编译可执行：
+    - 未变 → 直接运行，实测冷 1.4s 降至 0.011s（约 130x 加速）
+    - 源/运行时库任一变化 → 自动重编；强制重编可 touch 或删 构建/
+    同秒内修改脚本也能正确触发重编（st_mtim 纳秒精度）。
+
+commit 894943d404429c0c7b7e3c6cf1b7d26d3f88f670
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Wed Aug 19 04:53:59 2026 +0000
+
+    feat(build): vus run/build 支持 VUS_OPT 环境变量覆盖 C 编译优化级别
+    
+    大型生成 C（如 vus_os）在 -O2 下编译很慢，尤以低性能设备
+    （Termux 手机）为甚。新增 VUS_OPT=-O0/-O1 显式覆盖优化级别，
+    默认保持不变；实测 VUS_OPT=-O0 编译从极慢降至 ~0.3s。
+    用法：VUS_OPT=-O0 ./vus run examples/vus_os.vus
+
+commit a3997a0d3951a132248bedd275ca69c4501bb031
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Wed Aug 19 04:49:53 2026 +0000
+
+    perf(build): yyjson 编译优化级别改 -O0，大幅提速 build
+    
+    yyjson 单文件体量大，-O2 优化编译极慢；该库仅做 JSON 解析/生成，
+    改 -O0 最快编译、对运行时性能影响可忽略，需要时可再提 -O1。
+
+commit 7c4c9b977b67bf0c2c58eb9e0ab34d3e1d8a6fad
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Wed Aug 19 04:31:03 2026 +0000
+
+    fix(os): 修复图形_圆环/转文本在 clang 下的类型错误，VUS-OS 可在 Termux 编译运行
+    
+    - generator.c：图形_圆环颜色参数改为 (int)vus_to_int 传入，避免把
+      VusString* 传给 int 形参（gcc 仅警告、clang 报错）
+    - vus_os.vus：进度百分比改直接用 p .. "%"（p 本就是字符串），
+      规避 转文本(变量) 生成 vus_to_string(vus_p) 的类型炸弹
+
+commit cff6da4e4f22df87faaba85e5c89bdb84b0b3fc9
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Wed Aug 19 04:27:37 2026 +0000
+
+    feat(os): 新增 VUS-OS 桌面系统示例（加载动画/窗口管理/文件管理器/终端）
+    
+    - examples/vus_os.vus：用页面栈实现窗口管理，含加载动画、桌面、
+      文件管理器与真实 shell 终端四个页面
+    - rt/libvus_rt.c/.h：新增命令_执行(popen 捕获 shell 输出)、
+      文本_分割(拆 JSON 数组)、文件_是目录 三个内置
+    - generator.c：绑定命令_执行/文本_分割/文件_是目录 到脚本
+
+commit 52438818f2e510f78fd6bc0b79e93007ac12b062
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Wed Aug 19 04:07:20 2026 +0000
+
+    fix(xyz): Solace 波形绘制补声明缺失变量 wx
+
+commit 4d8850f661633d57a60d7ecc9bcf0f54662aa47e
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Wed Aug 19 03:24:23 2026 +0000
+
+    fix(xyz): 波形绘制 while 关键字改为『当循环』，修正语法错误
+
+commit fc4d9a6d363bc88a09d80dedbf206d47d20c0043
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Wed Aug 19 03:24:08 2026 +0000
+
+    feat(xyz): Solace 谱面加真实音乐波形可视化(30Hz 幅度包络+播放游标)
+    
+    用 ffmpeg 把 Solace.mp3 解成单声道并按 100 样本 RMS 提取 30Hz 幅度包络，
+    存 examples/solace.wave.json(8069 点)。游戏底部新增波形总览条：整曲能量
+    缩略显示 + 当前播放位置游标线，让"音乐"真正可视。降采样 40 点/帧保持流畅。
+
+commit 4e115e2208d182c4fd7081c219c67f285238c271
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Wed Aug 19 02:28:39 2026 +0000
+
+    fix(xyz): sensor_parse_line 改跨行状态机，兼容 termux-sensor 多行 values
+    
+    termux-sensor 的 values 实际是每行一个值（"values": [ 行内无数字）。
+    旧实现在含 "values" 的那一行内取三个数字，多行格式恒取不到 → 读数 0。
+    改为状态机：遇 "values" 开始收集，其后逐行取值，遇 "]" 收尾，单行/多行皆可。
+
+commit 520f508b84bfb37d30fba0be79f341e274cde160
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Tue Aug 18 16:59:25 2026 +0000
+
+    fix(xyz): 传感器读取改行累积+20ms高频采样，根治后台读不到/采样漏峰值
+    
+    根因：termux-sensor 输出为分块 JSON，原实现按 read 分片 strtok 逐行解，
+    块被 4096 边界切开时 values 行丢失 → 后台常解析失败(读数 0)；且 -d 100
+    (100ms) 采样过稀，甩动脉冲(几十 ms)常漏采，峰值不达 target。
+    
+    - read 改为累积缓冲、按完整换行行解析，不丢跨块数据。
+    - 采样延迟 100→20ms(50Hz)，提高甩动峰值的捕捉率。
+
+commit b0b3c299109122672ca51a528b294dea94fd4f49
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Tue Aug 18 16:54:42 2026 +0000
+
+    feat(xyz): 传感器首次接通打印读数 + 判定窗口 150→250ms 提升真机容错
+    
+    - 传感器解析到首帧即打印一次真实 m/s² 读数，直接判断加速度计是否接通、
+      幅值量级，避免"甩动没反应"无从排查。
+    - 判定窗口放宽到 ±250ms：150ms 对真机甩动时序过紧，大幅提升可玩性。
+
+commit b1a4dc09bf60369dde1d48f26a5380c815a2e9b4
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Tue Aug 18 16:50:30 2026 +0000
+
+    fix(xyz): 传感器告警延迟到启动 1.5s 仍无数据才提示，避免首帧误报
+    
+    此前"暂无读到数据"在首次读取瞬间即打印，实为首帧时序（子进程数据
+    尚未到管道），易被误判为传感器故障而提前 Ctrl+C。改为启动 1.5 秒后
+    仍无读数才提示一次，留出数据到位时间。
+
+commit 3a614697145424f4890948c7fbe9768646fa3481
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Tue Aug 18 16:45:56 2026 +0000
+
+    fix(xyz): 探测加速度计显示名，规避 termux-sensor 名称大小写不匹配
+    
+    部分设备上 termux-sensor 的 -s 按显示名（如大写 ACCELEROMETER）匹配，
+    程序原硬编码小写 accelerometer 会读不到数据。改为启动前跑一次
+    termux-sensor -l 探测含 accelerometer(忽略大小写) 的真实名称，
+    失败再兜底小写，确保三轴读数可用。
+
+commit 773474491e60df9866c8101efa8a6a07f2c9d9c1
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Tue Aug 18 16:43:53 2026 +0000
+
+    fix(xyz): 移除 mpv stderr 捕获管道，避免写满阻塞主循环冻住 GUI 帧
+    
+    上一提交为诊断把 mpv stderr 接到管道，但父进程只在启动时读一次，
+    mpv 运行中持续写会把管道塞满 → 阻塞 mpv 与主循环，GUI 不再刷新
+    （表现：音乐响但 X11 画面不显示）。
+    
+    - 恢复 stdout/stderr 丢弃到 /dev/null（配合 --really-quiet），
+      保留真正有效的修复：$TMPDIR socket + 3s 等待 + opensles 回退。
+
+commit a7fe1e6dcc0aabc6b86d2c4e289db22a2b25ced9
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Tue Aug 18 16:40:27 2026 +0000
+
+    fix(xyz): mpv IPC socket 挪到 $TMPDIR + 捕获 stderr 定位启动失败
+    
+    Termux 真机 /tmp 常不可访问/不可写，导致 mpv 无法创建
+    --input-ipc-server socket 而立即退出（报"未能启动 mpv"）。
+    
+    - socket 路径改为 $TMPDIR 优先、/tmp 兜底，规避 /tmp 不可写。
+    - 捕获 mpv stderr，失败时打印其输出摘要，不再静默/无从查。
+    - wait_ready 超时从 1s 放宽到 3s，适配 Android 慢冷启动。
+
+commit 16368a973d2b634100131c8ac1a17b748c7ae698
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Tue Aug 18 16:30:27 2026 +0000
+
+    fix(xyz): mpv 输出后端回退 + 音频只打开一次
+    
+    - 音频_打开：opensles 优先，mpv 未编译该 ao 导致瞬退时自动回退默认
+      输出，避免"mpv 存在却起不来"。
+    - 游戏脚本：音频从"无条件开两次"改为"主路径失败才试回退路径"，
+      修复第二次 audio_open 把已起动的 mpv 杀掉、最终无声音的问题。
+
+commit 532783650db303a8cf0d04919476f1eb24ec025a
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Tue Aug 18 16:13:40 2026 +0000
+
+    fix(xyz): Termux 真机适配——mpv 输出 + 传感器/音频可诊断
+    
+    原因：真机常表现为"无声音、读不到加速度致无法卡点"，但此前所有
+    失败都被静默降级为 0，无任何提示，难以定位。
+    
+    - 音频_打开：启动 mpv 显式 --ao=opensles（Termux/Android 标准输出，
+      避免默认静音）；文件不可读、mpv 未装/未连上时打印明确中文提示。
+    - 传感器_读：termux-sensor 命令缺失(管道EOF)或 Termux:API 未授权
+      (有进程但无数据)时各打印一次诊断，指导安装/授权。
+    - 仅当真实读到数据后才判定，否则保持 0 并给出可操作提示。
+
+commit dfd05ebf246225e8e4c6df2b64fbdd9d91eafa82
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Tue Aug 18 16:05:07 2026 +0000
+
+    feat(xyz): Solace 谱面改用真实 mp3 FFT 卡点 + 轴重标均衡
+    
+    - 用 vus chart 对 Solace.mp3 做真实 FFT 卡点，405 音符/约 4:29。
+    - 轴重标为 X/Y/Z 轮换（各 135），缓解低频偏 Z 导致的体感单调。
+    - 音频指向仓库根目录 Solace.mp3（mpv 播放）。
+
+commit b5c9e03a14b52c1b8b674181420deb28f52fcb1b
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Wed Aug 19 00:01:45 2026 +0800
+
+    Solace.mp3
+
+commit d754cb04f410f464816179c6b3f6cdd0bca9f31a
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Tue Aug 18 10:41:00 2026 +0000
+
+    feat(xyz): 新增 Solace 体感音游谱面与专用脚本
+    
+    - examples/solace.chart.json：Feint & Laura Brehm - Solace，174 BPM，
+      约 4 分 22 秒手铺谱面，574 音符，Z/X/Y 三轴与力度随段落强弱分布。
+    - examples/solace_game.vus：Solace 专用游戏脚本，加载上述谱面与
+      examples/solace.wav，供真机测试体感玩法。
+
+commit a6ff7b7a1a080bc9d2ad33c9dce14be626e96b25
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Tue Aug 18 10:38:24 2026 +0000
+
+    feat(ide): 插件扩展管理 + 命令面板 + 编辑器光标/未保存状态
+    
+    - 新增"扩展"页签与 PluginsView：内置能力启停 + 自定义扩展增删改，
+      插件状态持久化到 localStorage。
+    - 命令面板 (Ctrl+P)：模糊搜索命令与视图切换，含快捷键监听。
+    - 编辑器状态增强：光标行列实时进状态栏，未保存改动页签显示圆点。
+    - 补充插件管理/命令面板/状态栏的 industrial-mono 样式。
+
+commit 40b2694340ba83f3ee15a64e97291f5f61d70ed8
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Tue Aug 18 09:30:48 2026 +0000
+
+    feat(ide): 编排器完善 + 文档搜索/apiBase 修复 + FOUC + industrial-mono 重设计
+    
+    - 补全复合控件外观色等属性，圆形控件拖拽定位修正
+    - 新增空态引导与"示例骨架"一键载入，新手友好
+    - 修复文档搜索：C.http 改用相对路径(去双前缀)、apiBase 去尾斜杠(去双斜杠 URL)
+    - 代码页进入后主动同步避免空白时序
+    - 首帧内联主题+主/设置同步，消除刷新文字闪烁(FOUC)
+    - style.css 全量重构为 industrial-mono：页签导航+底部状态栏+暖调双主题
+
+commit 6c761474229be3b0ea98e937364ee67b4256fc12
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Tue Aug 18 07:26:11 2026 +0000
+
+    feat(ide): 将 gui-designer 升级为 VUS 初期 IDE
+    
+    - 聚焦一个 IDE，正式落实 VUS 初期 IDE 设计文档
+    - 前端多页 Vue 3（本地 vendored、离线可用），含设计器/代码/文档/设置四页
+    - 设计器保留全部控件与高级排版，控件库移动端可折叠，图标全用几何符号
+    - 代码页集成 CodeMirror：vus 语法高亮/补全 + 编译检查 + SSE 流式执行
+    - 设计↔代码双向同步（带标记注释导出 / 参数正则回解析）
+    - 文档检索视图：本地 docs_index.json 兜底，可选对接 Meilisearch
+    - 后端 Python 标准库：Token 门禁、路径越界防护、/export /api/compile /api/run /api/fs /api/search
+    - 集成测试 19 项全通过
+
+commit b5e59c16a3a50246ae5320954721094d47dd6e62
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Tue Aug 18 06:49:28 2026 +0000
+
+    docs(ide): VUS 初期 IDE 实施计划（分阶段任务+验证）
+
+commit fa88932caa199ff54df05ead8c3092c04ded0328
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Tue Aug 18 06:48:07 2026 +0000
+
+    docs(ide): VUS 初期 IDE 设计文档（gui-designer→IDE 升级）
+    
+    设计器升级为本地 Vue 多视图 IDE：保留设计器；代码编辑/编译检查/运行与 shell 执行
+    （Token 保护）；属性面板按控件类型动态 schema；控件图标禁用 emoji；本地兜底文档
+    检索 + 可选 Meilisearch；适配移动端可折叠控件库。
+
+commit 003acd0358aeb462485d75042098e7ff481d7f9f
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Tue Aug 18 05:31:45 2026 +0000
+
+    fix(compiler): 顶层「返回」在 int main 中生成 return 0，修复严格编译报错
+    
+    VUS 的「返回」语句在 main 顶层生成无返回值的 `return;`，在 clang/严格 gcc 下
+    触发 -Wreturn-mismatch。新增 main 上下文标志，main 内生成 `return 0;`，
+    函数内仍为 `return;`。
+
+commit 6c7cbf110411f00e60d2a1f0fa0aa295bed174e0
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Tue Aug 18 05:04:59 2026 +0000
+
+    feat(xyz): 实现体感音游 VUS XYZ —— 谱面生成/传感器音频内建/游戏脚本与示例
+    
+    - 新增 vus chart 子命令：FFT 分析 wav 生成 chart.json（音符含 t 毫秒/d 轴/target 毫 g）
+    - 新增 rt 内建：传感器_读、时钟、音频_打开/播放/进度等；generator 注册 对象文本 映射
+    - 新增 examples/xyz_game.vus 游戏脚本（三轴甩动判定、爆光视觉、结算），附示例音频与谱面
+    - 新增 tests/test_xyz_basic.vus、test_objtext_json.vus 验证内建链路
+
+commit 8b2044f9666fc819be2830e704082ebc5754381d
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Tue Aug 18 04:40:49 2026 +0000
+
+    docs(xyz): 体感音游 VUS XYZ 设计文档（FFT 预生成谱面 + 传感器/音频内建 + 一体化交付）
+
+commit ec19f990ecbdd09fced69da830acd7d0a037a025
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Tue Aug 18 04:39:43 2026 +0000
+
+    fix(example): gui_all_controls.vus 循环前补齐行号/点串初始化，修复编译失败
+
+commit 68fee756094057be403ccf3a9d1be195fc29208a
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Tue Aug 18 04:29:29 2026 +0000
+
+    feat(gui): 新增双缓冲刷新、全部控件综合示例与高级外观
+    
+    - 双缓冲：拆分前后台帧缓冲，vus_gui_redraw 时先 present 再上屏，消除整帧绘制中的撕裂/闪烁
+    - GIF（gifdec）与 SVG（nanosvg）解码支持，纳入 rt/ 编译
+    - 新增交互控件（滑块/开关/微调/单选）与高级外观（圆角矩形/填充圆/圆弧）
+    - examples/gui_all_controls.vus：覆盖全部控件与高级外观的综合示例
+    - examples/gui-designer：HTML 可视化排版设计器，设计完成后导出 .vus
+    - 增加 GUI 相关运行产物/日志过滤
+
+commit 9ae07f8377c3850e968fb956d5193a3d8a819ced
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Tue Aug 18 01:13:08 2026 +0000
+
+    refactor(acode): 插件改为纯浏览器 CodeMirror 本地补全，移除 LSP 二进制
+    
+    参考 ACode Prettier 插件架构，放弃 LSP/二进制/AXS，改为纯浏览器 JS +
+    @codemirror/autocomplete 本地补全。经 editorLanguages.register 语言工厂注入
+    cm6 autocompletion 扩展，规避 LSP 服务器在 AXS 中启动失败的整类问题。
+    
+    - 新增 webpack 工程（package.json / webpack.config.js），入口 src/main.js → dist/main.js
+    - src/vusBuiltins.js 由 src/lsp/vus_builtin.c 重新生成，修复中文乱码，覆盖 69 个函数
+    - 支持中文函数名补全（CJK 纳入标识符字符集）
+    - plugin.json 入口指向 dist/main.js，移除 bin 与 files，minVersionCode 下调为 1000
+    - 代码经 Brooks-Lint 评审并清理死代码
+
+commit 0e2eadbde4873482f6e288010ccee790ae815de6
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Tue Aug 18 00:45:16 2026 +0000
+
+    fix(acode): 改用官方 switch-file 事件并在注册成功后 restartLsp
+    
+    - editorManager 监听 activeFileChange → switch-file（事件名错误导致就绪前注册失败不重试）
+    - 注册成功后调用 editorManager.restartLsp()，让已打开的 .vus 立即连上服务器
+    - changelogs 增加 v0.1.3
+
+commit 814f6280ff5793df479bba5caeec3712ae4e910b
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Mon Aug 17 18:44:49 2026 +0000
+
+    feat(acode): 插件加入运行时 Toast 自诊断，便于真机定位 LSP 断点
+    
+    注册成功/失败以 Toast 输出二进制路径与错误，区分语言路由与二进制启动环节。
+
+commit 4283403e566f0920d9b5905a45990dcb4ac2244f
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Mon Aug 17 18:36:44 2026 +0000
+
+    feat(acode): LSP 插件补齐 icon/changelogs，重构并提升可观测性
+    
+    - plugin.json 增加 icon 字段（VUS logo）
+    - 新增 changelogs.md（官方插件结构要求）
+    - main.js 重构：拆分 registerVusLanguage/registerVusServer，常量收敛，空 catch 补日志
+    - 记录 brooks-lint 审查历史
+    
+    构建产物（bin 二进制、zip）不入库，按 .gitignore 忽略。
+
+commit 846ee42839828155fe05ac6175be1af4fa93ae02
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Mon Aug 17 18:08:26 2026 +0000
+
+    feat(acode): LSP 插件改用官方 defineServer API，二进制随插件打包
+    
+    - 改用 acode.setPluginInit 官方入口，defineServer + upsert 注册 vus lsp
+    - editorLanguages.register 把 .vus 映射为 languageId "vus"
+    - detectAbi 识别 arm64-v8a/armeabi-v7a，locateBinary 按 baseUrl/bin/<abi>/vus 定位并修复回退逻辑
+    - plugin.json 增加 files 声明 bin 二进制、minVersionCode=1002
+    - README 更新为官方 LSP 方案与打包安装说明
+    
+    构建产物（bin 二进制、zip）不入库，按 .gitignore 忽略。
+
+commit 2ffd192dbccd0b1aa863de425d9e597b303c5b96
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Mon Aug 17 17:26:33 2026 +0000
+
+    feat(acode): 插件 init 增加文件系统标记探针用于硬判定执行
+
+commit e54c7c9e2e09b8ddfac34ebc69db106affdc4d2c
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Mon Aug 17 17:20:27 2026 +0000
+
+    feat(acode): 插件增加 toast 屏幕探针确认 init 是否执行
+
+commit 1936d2276fcc83d77697b5f7e1ab477622c4ded4
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Mon Aug 17 17:17:18 2026 +0000
+
+    feat(acode): 插件 init 增加 wslsp 连接探针用于诊断插件是否执行
+
+commit 45a669258dd03437484abc24442981a21de5edcc
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Mon Aug 17 17:10:17 2026 +0000
+
+    acode插件: 补充 README, 消除点开插件提示无说明文档
+
+commit fbd9d4c1371b5a81a7a8ba00a46c5a2b80505591
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Mon Aug 17 16:45:57 2026 +0000
+
+    acode插件: 所有 acode.require 懒加载+try 保护, 升级日志可观测
+    
+    此前模块顶层直接 acode.require("lsp"/"editorLanguages"), 任一 API 在
+    当前 ACode 版本缺失即整个插件加载失败, init() 永不执行——正是"语言不
+    识别+服务器从不启动"的隐藏根因。改为函数内 try 加载, 并新增"插件正在
+    初始化"banner 与各注册分支日志, 保证 JS console 可一锤定音判断插件
+    是否加载与走到哪一步。
+
+commit 4403fc0cb5176fa2f32e8751aa6f60c6caf65696
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Mon Aug 17 16:40:11 2026 +0000
+
+    acode插件: 注册语言后显式 setMode("vus") 兜底
+    
+    LSP 客户端按文件 languageId 路由服务器；register() 仅让 .vus 语言可用，
+    CodeMirror 不保证自动应用该模式。补上 applyVusModeToActiveFile():
+    注册后立即对活动 .vus 调 setMode("vus")，并订阅文件切换兜底，
+    确保 languageId 稳定为 vus，服务器才会被 AXS 启动、补全才能弹出。
+
+commit 17aeb7af0deb61506769b7007d133024a69c88ec
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Mon Aug 17 16:21:37 2026 +0000
+
+    ACODE_LSP.md: 补充语言识别的权威判据(桥终端 New connection)
+    
+    ACode 界面通常不显示当前文件语言名，容易误判。明确以 wslsp 桥终端的
+    "New connection / Starting ... vus lsp" 作为补全是否被触发的唯一判据，
+    并说明仅见 running 时多因语言未识别成 vus。
+
+commit 7d441e121623af098c651f8508552f48ce21df09
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Mon Aug 17 15:47:02 2026 +0000
+
+    ACode 插件: 支持直连 ws-lsp-bridge 的 WebSocket 地址
+    
+    在通过 acode-lsp-client + ws-lsp-bridge 桥接的环境中，ACode 不会自动
+    拉起本地 stdio 服务器。现插件新增 VUS_BRIDGE_URL 配置：填了就以
+    transport.kind=websocket 直连桥(由桥按 args=vus,lsp 拉起 vus lsp)，
+    留空则仍走 ACode 内置 AXS 自动拉起。文档新增第7节说明桥接用法与
+    VUS 的 server 配置样例(socketUrl/modes/socketUrl)。
+
+commit fc386ee9a618bc7ccd86d3622507ba788295b6f0
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Mon Aug 17 15:28:50 2026 +0000
+
+    ACode 插件: 兼容新旧内置 LSP API(defineServer / registerServer+AXS bridge)
+    
+    避免部分 ACode 版本未实现 defineServer 时注册静默失败；新 API 走
+    defineServer(自动 AXS 桥接)，老 API 手动声明 transport=websocket +
+    launcher.bridge.kind=axs + command/args，均可拉起 vus lsp。
+
+commit dbee2313a65156c542d67d16e5b5439f7ac3bd18
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Mon Aug 17 14:59:31 2026 +0000
+
+    ACode 插件: 注册 .vus 语言模式，补全才能真正弹出
+    
+    之前插件只注册 LSP 服务器，若在 ACode 中 .vus 未被识别为 vus
+    languageId，LSP 按语言路由不会启动，补全无法弹出。现插件 init()
+    先调用 editorLanguages.register("vus",["vus"],...) 把 .vus 关联到
+    vus 语言(含旧版 aceModes 兼容)，再注册服务器。同步更新文档。
+
+commit 8c566e6630b4139efe9f5f3740df6590391e1160
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Mon Aug 17 14:34:34 2026 +0000
+
+    install.sh: 无图形库时仅构建编译器+LSP，跳过 GUI 运行时
+    
+    ACode/Alpine 等无 libpng/freetype/X11 的系统上，默认 make 会在
+    rt/guilite_bridge.c 因缺 png.h 编译失败。现改为：检测到 libpng 才
+    make all(含 GUI)，否则仅 make vus(编译器+LSP)，不再强依赖图形库。
+
+commit 91b72e6c25b48cdcc9a0c9e3418c8075fdbf57ca
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Mon Aug 17 14:26:35 2026 +0000
+
+    install.sh: 自动检测系统并补齐缺失编译依赖
+    
+    - 读取 /etc/os-release 识别发行版(Alpine/Debian/RHEL/Arch/openSUSE)
+    - 检测 git/gcc/make，并检测 C 头文件(stdio.h)缺失
+    - 缺失时提示是否自动安装对应依赖组(apk/apt/dnf/pacman/zypper)
+    - 支持 VUS_AUTO_INSTALL=1 无人值守，非交互环境给出手动命令
+
+commit 6f14ab4d2e386e5c51a96e092cb4517d79b7a5f0
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Mon Aug 17 14:08:47 2026 +0000
+
+    LSP 文档缓冲/符号收集 + ACode 接入(插件/交叉编译/文档)
+    
+    - LSP: 新增 didOpen/didChange 文档缓冲与基于词法分析的符号收集,
+      新增 documentSymbol, 提升补全准确性
+    - 测试: tests/lsp_advance.sh 文档缓冲 + documentSymbol 自测
+    - ACode: examples/acode-vus-lsp-plugin 插件注册 VUS 语言服务器
+    - 交叉编译: scripts/build_lsp_android.sh 产出 arm64-v8a/armeabi-v7a
+    - 文档: docs/ACODE_LSP.md ACode 使用说明(ARM64/ARM32)
+
+commit 0d85ccd0993f31404747123e6e1bb77d0e9e850e
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Mon Aug 17 13:43:10 2026 +0000
+
+    新增 LSP 语言服务器: 三层补全机制
+    
+    - vus lsp 子命令: 基于 stdin/stdout 的 JSON-RPC(Content-Length 分帧)
+    - 普通补全(图形_): 按前缀列出内置/已定义符号, insertText 去前缀就地补全
+    - 详细补全(.:图形_xxx): detail=完整签名 + documentation=说明与示例
+    - 命令执行(..:执行 X): 命令补全 + workspace/executeCommand(开始/结束/设置/索引/帮助)
+    - vus_builtin 内置函数权威元数据表(60+ 函数含签名/说明/示例)
+    - 全量回归 56/56 通过
+
+commit 3600d274047a9de99b31e0cd7428331eb6f10180
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Mon Aug 17 13:09:39 2026 +0000
+
+    GUI 多页导航 + import 源码展开 + 转数字缺陷修复
+    
+    - 页面栈导航: 图形_页面_打开/返回/当前/绘制, 约定式页函数 页_<名>() 经 dlsym 反查
+    - import 源码展开: 编译期递归替换 导入 X / 从 X 导入 为 X.vus 源码, 使外部
+      模块函数随主程序编译, vus_source_expand_imports 供 run/build 多流水线共用
+    - 修复 转数字 表达式被当 VusString* 引用导致的段错误, 全语境类型一致
+    - 配套测试与设计文档, 全量回归 56/56 通过
+
+commit 42664b89bf9a55b206d0aa40a258b555828fd3a7
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Mon Aug 17 10:53:44 2026 +0000
+
+    docs: 图形_MD/画线增强/滚动容器 设计文档
+    
+    本批新增三块单页绘制能力：图形_MD 最小集 Markdown 渲染、
+    图形_画线 增强（线宽/虚线/箭头，兼容旧 5 参）、滚动容器
+    （内容平移+裁剪）。多页导航拆分至下一批。
+
+commit d9d92ba7baca10a4495c41834b0d076c460ecbc0
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Mon Aug 17 07:52:22 2026 +0000
+
+    集成 EGL+OpenGL ES 底层 GPU 上屏(GLES)后端
+    
+    - 新增 rt/guilite_gles.c/.h:EGL 初始化 → GLES 上下文(ES3,先3.2再3.0),
+      把 GuiLite ARGB8888 帧缓冲作为 BGRA 纹理整帧上传,全屏三角形绘制;
+      内存序(BGR→RGB)与翻转(VUS_X11_FLIP)均由着色器/纹理坐标完成,
+      替代逐像素 XPutImage 的 CPU 上传
+    - guilite_platform.c:init 阶段尝试初始化 GLES,成功则 redraw 走纹理上屏
+      (文字仍 Xft 上层叠加);EGL 任一步失败自动回退原 XImage 软路径
+    - Makefile:可选 make VUS_GUI_GLES=1(链接 -lEGL -lGLESv2,gles.o 并入 libvus_rt.a)
+    - generator.c:运行时设 VUS_GUI_GLES 时用户程序链接追加 -lEGL -lGLESv2
+    
+    启用: make VUS_GUI_GLES=1 && VUS_GUI_GLES=1 ./vus run <gui脚本>
+
+commit 21b665483d0851ed47e9484cfacbb7d2db3d91c7
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Mon Aug 17 07:25:39 2026 +0000
+
+    新增多页面控件库应用示例(tab 切换 + 全部控件)
+    
+    - examples/gui_app_demo.vus:360x280 应用,顶部 主页/功能/关于 按钮切换页面,
+      每帧清屏重绘当前页,覆盖按钮/复选框/进度条/列表/画布/文本框/标签,
+      含进度步进、音量增减、列表行跳页、画布取相对坐标等真实点击交互
+    - examples/gui_app_preview.png:headless 渲染导出的主页静态预览帧
+
+commit 616cac7334b03faaf8d4c022744a671eaba49fe1
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Mon Aug 17 06:20:25 2026 +0000
+
+    新增控件库总览演示脚本与预览图
+    
+    - examples/gui_controls_demo.vus:一张界面展示全部控件(标签/文本框/复选框/进度条/按钮/列表/画布),并带轮询交互(点击列表/复选框/画布/按钮打印事件)
+    - examples/gui_controls_preview.png:headless 渲染导出的静态预览帧
+
+commit 60604af9aeb3b719fc301b1876faf2a253446568
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Mon Aug 17 05:40:24 2026 +0000
+
+    GUI 控件库:标签/文本框/复选框/进度条/列表/画布
+    
+    - 控件表从按钮表泛化为统一控件表,共享命中检测
+    - 新增 图形_标签/图形_文本框/图形_复选框/图形_进度
+    - 新增 图形_列表/图形_列表行/图形_列表选中/图形_列表行点击
+    - 新增 图形_画布/图形_画布命中/图形_画布点(相对坐标)
+    - 修 textbox 内建生成缓冲过小导致的表达式截断
+    - 新增 tests/test_gui_ctrl.vus 端到端测试(模拟点击全链路)
+
+commit 442542d7503a8da49900248cc1662d78caad07c2
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Mon Aug 17 05:23:28 2026 +0000
+
+    JSON 改用 yyjson 纯 C 库实现,新增 JSON_查询 与字典键遍历
+    
+    - 引入 rt/yyjson 单文件库(纯 C,MIT),弃用 Python 依赖
+    - JSON_解析/JSON_生成 重写为 yyjson 实现,新增 JSON_查询(点号/下标路径)
+    - 新增 字典_键 内建函数:提取字典键集合供 foreach 遍历
+    - libvus_rt.a 静态库并入 yyjson.o,用户代码仅需链接预编译库
+    - 新增 tests/test_json_dict.vus 端到端测试
+
+commit 9246a517c40189ad566f7389be5987fea2bb166e
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Mon Aug 17 04:43:38 2026 +0000
+
+    GUI 文字改成按帧快照，修复动画循环文字无限累积
+    
+    图形_按钮/图形_文字 每次调用都把文字入队 s_texts，redraw 重放所有条目，
+    但列表从不清理——演示循环每帧重画按钮和文字，导致各帧文字不断叠加
+    （重叠闪烁/模糊行/缺失字形黑块的根因）。
+    
+    - vus_gui_platform_redraw：重放完本帧文字后立即清空列表并释放 strdup
+      内存，s_text_cnt 归零；下一帧从空表重新入队，Expose 重绘同理只放当前帧。
+
+commit 93cfb7c5320922d306777d826a4ff38c5b74ee0d
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Mon Aug 17 04:38:21 2026 +0000
+
+    GUI 字体:显式 CJK 字体候选,替代纯 sans 族名
+    
+    XftFontOpenName("sans") 默认命中 DejaVu Sans(无中文字形),且 Xft 单字体
+    不做跨文件字形回退,导致中文显示为方块即使系统中已装 CJK 字体。
+    
+    - 加载时按候选队列逐个尝试,优先显式 CJK 字体族
+      (Noto Sans CJK SC / CJK / SC / WenQuanYi 等),以含中文字形(U+4E2D)为准;
+      sans/monospace 仅作 ASCII 兜底,避免命中缺字形的 DejaVu Sans。
+    - 新增 s_fallback_font 保存首个可加载的兜底字体,cleanup 时一并释放。
+
+commit 1a5393914c39c9d783d0684db73c0820df69bcd3
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Mon Aug 17 04:27:30 2026 +0000
+
+    GUI 中文支持：用 Xft 按 UTF-8 渲染文本，替代 X 核心字体
+    
+    X11 核心字体（fixed/6x13）只含 ASCII，不含中文字形，导致中文乱码。
+    
+    - rt/guilite_platform.c: init 优先 XftDraw + XftFontOpenName("sans")，
+      用 XftDrawStringUtf8 按 UTF-8 叠加文本（FontConfig 自动回退系统中文字体）；
+      缺中文字形时输出诊断提示；不可用时回退 XDrawString（ASCII only）。
+    - src/generator.c: 检测 Xft 头，存在时链接 -lXft -lfontconfig；
+      用 pkg-config --cflags freetype2 注入 FreeType 头路径（Termux 路径不同）。
+    - Makefile: guilite_platform.o 编译时追加 freetype2 头路径。
+    
+    诊断：启动时打印字体尺寸/字号/是否含中文字形，缺 CJK 字体时给安装命令。
+
+commit 7274bb25d1d4bd23be46b3629cb53ca4f59f091c
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Mon Aug 17 04:14:35 2026 +0000
+
+    实现 睡眠 内建函数，修复链接失败
+    
+    - rt/libvus_rt.c: 新增 vus_thread_sleep(VusString* ms)，基于 usleep 分组休眠，避免大值溢出
+    - rt/libvus_rt.h: 声明 vus_thread_sleep
+    - 更新 README/STATUS/TUTORIAL/LANGUAGE_REFERENCE/PROJECT_BRIEFING/ECOSYSTEM/ARCHITECTURE/设计文档 中"睡眠未实现"的过时标注
+    - tests/test_sleep.vus: 睡眠链接运行用例
+    - examples/guilite_click_demo.vus: X11 按钮点击演示（轮询+自然语言条件）
+
+commit cc84109789df40f59cc94dfda28cd391c344c3e7
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Mon Aug 17 04:07:23 2026 +0000
+
+    X11按钮点击演示脚本：轮询交互+自然语言条件
+    
+    - examples/guilite_click_demo.vus 供实机手动点击验证
+    - 当循环+图形_取事件轮询，图形_模拟点击已含命中分支
+    - 按钮被点击(名) 自然语言条件点击判定
+
+commit e7a81b18270bc6a4195a7430cd19c06693ba58c1
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Mon Aug 17 04:05:00 2026 +0000
+
+    docs: 全面更新至 v1.0-beta 并新增语言/API/架构参考
+    
+    - 新增 docs/LANGUAGE_REFERENCE.md(语言参考)、docs/API_REFERENCE.md(API参考)、
+      docs/ARCHITECTURE.md(架构与实现)、docs/PROJECT_BRIEFING.md(项目简报)
+    - 更新 README/ECOSYSTEM/STATUS/TUTORIAL/COMPILER_GUIDELINES/设计文档，
+      对齐当前源码(v1.0-beta)：泛型/结构体/多线程/协程/APK/插件运行时函数
+    - 如实标注未实现项：睡眠()链接失败、异步等待、旧式标准库、GUI(开发中)
+
+commit 13b5a3496f183d7fad7803a3552646a47e8c76d9
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sun Aug 16 16:47:08 2026 +0000
+
+    图形控件：按钮/轮询点击与自然语言条件
+    
+    - 图形_按钮(名,x,y,宽,高,文本)：创建并绘制按钮，登记命中矩形
+    - 图形_取事件()：非阻塞轮询 X 事件队列，记录点击坐标
+    - 图形_按钮点击(名)：命中检测返回 true/false，可直接作如果条件
+    - 按钮被点击(名)：自然语言别名，支持「如果 按钮被点击(名)」
+    - 图形_模拟点击(x,y)：headless 注入点击供自动化测试
+    - 回归验证既有测试全部通过
+
+commit aacb9834102f91d09b8ec4fdeacfe769b5588e93
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sun Aug 16 15:47:46 2026 +0000
+
+    文字默认用X11字体XDrawString，GuiLite字体作为回退(另存verbatim注释)
+
+commit 242ccfa94c3bfa34c79c6e3576c1f9c1611bcadd
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sun Aug 16 15:42:08 2026 +0000
+
+    加同屏对比探针 probe_compare.cpp：GuiLite字体 vs X核心字体
+
+commit 2894f7bf2f357182a94e8fe3bd15b074c634c461
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sun Aug 16 15:34:11 2026 +0000
+
+    加纯X11文字探针 probe_text.c：绕过GuiLite判定文字翻转层
+
+commit 99fb5fc4500a5272448ff9874d67ec7819042fa1
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sun Aug 16 15:31:19 2026 +0000
+
+    恢复默认不翻转：X层保持正确，GL翻转交给TERMUX_X11_FORCE_FLIP
+
+commit 9c8882f09f1d18c8d7e87a62fd0fe4ced15a7ac7
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sun Aug 16 15:27:16 2026 +0000
+
+    默认开启垂直翻转以补偿 Termux-X11 GL 呈现层翻转
+
+commit 7183bd50e997cf61ecdc1294bdcf80dc668563c7
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sun Aug 16 14:57:31 2026 +0000
+
+    加 x11_read: 读回 vus 窗口实际像素验证文字方向
+
+commit 99236d8fce14e6544639c3ba453dfb8840857612
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sun Aug 16 14:49:23 2026 +0000
+
+    fb传送预览图 供对照
+
+commit ac30d2531a541f7ca8cac1c147f58f6a7e3821b0
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sun Aug 16 14:46:35 2026 +0000
+
+    probe_orient: 尺寸改为360x240 验证尺寸相关性
+
+commit f433f7e363bebeaf07063eb6b114390b59f78092
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Sun Aug 16 22:43:59 2026 +0800
+
+    fb ppmm
+
+commit aa9a505ce842a6ba4b929bfaa8000cee172b4d3d
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sun Aug 16 14:17:56 2026 +0000
+
+    add probe_orient: 四角异色方向观测探针
+
+commit 468daa5cc6926cb68b19ccf378f1505ef9b44469
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sun Aug 16 14:03:27 2026 +0000
+
+    诊断: 打印 flip 开关读取结果
+
+commit 0e93bf42da14d8d6919e0b6f48224193bafa9f5d
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sun Aug 16 13:50:48 2026 +0000
+
+    诊断: redraw 打印帧缓冲像素值并导出 PPM 到当前目录
+
+commit e50ba0d3c68cbe6641eba8ae0092937e43664bab
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sun Aug 16 13:42:12 2026 +0000
+
+    add probe_show: 保持显示的红色窗口探针
+
+commit 2abf51ddab3419f155a4e3ac73f05f755d75b3cd
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sun Aug 16 12:55:54 2026 +0000
+
+    feat: X11 显示方向翻转补偿开关 VUS_X11_FLIP + 方向诊断探针
+    
+    Termux-X11 的 GL 渲染层可能把窗口内容翻转显示。新增环境变量
+    VUS_X11_FLIP 支持 v(垂直)/h(水平)/vh(180度) 补偿映射，
+    在 redraw 写像素时翻转目标坐标。并新增 fbprobe.c 诊断探针，
+    用于精确测定当前 X 后端的翻转类型。
+
+commit a32e516203bbb34dd4dc164672bee257fd337cde
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Sun Aug 16 20:37:50 2026 +0800
+
+    Screenshot_2026-08-16-20-17-26-993_com.termux.x11.jpg.base64.txt
+
+commit 3c34577228eb4176d37555f72fb602c97686f5f7
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sun Aug 16 12:13:05 2026 +0000
+
+    fix: GuiLite X11 显示方向颠倒
+    
+    用 XPutPixel 逐像素按 XImage 颜色掩码/字节序写入，替代直接 memcpy
+    假设帧缓冲布局与服务端一致的做法，适配 Termux Xwayland 等后端的
+    visual/深度/字节序差异，修复文字上下左右颠倒。已在 Xvfb 24 位深
+    下实测四角像素方向正确。
+
+commit b81f61874b61abdee98206bb113e67a730c30ed5
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sun Aug 16 11:12:13 2026 +0000
+
+    feat: 集成GuiLite GUI绘图基础层 + Meilisearch实战脚本与修复
+    
+    GuiLite GUI:
+    - 新增图形_*内建函数(初始化/画点/画线/矩形/填充/文字/刷新/保持)
+    - rt/guilite_bridge + wrapper + X11平台后端(含headless PPM导出)
+    - generator.c 映射 + Makefile 编译链(g++ + -lX11)
+    - 修复Termux X11头文件路径检测($PREFIX/include)
+    - 新增实机用例 examples/guilite_termux_demo.vus 与 tests/test_gui.vus
+    
+    Meilisearch实战:
+    - examples/meili_localdeploy_demo.vus 本地部署全链路脚本
+    - vux_plugin_manager.py 支持 --raw
+    - libvus_rt.c --json 参数单引号包裹修复
+    - deployer.py 进程守护(start_new_session+DEVNULL)
+    
+    文档: guilite集成设计文档
+
+commit fd5b8248163ad5db1c1032145db161d5dbe3302e
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sun Aug 16 09:22:15 2026 +0000
+
+    docs: 同步第6章进度,标记AST内存管理改进完成
+
+commit 5d7948eb4d0314ffb2a03f2802972f9e4ec5bb47
+Merge: 9faf153 ccea5f0
+Author: rtcn666 <rtcn_0523@qq.com>
+Date:   Sun Aug 16 09:19:39 2026 +0000
+
+    修复 vus_ast_node_free 字面量节点内存泄漏
+    merge feature/issue-IK90K0-ast-node-free into master
+
+commit ccea5f0340d23f4b662ada7981ef8ccc367705f2
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sun Aug 16 09:11:23 2026 +0000
+
+    test(issue-IK90K0): 新增列表/字典字面量回归用例
+    
+    C2: tests/test_literal.vus 覆盖 VUS_AST_LIST_LITERAL / VUS_AST_DICT_LITERAL
+    节点的解析、生成与运行路径（含空列表/空字典/嵌套列表），
+    验证 vus_ast_node_free 释放修复后程序正常。make run-tests 42/42 通过。
+
+commit e103aa165887fc29e29283a62671bcd345c561ab
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sun Aug 16 09:11:17 2026 +0000
+
+    fix(issue-IK90K0): vus_ast_node_free 补齐列表/字典字面量释放
+    
+    C1: 在 vus_ast_node_free 中补充 VUS_AST_LIST_LITERAL / VUS_AST_DICT_LITERAL
+    分支，修复解析含 [e1,e2] 或 {k:v} 字面量的程序后 AST 释放时子节点泄漏。
+    - LIST_LITERAL -> vus_ast_list_free(items)
+    - DICT_LITERAL -> vus_ast_list_free(keys) + vus_ast_list_free(values)
+
+commit 9faf1531544910453cd3437cd957da8cb498b203
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sun Aug 16 08:58:18 2026 +0000
+
+    docs: 复盘EasyLogger协作,新增2.9与3.1规范
+    
+    - 2.9 提交完整性:提交前make干净重编,检查依赖文件同批提交
+    - 3.1 PR审批与合并:区分内容审查与Gitee审批,处理405测试阻塞
+    - 更新第6章同步状态为EasyLogger已完成
+
+commit 3f02f888f85ce7f255d239677e4dc356d3a152e5
+Merge: 88db9dd 96e8bf6
+Author: rtcn666 <rtcn_0523@qq.com>
+Date:   Sun Aug 16 08:51:18 2026 +0000
+
+    EasyLogger 日志集成
+    merge feature/issue-IK907N-easylogger into master
+
+commit 88db9ddc96b41d380451ee4031382a27efba3e1e
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sun Aug 16 08:38:41 2026 +0000
+
+    docs: 新增多AI协作消息转发规范(人类枢纽操作手册)
+    
+    - 讲解AI间仅能通过Issue评论交流,人类为唯一枢纽
+    - 给出消息类型/转发方法/四步操作手册/常用模板
+    - 含角色文件归属速查表与EasyLogger标准流程示例
+
+commit 96e8bf66771013d0cce7da272da9f99f0c95d18f
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sun Aug 16 08:35:27 2026 +0000
+
+    fix(issue-IK907N): 补提交字面量结构体定义修复编译
+    
+    - 补提交 src/ast.h 的 VusAstListLiteral/VusAstDictLiteral 正式结构体
+    - 同步 parser.c 改用正式结构体（纯结构体化，无逻辑变更）
+    - 修复 generator.c 使用 dl->values 导致的编译失败
+
+commit 0074432f22fb1890b4cfcc5400e58f411c9eb48f
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sun Aug 16 08:25:34 2026 +0000
+
+    docs: 新增2.8问题处理铁律(先Issue同步后执行,禁止擅自行动)
+    
+    - 发现问题先同步,不擅自修复/回滚/覆盖
+    - 冲突走Issue仲裁,确认标准为AI明确回复或人类拍板
+
+commit cb61ee6e7e81c51de929c88bc4f3a0953b6711e2
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sun Aug 16 08:15:44 2026 +0000
+
+    feat(issue-IK907N): EasyLogger 分级日志集成与多AI协作规范
+    
+    - 引入 EasyLogger 源码并裁剪 elog_cfg.h（保留同步输出）
+    - 新增 rt/elog_port.c 平台适配层（stdout+文件双通道+锁）
+    - libvus_rt.h/c 声明并实现 vus_log_* 接口（惰性初始化）
+    - generator.c 内建函数映射：日志_调试/信息/警告/错误/级别
+    - Makefile 接入 easylogger 编译链
+    - 新增 tests/test_logger.vus 回归用例
+    - docs/多AI协作.md 固化并发/防重复/强制提交规范
+
+commit 06ca54093195d359b12ae635e8972d62d0a16ed3
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sun Aug 16 06:50:44 2026 +0000
+
+    docs: 多AI协作规范调整 - 审查AI参与开发提速
+    
+    开发是瓶颈：审查AI转为开发为主分摊开发任务；审查职责
+    移交给较闲的文档AI。保留铁律：审查者不审自己提交的代码。
+
+commit ffb39a25fa0dbe2ebafb61ba195d4ff37b91da84
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sun Aug 16 06:48:22 2026 +0000
+
+    docs: 多 AI 协作规范
+    
+    定义文档/开发/审查三角色，基于 Gitee Issue+分支+PR 审查流程
+    协同推进 VUS 项目，明确职责边界、交接物与决策权。
+
+commit a38bf29e0008fb2123693ecdf6d6ee8acd5b7b2a
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sun Aug 16 06:42:45 2026 +0000
+
+    docs: EasyLogger 日志集成设计文档
+    
+    为 VUS 引入 EasyLogger 超轻量日志库，提供分级日志内建函数
+    （日志_调试/信息/警告/错误）与运行时级别控制（日志_级别），
+    输出到控制台与文件双通道。纯 C 集成，不依赖 Python。
+
+commit 9b741975b174bcce49c2664599245abfdfbbb4e6
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sun Aug 16 03:00:43 2026 +0000
+
+    feat: 新增 VUS 文档搜索页面与索引脚本
+    
+    - docs/search.html: 基于 Meilisearch JS SDK 的文档搜索页，
+      支持实时搜索、高亮、分页，通过 Gitee Pages 托管
+    - scripts/index_vus_docs.py: 将仓库 Markdown 文档拆分为章节
+      并灌入 Meilisearch vus-docs 索引
+
+commit 850218919a7c79eadbf939652a8ae075ca18ec69
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sun Aug 16 02:43:54 2026 +0000
+
+    fix: 修复 meilisearch 插件对新版 SDK 的兼容性
+    
+    - create_index 改用 options 传 primaryKey（新版 SDK 移除了 primary_key 参数）
+    - get_indexes 兼容新版返回 dict+Index对象，旧版返回 list
+    - get_all_stats 兼容替代已废弃的 get_indexes_stats
+    - 任务对象统一经 _task_uid 读取，兼容 dict 与 TaskInfo 模型
+    - search 经 _search_query 按签名分发 opt_params / **kwargs
+    - 文档获取经 _document_to_dict 兼容 dict/pydantic/属性式 Document
+    - 新增索引名校验，拒绝中文等非法 uid 并给出清晰提示
+    
+    全部 35 个单元测试通过，并通过远程实例完整接入验证
+
+commit e60356ddf3a4acc1de6d55c9b377f5ce6604abff
+Author: rtcn_0523 <rtcn_0523@qq.com>
+Date:   Sun Aug 16 02:04:00 2026 +0000
+
+    feat: 新增 Meilisearch 本地部署拓展插件（Docker/二进制部署、多实例、深度集成）
+    
+    - target.py 平台/架构检测与二进制选择，arm32 非 Alpine 提示源码构建
+    - deployer.py DockerDeployer + BinaryDeployer 双模式部署
+    - instance.py 命名实例管理（配置/PID/日志/数据目录）
+    - integration.py 生成 meilisearch 插件 config.json 深度集成
+    - 中文子命令：部署 信息/安装/启动/停止/重启/状态/更新/卸载/日志/配置/集成，实例 列表/创建/删除
+    - 模块命名规避标准库 platform 冲突，插件类继承 VuxPlugin
+    - 20 个单元测试全部通过
+
+commit df3164d6f78ef98385c44cb86fcb8507f1bebfc2
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Sun Aug 16 01:36:52 2026 +0000
+
+    feat: 新增 Meilisearch 搜索插件（第一个正式功能插件）
+    
+    - 实现 Python .vux 功能插件 plugins/func/meilisearch/
+    - 中文子命令：健康统计、索引 CRUD、文档 CRUD、企业级搜索（筛选/排序/高亮/分面）、同义词、设置
+    - 连接配置：环境变量 VUS_MEILI_HOST/VUS_MEILI_API_KEY > 配置文件 > 默认值
+    - 拆分 _index_settings 并提取 _build_settings_from_options 消除设置逻辑重复
+    - 清理测试冗余，30 个单元测试全部通过
+    - 新增使用文档 docs/plugins/meilisearch.md 与 ECOSYSTEM.md 4.5 节
+
+commit 9488206a22ff94627bc1661f6ac004a76dd6b2dd
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Fri Aug 14 13:57:40 2026 +0000
+
+    fix: 修复 vus_coro.c 在 Clang/ARM64 下的编译兼容性
+    
+    - 移除 Clang 不支持的 noclone 和 optimize("O0") 属性
+    - 移除 naked 函数中的 __builtin_unreachable()（Clang 不允许非汇编语句）
+    - 使用 VUS_CORO_NAKED / VUS_CORO_NOINLINE 宏按编译器条件选择属性
+    - ARM64 (aarch64) 和 ARM32 (arm) 在 Termux Clang 下可通过编译
+
+commit 728fe26692df434cceffd858d88504f32bf9711f
+Author: rtccn_mc <rtccn_mc@gitee.com>
+Date:   Fri Aug 14 13:53:15 2026 +0000
+
+    fix: 安装脚本 git pull 改用 fetch+reset 兼容历史重写后的更新
+    
+    此前 git pull --ff-only 在远程历史被 force push 重写后会失败，
+    因为本地和远程历史已分叉且缺少 tracking 信息。
+    改为 fetch + reset --hard 确保更新总是成功。
+
+commit dfb70187d437e67f839e81b5332915bbbecf2e5b
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Thu Aug 13 16:26:12 2026 +0000
+
+    feat: 添加协程支持和更多测试用例
+
+commit d9f31ab1e516ea7a6e865b2f54537d741fe68458
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Fri Aug 7 23:39:47 2026 +0000
+
+    feat: 实现局部变量、逻辑取反、位运算、列表下标和错误处理语法
+    
+    - 功能 6: 函数内部局部变量支持（作用域跟踪 + 函数顶部声明）
+    - 功能 5: ! 逻辑取反运算符
+    - 功能 4: 位运算符 & | ^ ~ << >>
+    - 功能 1: 列表/字典操作语法层绑定（下标访问）
+    - 功能 2: 错误处理语法层绑定（try/except/throw）
+    
+    修复: try/except 代码生成花括号缩进和 throw 流程控制
+    测试: 新增 5 个测试用例，全部 23 个测试通过
+
+commit 3b830d061cae35cfc25cdbc03ae862c0c062dd10
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Fri Aug 7 23:10:37 2026 +0000
+
+    docs: 添加项目生态说明文档
+    
+    详细描述 VUS 语言生态的完整技术栈，包括编译器架构、
+    四层插件体系、运行时库、构建系统、APK 打包、测试体系、
+    CLI 命令参考、目录结构和技术依赖关系。
+
+commit 2d12008ed413f75c97790acbf040d1ccaa5e69a7
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Thu Aug 6 09:06:32 2026 +0000
+
+    feat: 预编译包添加 MD5 校验
+    
+    - build_release.sh: 构建时生成 .md5 校验文件
+    - install.sh: 下载后校验 MD5，失败时自动切换到源码编译
+    - .gitignore: 忽略 build-*/ 和 release/ 目录
+
+commit 09ae6942d3560d51300ba4e2d2ff22756b006c24
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Wed Jul 22 05:22:30 2026 +0000
+
+    fix: 动态检测 libcurl 避免无 curl 系统编译失败
+    
+    - 在 vus_compile_c 中通过 curl-config 动态检测 libcurl 开发环境
+    - 仅当系统安装了 libcurl-dev 时才添加 -DVUS_HAVE_CURL 和 -lcurl
+    - 无 curl 系统所有测试正常编译运行（网络函数不可用）
+    - 修复 install.sh 中 mktemp 兼容性问题
+
+commit d8171374b1a6b6eddc718f5b0557084416a825d2
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Wed Jul 22 05:17:59 2026 +0000
+
+    fix: 安装脚本测试输出错误信息可见化
+    
+    - 添加 set +e 防止 set -e 导致测试中途退出
+    - 将 2>/dev/null 改为 2>&1 使编译/运行错误可见
+
+commit b7913efdf90c65084057cc2753570c4681e6f675
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Wed Jul 22 05:15:13 2026 +0000
+
+    fix: 修复安装脚本测试检测和刷新命令显示
+    
+    - 改用 /dev/tty 检测替代 [ -t 0 ]，兼容 curl | sh 管道模式
+    - 始终显示刷新命令（在快速开始之前）
+    - PATH 已包含目标目录时不再静默跳过
+
+commit 59bedb25be697ec1c0c49ddc7ac31ee1f0cea35a
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Wed Jul 22 05:10:33 2026 +0000
+
+    fix: 安装脚本测试提示仅在交互式终端中显示
+
+commit 8f3889eaca88a3ce2c31064b42712b62fd5527a8
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Wed Jul 22 05:06:45 2026 +0000
+
+    fix: 安装脚本 Logo 改用 ANSI 彩色背景替代 % 字符
+
+commit 1ac0beab9c05b1f1e4d55920dcdbdc0a4755d0c9
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Wed Jul 22 05:01:29 2026 +0000
+
+    docs: 将社区栏目移到特性下方
+
+commit da7c714d317d918f6406ab7f6e58f4849650350b
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Wed Jul 22 04:29:45 2026 +0000
+
+    docs: 添加 VUS Logo 到 README 和安装脚本
+    
+    - 添加 Logo 图片（vus-logo.png + vus-logo.svg）到项目根目录
+    - 在 README.md 顶部展示 Logo
+    - 在 install.sh 中添加 ASCII 艺术 Logo 横幅
+    - 更新版本号 v1.0-beta
+
+commit b8733887745d4adf19a9556ecb702e017289c5c8
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Wed Jul 22 03:46:35 2026 +0000
+
+    feat: v1.0-beta 语言核心稳定 + APK 修复优化 + 插件运行时函数
+    
+    v1.0-beta 完成功能：
+    - 语言核心稳定：修复已知 Bug，所有 19 个测试通过
+    - APK 修复优化：修复 JNI 桥接、复制运行时库、替换 main 函数名
+    - 插件运行时函数：25+ 内置函数（TUI/网络/文件/日期）
+    - 文档更新：TUTORIAL.md、STATUS.md、README.md 完整更新
+
+commit 6e529b5e0d958a81b52b1761de0bea06b4761cfa
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Tue Jul 21 19:26:28 2026 +0000
+
+    feat: 实现 vus build --apk 命令支持 Android APK 打包
+    
+    - NDK 检测：自动检测 ANDROID_NDK_HOME、ANDROID_HOME、常见路径
+    - 用户可自定义 NDK 路径（--ndk-path），可选安装 NDK
+    - 生成 Android 项目结构：
+      - AndroidManifest.xml（含 Activity 声明）
+      - Java 壳 Activity（JNI 加载 libvus_app.so）
+      - C JNI 桥接代码（jni_bridge.c）
+      - Android.mk / Application.mk（NDK 构建脚本）
+      - 复制 VUS 生成的 C 代码为 vus_app.c
+    - 有 NDK 时自动 ndk-build 编译 .so
+    - 无 NDK 时生成项目结构提示手动安装 NDK
+    - 支持 --app-name 和 --output 自定义选项
+
+commit 33f7621b7d02980e4e0b7824b1fe009875a62a94
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Tue Jul 21 19:15:14 2026 +0000
+
+    docs: 更新版本路线图为最终版
+    
+    - 自举移至 v8.0
+    - apk 打包移至 v1.0-alpha
+    - 新增 v7.0 包管理器仓库、v8.0 自举
+    - 删除旧 ISSUE 文件
+
+commit 0a3b60503f3b1dc03ba55b16a2b6559e531bec2d
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Tue Jul 21 19:13:16 2026 +0000
+
+    feat: 实现泛型函数调用语法 func_name<T>(args)
+    
+    - 解析器：支持 func_name<T, U>(args) 泛型调用语法
+      - 接受标识符和类型关键字（int/string/float/bool/list/dict）作为类型参数
+      - 回退机制：<T> 后不是 ( 时回退为普通比较表达式
+      - 保存解析器状态，支持安全回退
+    - AST：VusAstCall 新增 type_args 字段
+      - 更新 vus_ast_call_new 签名
+      - 更新 vus_ast_node_free 释放 type_args
+    - 生成器：泛型调用添加 /* <T, U> */ 注释
+    - AST 打印：显示泛型类型参数
+    - 测试：test_generic.vus 和 test_generic_call.vus
+
+commit b4eff3386083060945315d55f0725593039380dd
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Tue Jul 21 18:44:55 2026 +0000
+
+    docs: 添加 v1.0-alpha 版本规划 Issue 文件
+    
+    细化当前阶段任务清单，包含 v0.2 完成状态和 v1.0-alpha 待办项。
+
+commit 768f0175027cc8b439b7ec2f39c518a73a413e9d
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Tue Jul 21 18:34:54 2026 +0000
+
+    fix: 结构体链式成员访问的类型推导错误
+    
+    修复 gen_expr_access 中链式访问 r.p1.x 时使用字段名而非类型名的问题。
+    - 添加 gen_find_struct_by_field / gen_find_field_type / gen_struct_exists 辅助函数
+    - 链式访问时递归解析中间表达式的类型注解
+    - 修复缓冲区大小不足（obj 在模板中被使用两次）
+
+commit d6cb63b652e64f5f9c0bfd4718462ffd28088f04
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Tue Jul 21 18:08:40 2026 +0000
+
+    fix: mktemp 兼容性修复（缺少模板参数导致某些系统上失败）
+
+commit d75011cac73e739791732bb42ec042144f641209
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Tue Jul 21 18:07:02 2026 +0000
+
+    feat: 预编译包版本校验 + vus update 自动更新 + 安装进度条
+    
+    - build_release.sh 预编译包嵌入 version.json 版本信息
+    - install.sh 解压后读取 version.json 校验版本
+    - install.sh 新增 progress() 进度显示函数（下载/编译时显示）
+    - main.c 新增 vus update 命令：Git 安装自动 git pull + make，
+      预编译安装自动检测架构下载最新包
+
+commit 0ccc8cc70158f969b391b48dd839d3ebc58d396e
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Tue Jul 21 18:04:14 2026 +0000
+
+    feat: 安装脚本增强 + ARM64/ARM32 预编译包支持
+    
+    - install.sh 新增 6 个功能测试（编译运行、lang/vusx 命令、init 模板、中文错误信息、调试模式）
+    - install.sh 支持自动检测架构，优先下载预编译包，自动回退源码编译
+    - 新增 scripts/build_release.sh 交叉编译 amd64/arm64/arm32 并打包
+    - README.md 新增 ARM 设备安装说明和预编译包构建指南
+
+commit 3a10d5f5204fa875935497a894ffd488b7fee994
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Tue Jul 21 17:52:48 2026 +0000
+
+    feat: v0.2 调试体验优化 + .vusx 编译流水线集成
+    
+    v0.2 改进：
+    - 错误信息中文化，含文件名、行号、列号
+    - 运行时栈追踪（vus run --debug）
+    - 调试输出函数（vus_debug_print）
+    - 代码生成器缓冲区性能优化
+    
+    .vusx 插件系统：
+    - 编译流水线集成 vusx 依赖解析和链接
+    - CLI 新增 vus vusx list|info|build 子命令
+    - vus_compile_c() 支持追加额外 .o 文件
+    
+    文档：
+    - 更新 README.md、TUTORIAL.md、STATUS.md
+
+commit ffbf328f5ede8b35f03c483960654dbc269302dc
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Tue Jul 21 12:02:49 2026 +0000
+
+    feat: 添加 .vulage 语言插件系统，分离语法风格与功能插件
+    
+    核心变更：
+    - 创建 VusLangPlugin 接口 (include/vus/vus_lang.h) 定义语言插件规范
+    - 实现语言插件注册表、dlopen 加载、预处理调度 (src/vus_lang.c/h)
+    - 编译器编译流水线支持语言插件预处理：加载 .vulage → 预处理 → 词法分析 → AST
+    - 语言插件（.vulage）在词法分析阶段之前加载，仅影响"怎么读代码"
+    - 功能插件（.vux）在运行时加载，仅影响"怎么运行代码"
+    
+    目录结构：
+    - plugins/lang/  — 语言插件（语法风格）
+    - plugins/func/  — 功能插件（运行时扩展）
+    
+    配置：
+    - vus.json 新增 "语言插件" 字段，指定项目使用的语法风格插件
+    - 插件加载失败时优雅降级（原样输出源码），不影响正常编译
+    
+    CLI 新增：
+    - vus lang list      — 列出已安装语言插件
+    - vus lang load      — 加载语言插件
+    - vus lang info      — 查看语言插件信息
+    
+    插件管理器更新：
+    - 支持 .vulage（目录复制）和 .vux（zip 解压）两种安装方式
+    - list 命令显示插件类型 (.vulage / .vux)
+    
+    验证：
+    - 13 个测试用例全部通过
+    - 构建零警告
+
+commit 67eeac8c22ead4f07bc5d6f7a513e331d5c6d129
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Tue Jul 21 11:48:23 2026 +0000
+
+    v0.1 正式版：双语法拆分为插件，核心编译器精简
+    
+    核心变更：
+    - 将易语言风格（.功能/.如果/.计次循环等）从核心编译器完全剥离
+    - 核心编译器只保留函数风格（def/定义、if/如果、for/循环等）
+    - 移除 token.h/c 中的 VUS_TOKEN_EASY_* 类型（15个）
+    - 移除 token.c 中的 s_easy_keywords[] 表和 vus_keyword_easy_lookup()
+    - 简化 lexer.c/h：移除 style 字段和易语言点前缀处理
+    - 简化 parser.c/h：移除 style 字段、is_easy_style()、所有 EASY_* 分支
+    - 更新 main.c 中 vus_init()：移除风格选择交互，默认为函数风格
+    - 更新 lexer/parser 构造函数签名，不再需要 style 参数
+    
+    新增插件：
+    - 创建 plugins/易语言/ 目录，包含 vux.json 和 __init__.py
+    - 易语言语法插件作为预处理器，将 .关键字 语法转换为标准函数风格
+    - 支持所有易语言关键字的转换（功能/如果/计次循环/遍历/循环等）
+    - 支持 .结束 行删除和 .标识符 点前缀去除
+    
+    验证：
+    - 13 个测试用例全部通过
+    - 构建零错误
+    - 所有核心功能（输出、变量、流程控制、函数）正常工作
+
+commit efd503c7be0fcfc4ce9c26fd3a95f061db985a77
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Tue Jul 21 11:30:41 2026 +0000
+
+    docs: 添加完整教程文档 docs/TUTORIAL.md
+    
+    10 章覆盖 VUS 全部功能：
+    1. 安装与第一个程序
+    2. 语言基础（变量/注释/内置函数）
+    3. 运算符（算术/比较/优先级）
+    4. 流程控制（如果/循环/当循环/嵌套）
+    5. 函数（定义/返回/递归/布尔值）
+    6. 综合示例（质数/累加/完整演示）
+    7. CLI 命令（编译/插件/配置）
+    8. 插件系统（.vux 格式/编写/打包）
+    9. C ABI 接口（C/Python 调用示例）
+    10. 故障排除（常见问题/缩进规则/编码）
+    
+    更新 README.md 添加教程链接。
+
+commit 4122d0073af96cd95a169921bd5aa85e70102f4f
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Tue Jul 21 11:26:38 2026 +0000
+
+    fix: 修复 install.sh 一键测试中的假阳性检查
+    
+    - test_comparison: 输出为中文 "a 小于 b..."，改为检查 "小于"
+    - examples/hello: 输出为中文 "欢迎使用 VUS 语言！"，改为检查 "欢迎"
+
+commit 5a819594098152e7c2610dc6a956e573e5527609
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Tue Jul 21 11:23:39 2026 +0000
+
+    feat: install.sh 添加一键测试所有功能选项
+    
+    安装完成后提示用户是否运行一键功能测试（20 项测试）：
+    - 基本编译/帮助信息
+    - 全部 13 个 .vus 测试用例（test_hello ~ test_demo）
+    - 示例程序
+    - 编译为 C 代码 / 可执行文件
+    - 插件打包与列表（需 Python 3）
+    - 汇总统计（通过/失败/总数）
+    
+    用户按 Y（默认）执行测试，按 N 跳过。
+
+commit 0c0ec431c01d6d7394423addb5037b29292d1466
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Tue Jul 21 11:21:19 2026 +0000
+
+    feat: 添加 .vux 插件系统和 Python 插件接口
+    
+    定义 .vux 插件格式（zip 压缩包）：
+      plugin.vux/
+      ├── vux.json          # 元数据（名称/版本/作者/入口/依赖）
+      ├── __init__.py       # 插件入口（继承 VuxPlugin 基类）
+      ├── vux依赖.txt       # 其他 .vux 包依赖
+      ├── vuxpy依赖.txt     # Python 包依赖（pip install -r）
+      └── 资源/             # 静态资源
+    
+    新增文件：
+      - scripts/vux_plugin_manager.py — 插件管理 CLI（install/build/info/list/run/check-deps）
+      - scripts/vux_plugin_entry.py — 插件基类 VuxPlugin + VuxPluginAPI（ctypes/CLI 双模式）
+      - examples/plugins/示例/ — 完整示例插件
+    
+    CLI 集成：
+      - vus vux install <源>  — 安装 .vux 插件（支持本地文件/URL/插件名）
+      - vus vux build [目录]  — 打包 .vux 插件
+      - vus vux info <插件>   — 查看插件信息
+      - vus vux list          — 列出已安装插件
+      - vus vux run <插件>    — 运行插件
+      - vus --version/-v      — 显示版本信息
+
+commit db87f6b750bed95e959e43dfda7fc3ac709192bb
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Tue Jul 21 11:04:35 2026 +0000
+
+    chore: 抑制 -Wformat-truncation 编译警告
+    
+    添加 -Wno-format-truncation 到 CFLAGS，消除 snprintf
+    截断检查的误报。这些警告不会影响运行时正确性。
+
+commit 1713e0e79ba36ceb9ae6261c0a10bbd4c6714cfb
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Tue Jul 21 11:00:08 2026 +0000
+
+    feat: 添加 C ABI 接口和插件系统
+    
+    新增 C ABI 接口 (vus_abi.h/c)：
+    - vus_compile_file() — 编译 .vus 文件 → C 代码
+    - vus_compile_string() — 从源码字符串编译 → C 代码
+    - vus_compile_string_to_exe() — 编译并链接 → 可执行文件
+    - vus_eval() — 求值表达式，捕获 stdout 输出
+    - extern "C" 兼容 C++ 调用
+    
+    新增插件系统 (vus_plugin.h/c)：
+    - VusPlugin 结构体（name/init/run/cleanup）
+    - vus_register_plugin() — 注册插件
+    - vus_plugin_load() — 从 .so 加载插件
+    - 完整的生命周期管理（init_all/run_all/cleanup_all）
+    - Windows/Linux 跨平台导出宏
+    
+    新增文档：docs/STATUS.md（功能列表/Bug/API/构建方法）
+    更新 Makefile 集成新源文件，链接 -ldl
+
+commit 5535b817b44ae241b78e973a56736a87d4efa184
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Tue Jul 21 10:50:50 2026 +0000
+
+    test: 添加综合功能演示脚本，展示 VUS 语言全部特性
+    
+    新增 test_demo.vus 综合演示测试，涵盖 10 个功能模块：
+    1. 变量与赋值
+    2. 四则运算（+ - * / %）
+    3. 字符串拼接（vus_add 智能类型调度）
+    4. 比较运算符（< <= != > >= ==）
+    5. 条件分支（如果/否则如果/否则）
+    6. 范围循环（循环 i 从 1 到 N）
+    7. 当循环
+    8. 嵌套循环（乘法表）
+    9. 递归函数（阶乘、斐波那契、质数计数）
+    10. 综合应用（质数检测、累加求和）
+    
+    验证通过：质数检测正确输出 2-100 全部 25 个质数，
+    阶乘、斐波那契数列、乘法表等计算结果均正确。
+
+commit a749c77a34a15aaca1b913b025fcf374db36a3c8
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Tue Jul 21 10:41:12 2026 +0000
+
+    fix: 修复字符串拼接、for-range 循环范围和函数调用返回值 Bug
+    
+    - 新增 vus_add() 运行时函数，智能判断操作数类型：两个操作数均可
+      解析为整数时做算术加法，否则做字符串拼接，修复字符串拼接输出错误
+    - 修复 for-range 循环条件 `_i < _end` 改为 `_i <= _end`，使
+      `从 1 到 9` 正确迭代至 9（修复乘法表缺少最后一行）
+    - 函数调用参数数组 `_vus_args[0]` 初始化为 NULL，修复递归函数
+      段错误
+
+commit 8140688333021d0925410554020fcc52582f96cb
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Tue Jul 21 10:18:56 2026 +0000
+
+    test: 添加综合测试用例（字符串、比较、递归、嵌套循环、综合示例）
+    
+    新增 7 个测试文件覆盖更多语言特性场景。
+
+commit bcf5c5ec360ef66e34ab76555940ec592ff28e71
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Tue Jul 21 10:13:56 2026 +0000
+
+    fix: 使用 /proc/self/exe 定位编译器安装目录
+    
+    当用户通过 PATH 调用 vus 时，argv[0] 仅为命令名（如 "vus"），
+    realpath 无法解析。改用 /proc/self/exe 可靠地获取执行路径，
+    确保运行时库路径始终指向编译器自带的 rt 目录。
+
+commit f17192a960815cde7f72333684fa38bc788dab57
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Tue Jul 21 10:10:34 2026 +0000
+
+    fix: 运行时库路径使用编译器安装目录而非项目目录
+    
+    当用户从非项目目录（如 /public）运行 vus run 时，config->rt_dir
+    的 "rt" 被解析为 /public/rt，但实际运行时库在编译器安装目录下。
+    修复：在 main() 中通过 argv[0] 解析编译器安装路径，并在 config
+    加载后将 rt_dir 设为编译器自带的 rt 目录绝对路径。
+
+commit 07980a49e72cd783e438b900081562b4eaa3c5ef
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Tue Jul 21 10:05:00 2026 +0000
+
+    fix: GCC 编译时 rt_dir 路径未解析为绝对路径
+    
+    vus_compile_c 使用 config->rt_dir 的相对路径（如 "rt"）构建 GCC 命令，
+    但 CWD 可能不是项目目录，导致找不到 libvus_rt.h 和 rt/libvus_rt.c。
+    修复：将 rt_dir 相对于 project_dir 解析为绝对路径后再传给 GCC。
+
+commit 3d1efe138661c2a85942222829eae5180b8514ef
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Tue Jul 21 10:02:55 2026 +0000
+
+    fix: 自动检测 shell 并写入正确配置文件，兼容 Alpine 等 POSIX 环境
+    
+    1. 自动检测当前 shell（bash/zsh/fish/ash/sh），写入对应配置文件
+    2. 使用 POSIX 兼容语法（替换 &> 为 >/dev/null 2>&1）
+    3. 刷新命令根据 shell 自动适配（source / . / fish_add_path）
+    4. .profile 作为所有 shell 的通用后备
+
+commit d8bca8fa1759ef893c72cbbf18d8795460b0af77
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Tue Jul 21 09:58:53 2026 +0000
+
+    fix: 安装脚本正确处理 curl | bash 的 PATH 问题
+    
+    curl | bash 方式运行时，子 shell 的 export PATH 无法影响父 shell。
+    改为写入 shell 配置文件后提示用户执行 source ~/.bashrc，
+    同时提示当前终端可通过完整路径直接使用。
+
+commit 4808724bc8d6baa9963f9020f87158658256c45a
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Tue Jul 21 09:56:47 2026 +0000
+
+    fix: 安装脚本自动配置 PATH 并写入 shell 配置文件
+    
+    install.sh 现在会自动将 ~/.local/bin 添加到 PATH 并写入
+    ~/.bashrc / ~/.zshrc / ~/.profile，解决安装后 vus 命令找不到的问题。
+
+commit e00c1ff3f174d65bb3789eff10e28d2ff6b3dbd5
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Tue Jul 21 09:48:48 2026 +0000
+
+    fix: 安装脚本添加编译步骤，修复 vus 二进制不存在的问题
+    
+    - 安装脚本现在会编译 C 代码生成 vus 二进制
+    - 添加 gcc 和 make 依赖检查
+    - 更新 README 手动安装步骤包含编译命令
+
+commit ed6712e431105fd5e89c65319e4b331db8347779
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Tue Jul 21 09:39:12 2026 +0000
+
+    feat: 实现 VUS 编译器核心 (Phase 0-4)
+    
+    - 建立 C 项目骨架 (src/, include/, tests/, examples/)
+    - 实现词法分析器 (支持 UTF-8 中文标识符)
+    - 实现递归下降语法分析器
+    - 实现 C 代码生成器 (含引用计数内存管理)
+    - 实现运行时库 (字符串/列表/字典/闭包)
+    - 支持中文关键字: 打印/如果/否则/循环/当循环/定义/返回
+    - 添加 MIT 许可证, COMPILER_GUIDELINES.md, 安装脚本
+
+commit 2adef6c936d765fddd2c0a1ccc82993d777c3c7e
+Author: rtccn_mc <rtcn_0523@qq.com>
+Date:   Tue Jul 21 08:21:41 2026 +0000
+
+    feat: 初始化 VUS 语言项目 v0.1
+    
+    - 设计文档（完整版，16 章 + 附录 A）
+    - 运行时库头文件 libvus_rt.h
+    - 项目配置模板 vus.json
+    - 函数风格示例程序（main.vus + 工具库 + 测试用例）
+    - 易语言风格示例程序
+    - 项目目录结构（libs/、测试/、资源/、构建/）
