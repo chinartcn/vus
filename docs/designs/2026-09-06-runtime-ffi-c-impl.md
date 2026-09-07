@@ -7,6 +7,20 @@
 > 本文件实现责任：**C 域全部能力**（`vus_rt_bridge.h` 结构体全量、dlopen 装载、函数/变量表注册、宿主转换槽、类型转换、示例 `.so`、测试）。
 > 公共前置（桥注册表骨架、`vus_ext_*` 接口、生成器/lexer 成员访问）由共享协同点提供；本域只填 `vus_c_ext_*` 与公共头文件。
 
+## 0. 开工前必读（协作边界，防双写）
+
+> ⚠️ 重要：**公共前置由 Python 侧实现唯一负责**（总纲 §10.1），可能在你开工时**尚未推送**。届时请按 §10.3 提交时序操作：先 `git pull` 最新 `master`，等 Python 侧 `ffi: 公共前置 + Python 域` 提交落地后，再以仓库中的 `include/vus/vus_rt_bridge.h` 与注册表分发点为准开始 C 域开发。
+
+**你（C 侧）只写：**
+1. `rt/vus_rt_c_impl.c`：实现 `vus_c_ext_load / vus_c_ext_call / vus_c_ext_get / vus_c_ext_set` 四个域内函数（§4）；
+2. `examples/ext_c_plugin/c_math.c` + `examples/ext_c_plugin/vus.json`（§8 示例）；
+3. `tests/test_ext_c.vus`（§9 测试清单）；
+4. `docs/PLUGIN_USAGE.md` C 域章节。
+
+**你不碰：** `include/vus/vus_rt_bridge.h`（已在仓库）、libvus_rt 桥注册表公共部分、lexer/parser/generator 的任何成员访问支持、`vus_ext_*` 公共接口。发现公共件缺陷 → 在 commit 说明后按总纲 §8 尾部扩展规则合入，不修改既有段偏移。
+
+**域类型判定（注册表分发，见总纲 §10.2）：** `vus_ext_load` 按「源一串以 .so/.vulage 结尾或指向可加载文件」路由到你的 `vus_c_ext_load`；其余路由到 Python 域。
+
 ---
 
 ## 1. 交付物清单

@@ -71,6 +71,10 @@ typedef enum {
     VUS_TOKEN_CN_THROW,
     VUS_TOKEN_CN_IN,
 
+    /* 运行期外部桥关键字：导入外部 / 导出变量 */
+    VUS_TOKEN_CN_EXT_IMPORT,
+    VUS_TOKEN_CN_EXPORT_VAR,
+
     /* 结构体关键字 */
     VUS_TOKEN_STRUCT,
     VUS_TOKEN_CN_STRUCT,

@@ -49,6 +49,10 @@ typedef enum {
     VUS_AST_STRUCT_DEF,
     VUS_AST_STRUCT_INSTANTIATE,
     VUS_AST_ACCESS,
+    VUS_AST_IMPORT_EXT,     /* 导入外部 (别名, {源, 参数})：顶层语句 */
+    VUS_AST_EXPORT_VAR,     /* 导出变量 (["y","x"])：顶层语句 */
+    VUS_AST_MEMBER_CALL,    /* 别名.函数(实参)：表达式 */
+    VUS_AST_MEMBER_ASSIGN,  /* 别名.变量 = 值：语句 */
 
     /* 线程/协程相关 */
     VUS_AST_THREAD_CREATE,
@@ -364,6 +368,46 @@ typedef struct {
     int            is_optional; /* 0=普通访问, 1=可选链 */
 } VusAstAccess;
 
+/* ============ 运行期外部桥节点类型 ============ */
+
+/* ImportExt — 导入外部 (别名, {源: ..., 参数: {...}}) 顶层语句 */
+typedef struct {
+    VusAstNodeType type;   /* VUS_AST_IMPORT_EXT */
+    int            line;
+    int            column;
+    char          *alias;      /* 外部域名绑定名（只读） */
+    char          *src;        /* 源（Python 模块路径 / C .so 路径） */
+    VusAstNode    *params;     /* 参数字典字面量（VUS_AST_DICT_LITERAL）或 NULL */
+} VusAstImportExt;
+
+/* ExportVar — 导出变量 (["y", "x"]) 顶层语句 */
+typedef struct {
+    VusAstNodeType type;   /* VUS_AST_EXPORT_VAR */
+    int            line;
+    int            column;
+    VusAstList    *names;      /* 字符串字面量节点列表 */
+} VusAstExportVar;
+
+/* MemberCall — 别名.函数(实参…) 表达式 */
+typedef struct {
+    VusAstNodeType type;   /* VUS_AST_MEMBER_CALL */
+    int            line;
+    int            column;
+    char          *alias;      /* 外部域名 */
+    char          *member;     /* 函数名 */
+    VusAstList    *args;       /* 实参表达式列表 */
+} VusAstMemberCall;
+
+/* MemberAssign — 别名.变量 = 值 语句 */
+typedef struct {
+    VusAstNodeType type;   /* VUS_AST_MEMBER_ASSIGN */
+    int            line;
+    int            column;
+    char          *alias;
+    char          *member;     /* 变量名 */
+    VusAstNode    *value;
+} VusAstMemberAssign;
+
 /* ============ 线程/协程节点类型 ============ */
 
 /* ThreadCreate — 创建线程 */
@@ -458,6 +502,15 @@ VusAstGlobalDecl *vus_ast_global_new(const char *name, int line, int col);
 VusAstStructDef  *vus_ast_struct_def_new(const char *name, VusAstList *fields, int line, int col);
 VusAstStructInst *vus_ast_struct_inst_new(const char *name, VusAstList *args, int line, int col);
 VusAstAccess     *vus_ast_access_new(VusAstNode *obj, const char *member, int line, int col);
+
+/* 运行期外部桥节点创建函数 */
+VusAstImportExt  *vus_ast_import_ext_new(const char *alias, const char *src,
+                                         VusAstNode *params, int line, int col);
+VusAstExportVar  *vus_ast_export_var_new(VusAstList *names, int line, int col);
+VusAstMemberCall *vus_ast_member_call_new(const char *alias, const char *member,
+                                          VusAstList *args, int line, int col);
+VusAstMemberAssign *vus_ast_member_assign_new(const char *alias, const char *member,
+                                              VusAstNode *value, int line, int col);
 
 /* 线程/协程节点创建函数 */
 VusAstThreadCreate *vus_ast_thread_create_new(VusAstNode *func, VusAstNode *arg, int line, int col);

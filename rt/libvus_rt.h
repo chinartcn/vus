@@ -465,4 +465,18 @@ VusString* vus_regex_find(VusString* text, VusString* pattern);
 VusString* vus_regex_match(VusString* text, VusString* pattern);
 VusString* vus_regex_replace(VusString* text, VusString* pattern, VusString* repl);
 
+/* ============ 运行期外部桥（FFI Bridge）生成代码入口 ============
+ * VUS 侧 导入外部/导出变量/别名.成员 语法编译为对下列入口的调用。
+ * 值级约定：*out_vus 成功时为 VUS 对象（标量 ref=1 出生引用借出、容器 ref=0
+ * 精确转让、NIL/空为 NULL），与 R6 收割语义一致；失败返回 -1 且 *err_out 为
+ * 新建 VusError（类型 "外部错误"，msg 为域侧错误文本），由生成代码挂入 _vus_err。 */
+int vus_ext_declare_v(const char *ns, const char *src, void *params_vus);       /* 导入外部（惰性声明，不加载） */
+int vus_ext_call_v(const char *ns, const char *fname, void *const *args, int nargs,
+                   void **out_vus, VusError **err_out);                          /* 别名.函数(实参) */
+int vus_ext_get_v(const char *ns, const char *vname, void **out_vus, VusError **err_out); /* 别名.变量（读） */
+int vus_ext_set_v(const char *ns, const char *vname, void *val_vus, VusError **err_out);  /* 别名.变量 = 值（写） */
+int vus_ext_export_v(const char *name, void **ptr);                              /* 导出变量：注册全局槽 */
+const char *vus_ext_last_error(void);                                            /* 最近一次桥错误文本 */
+void vus_ext_shutdown_all(void);                                                 /* 程序退出：清理全部外部域 */
+
 #endif // VUS_RT_H

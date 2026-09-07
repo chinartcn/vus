@@ -3,9 +3,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
+#include <errno.h>
 #include <unistd.h>
 
 #include <elog.h>
+
+/* 运行期外部桥公共头（FFI Bridge：VUS ↔ Python / C 插件） */
+#include "../include/vus/vus_rt_bridge.h"
 
 /* yyjson：纯 C JSON 解析/生成库（rt/yyjson/，MIT 许可） */
 #include "yyjson/yyjson.h"
@@ -2149,6 +2154,29 @@ static void* (*vus_py_PyImport_AddModuleFn)(const char*) = NULL;
 static void* (*vus_py_PyModule_GetDictFn)(void*) = NULL;
 static void* (*vus_py_PyDict_GetItemStringFn)(void*, const char*) = NULL;
 static void* (*vus_py_PyEval_GetBuiltinsFn)(void) = NULL;
+static void  (*vus_py_PyErr_FetchFn)(void**, void**, void**) = NULL;
+/* Py*_Check 宏在 CPython 中多为宏/内联，不导出符号；改为「对象类型指针相等」判定，
+ * 需 dlsym 类型全局变量：PyBool_Type/PyLong_Type/PyFloat_Type/PyList_Type/
+ * PyTuple_Type/PyDict_Type（PyUnicode_Type 既有）。bool 是独立类型，type 相等
+ * 判定天然区分 bool 与 int。 */
+static void* (*vus_py_PyLong_FromLongLongFn)(long long) = NULL;
+static void* (*vus_py_PyFloat_FromDoubleFn)(double) = NULL;
+static void* (*vus_py_PyBool_FromLongFn)(long) = NULL;
+static void* (*vus_py_PyObject_GetAttrStringFn)(void*, const char*) = NULL;
+static int   (*vus_py_PyObject_SetAttrStringFn)(void*, const char*, void*) = NULL;
+static void* (*vus_py_PyTuple_NewFn)(long) = NULL;
+static int   (*vus_py_PyTuple_SetItemFn)(void*, long, void*) = NULL;
+static int   (*vus_py_PyErr_OccurredFn)(void) = NULL;
+static int   (*vus_py_PyCallable_CheckFn)(void*) = NULL;
+static long  (*vus_py_PyTuple_SizeFn)(void*) = NULL;
+static void* (*vus_py_PyTuple_GetItemFn)(void*, long) = NULL;
+static void* vus_py_PyBool_Type  = NULL;   /* &PyBool_Type（dlsym 类型全局变量） */
+static void* vus_py_PyLong_Type  = NULL;
+static void* vus_py_PyFloat_Type = NULL;
+static void* vus_py_PyList_Type  = NULL;
+static void* vus_py_PyTuple_Type = NULL;
+static void* vus_py_PyDict_Type  = NULL;
+static void* vus_py_Py_None = NULL;        /* 宏 Py_None 指向 _Py_None 全局变量（dlsym 取址后解引用） */
 
 static void* vus_py_globals = NULL;
 static void* vus_py_handle = NULL;
@@ -2213,11 +2241,46 @@ int vus_py_init(void) {
     VSYM("PyImport_AddModule",      vus_py_PyImport_AddModuleFn);
     VSYM("PyModule_GetDict",        vus_py_PyModule_GetDictFn);
     VSYM("PyEval_GetBuiltins",      vus_py_PyEval_GetBuiltinsFn);
+    VSYM("PyLong_FromLongLong",     vus_py_PyLong_FromLongLongFn);
+    VSYM("PyFloat_FromDouble",      vus_py_PyFloat_FromDoubleFn);
+    VSYM("PyBool_FromLong",         vus_py_PyBool_FromLongFn);
+    VSYM("PyObject_GetAttrString",  vus_py_PyObject_GetAttrStringFn);
+    VSYM("PyObject_SetAttrString",  vus_py_PyObject_SetAttrStringFn);
+    VSYM("PyErr_Fetch",             vus_py_PyErr_FetchFn);
+    VSYM("PyTuple_New",             vus_py_PyTuple_NewFn);
+    VSYM("PyTuple_SetItem",         vus_py_PyTuple_SetItemFn);
+    VSYM("PyErr_Occurred",          vus_py_PyErr_OccurredFn);
+    VSYM("PyCallable_Check",        vus_py_PyCallable_CheckFn);
+    VSYM("PyTuple_Size",            vus_py_PyTuple_SizeFn);
+    VSYM("PyTuple_GetItem",         vus_py_PyTuple_GetItemFn);
 #undef VSYM
+
+    /* 类型全局变量（Py*_Check 宏不导出符号，用对象类型指针相等判定） */
+#define VTSYM(_n, _slot) do { _slot = dlsym(vus_py_handle, _n); if (!_slot) { dlclose(vus_py_handle); vus_py_handle = NULL; return -1; } } while (0)
+    VTSYM("PyBool_Type",  vus_py_PyBool_Type);
+    VTSYM("PyLong_Type",  vus_py_PyLong_Type);
+    VTSYM("PyFloat_Type", vus_py_PyFloat_Type);
+    VTSYM("PyList_Type",  vus_py_PyList_Type);
+    VTSYM("PyTuple_Type", vus_py_PyTuple_Type);
+    VTSYM("PyDict_Type",  vus_py_PyDict_Type);
+#undef VTSYM
 
     /* PyUnicode_Type 是全局变量（非函数），用 dlsym 取地址 */
     vus_py_PyUnicode_Type = dlsym(vus_py_handle, "PyUnicode_Type");
     if (!vus_py_PyUnicode_Type) { dlclose(vus_py_handle); vus_py_handle = NULL; return -1; }
+    /* Py_None：版本差异兼容。
+     * - 3.12+（含 3.14）：导出 _Py_NoneStruct（对象实体），宏 Py_None = &_Py_NoneStruct；
+     * - 更老版本：导出 _Py_None（PyObject* 指针变量），需解引用。
+     * 均借用引用，不释放。 */
+    {
+        void *pn = dlsym(vus_py_handle, "_Py_NoneStruct");
+        if (!pn) {
+            void **pOld = (void **)dlsym(vus_py_handle, "_Py_None");
+            if (!pOld) { dlclose(vus_py_handle); vus_py_handle = NULL; return -1; }
+            pn = *pOld;
+        }
+        vus_py_Py_None = pn;
+    }
 
     vus_py_Py_InitializeFn();
     /* 初始化模块全局命名空间：__main__ 模块的 dict，供 PyRun_String 使用 */
@@ -2392,6 +2455,1150 @@ void* vus_plugin_run_vux_json(VusString* plugin, VusString* cmd) {
 
 VusString* vus_typeof(void* obj) { (void)obj; return vus_string_new("空"); }
 
+#endif /* VUS_USE_PY */
+
+/* =====================================================================
+ * 运行期外部桥（Runtime FFI Bridge）
+ * ----------------------------------------------------------------------
+ * VUS ↔ Python 模块 / C 运行时插件：函数互调 + 双向变量读写。
+ * 设计：docs/designs/2026-09-06-runtime-ffi-abi-design.md（总纲）
+ *       docs/designs/2026-09-06-runtime-ffi-py-impl.md / -c-impl.md
+ * 协作边界（总纲 §10）：公共件（本块 + bridge.h）由 Python 侧实现维护。
+ * ===================================================================== */
+
+#define VUS_EXT_MAX_NS       32   /* 外部别名上限 */
+#define VUS_EXT_MAX_EXPORTS  64   /* 全局导出变量上限 */
+#define VUS_EXT_DEPTH_LIMIT  64   /* 容器嵌套深度上限 */
+
+typedef enum { VUS_EXT_DOMAIN_NONE = 0, VUS_EXT_DOMAIN_PY, VUS_EXT_DOMAIN_C } VusExtDomainType;
+
+/* 域描述符（桥注册表项） */
+typedef struct {
+    char             ns[128];        /* 别名 */
+    VusExtDomainType type;
+    int              loaded;
+    char            *src;            /* strdup 持有 */
+    /* Python 域（VUS_USE_PY） */
+    void            *py_mod;         /* PyObject* 模块（new-ref） */
+    char           **py_funcs;       /* 白名单；NULL 结尾 */
+    char           **py_vars;
+    char           **py_ros;
+    /* C 域（c-impl 接入后填充） */
+    VusRTModule     *c_mod;
+    void            *c_handle;
+    /* 惰性声明参数（导入外部 声明时深拷贝保有，首次使用时传递） */
+    VusRTValue       params;
+    int              has_params;
+} VusExtDomain;
+
+static VusExtDomain s_ext_ns[VUS_EXT_MAX_NS];
+static int          s_ext_n_ns = 0;
+
+/* 全局导出槽表：导出变量 (["x","y"]) → &vus_x */
+typedef struct {
+    char        *name;
+    VusString  **ptr;
+} VusExtExport;
+static VusExtExport s_ext_exports[VUS_EXT_MAX_EXPORTS];
+static int          s_ext_n_exports = 0;
+
+/* 转换深度计数（单线程协作式运行时，无并发） */
+static int s_ext_conv_depth = 0;
+
+/* 最近一次桥错误消息（生成代码经 vus_ext_last_error() 取用） */
+static char s_ext_err[256];
+
+const char *vus_ext_last_error(void) { return s_ext_err; }
+
+static void ext_set_err(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(s_ext_err, sizeof(s_ext_err), fmt, ap);
+    va_end(ap);
+}
+
+static int ext_errv(VusRTEnv *env, const char *fmt, ...) {
+    if (env) {
+        va_list ap;
+        va_start(ap, fmt);
+        vsnprintf(env->errs, sizeof(env->errs), fmt, ap);
+        va_end(ap);
+    } else {
+        va_list ap;
+        va_start(ap, fmt);
+        vsnprintf(s_ext_err, sizeof(s_ext_err), fmt, ap);
+        va_end(ap);
+    }
+    return -1;
+}
+
+static VusExtDomain *ext_find_ns(const char *ns) {
+    if (!ns) return NULL;
+    for (int i = 0; i < s_ext_n_ns; i++)
+        if (strcmp(s_ext_ns[i].ns, ns) == 0) return &s_ext_ns[i];
+    return NULL;
+}
+
+static VusExtDomain *ext_create_ns(const char *ns) {
+    if (s_ext_n_ns >= VUS_EXT_MAX_NS) return NULL;
+    VusExtDomain *d = &s_ext_ns[s_ext_n_ns++];
+    memset(d, 0, sizeof(*d));
+    snprintf(d->ns, sizeof(d->ns), "%s", ns);
+    return d;
+}
+
+/* ---- 全局导出槽 ---- */
+
+int vus_ext_export(const char *name, VusString **ptr) {
+    if (!name || !ptr) { ext_set_err("导出变量参数无效"); return -1; }
+    for (int i = 0; i < s_ext_n_exports; i++) {
+        if (strcmp(s_ext_exports[i].name, name) == 0) {
+            s_ext_exports[i].ptr = ptr;   /* 幂等：更新指针 */
+            return 0;
+        }
+    }
+    if (s_ext_n_exports >= VUS_EXT_MAX_EXPORTS) {
+        ext_set_err("全局导出变量超过上限 %d", VUS_EXT_MAX_EXPORTS);
+        return -1;
+    }
+    s_ext_exports[s_ext_n_exports].name = strdup(name);
+    s_ext_exports[s_ext_n_exports].ptr  = ptr;
+    s_ext_n_exports++;
+    return 0;
+}
+
+static VusString **ext_find_export(const char *name) {
+    for (int i = 0; i < s_ext_n_exports; i++)
+        if (strcmp(s_ext_exports[i].name, name) == 0) return s_ext_exports[i].ptr;
+    return NULL;
+}
+
+/* ---- 类型转换：VUS 值 ↔ VusRTValue（无条件编译） ---- */
+
+void vus_rtval_free(VusRTValue *v);   /* 前向声明（递归释放 VusRTValue 堆内存） */
+
+/* 文本数值判定：十进制整数 / 浮点 / 纯文本。
+ * 前导零（如 "007"）按纯文本保留，避免数值精度歧义。 */
+static int ext_text_kind(const char *s, long long *pi, double *pf) {
+    if (!s || !*s) return VUS_RT_STR;
+    const char *p = s;
+    if (*p == '-' || *p == '+') p++;
+    if (!*p) return VUS_RT_STR;
+    if (*p == '0' && p[1] && p[1] >= '0' && p[1] <= '9') return VUS_RT_STR;
+    int digits = 1;
+    for (const char *q = p; *q; q++) {
+        if (*q < '0' || *q > '9') { digits = 0; break; }
+    }
+    if (digits) {
+        if (pi) *pi = strtoll(s, NULL, 10);
+        return VUS_RT_INT;
+    }
+    errno = 0;
+    char *end = NULL;
+    double d = strtod(s, &end);
+    if (errno == 0 && end && *end == '\0' && end != s) {
+        if (pf) *pf = d;
+        return VUS_RT_FLOAT;
+    }
+    return VUS_RT_STR;
+}
+
+/* VUS 值（VusString* / VusObject*，NULL=空）→ VusRTValue（深拷贝） */
+int vus_val_to_rt(void *vus_val, VusRTValue *out, VusRTEnv *env) {
+    memset(out, 0, sizeof(*out));
+    if (s_ext_conv_depth >= VUS_EXT_DEPTH_LIMIT)
+        return ext_errv(env, "容器嵌套过深（>%d）", VUS_EXT_DEPTH_LIMIT);
+    if (!vus_val) { out->t = VUS_RT_NIL; return 0; }
+
+    s_ext_conv_depth++;
+    int rc = 0;
+    do {
+        if (!vus_is_object(vus_val)) {
+            VusString *sv = (VusString *)vus_val;
+            const char *cs = vus_string_cstr(sv);
+            if (strcmp(cs, "true") == 0)  { out->t = VUS_RT_BOOL; out->v.b = 1; break; }
+            if (strcmp(cs, "false") == 0) { out->t = VUS_RT_BOOL; out->v.b = 0; break; }
+            long long i64 = 0; double f64 = 0;
+            VusRTType k = ext_text_kind(cs, &i64, &f64);
+            if (k == VUS_RT_INT)    { out->t = VUS_RT_INT; out->v.i64 = i64; break; }
+            if (k == VUS_RT_FLOAT)  { out->t = VUS_RT_FLOAT; out->v.f64 = f64; break; }
+            out->t = VUS_RT_STR;
+            out->v.s = strdup(cs);
+            break;
+        }
+        VusObject *o = (VusObject *)vus_val;
+        switch (o->type) {
+            case TYPE_STR:
+                out->t = VUS_RT_STR;
+                out->v.s = strdup(vus_string_cstr(o->u.str));
+                break;
+            case TYPE_LIST: {
+                VusList *l = vus_list_unwrap(o);
+                int n = vus_list_len(l);
+                VusRTValue *items = (VusRTValue *)calloc((size_t)n, sizeof(VusRTValue));
+                if (!items) { rc = ext_errv(env, "内存不足"); break; }
+                for (int i = 0; i < n; i++) {
+                    if (vus_val_to_rt(vus_list_get(l, i), &items[i], env) != 0) {
+                        for (int j = 0; j < i; j++) {
+                            if (items[j].t == VUS_RT_STR) free((void *)items[j].v.s);
+                            if (items[j].t == VUS_RT_LIST) { for (int k = 0; k < items[j].v.arr.n; k++) vus_rtval_free(&items[j].v.arr.items[k]); free(items[j].v.arr.items); }
+                            if (items[j].t == VUS_RT_DICT) { for (int k = 0; k < items[j].v.map.n; k++) { free((void *)items[j].v.map.pairs[k].k); vus_rtval_free(items[j].v.map.pairs[k].v); free(items[j].v.map.pairs[k].v); } free(items[j].v.map.pairs); }
+                        }
+                        free(items);
+                        rc = -1;
+                        break;
+                    }
+                }
+                if (rc == 0) { out->t = VUS_RT_LIST; out->v.arr.items = items; out->v.arr.n = n; }
+                break;
+            }
+            case TYPE_DICT: {
+                VusList *keys = vus_dict_keys_of(o);
+                int n = vus_list_len(keys);
+                VusRTKv *pairs = (VusRTKv *)calloc((size_t)n, sizeof(VusRTKv));
+                if (!pairs) { rc = ext_errv(env, "内存不足"); vus_unref(keys); break; }
+                int nn = 0;
+                for (int i = 0; i < n; i++) {
+                    VusString *k = (VusString *)vus_list_get(keys, i);
+                    pairs[nn].k = strdup(vus_string_cstr(k));
+                    pairs[nn].v = (VusRTValue *)calloc(1, sizeof(VusRTValue));
+                    void *vv = vus_dict_get(vus_dict_unwrap(o), k);
+                    if (vus_val_to_rt(vv, pairs[nn].v, env) != 0) {
+                        free((void *)pairs[nn].k);
+                        free(pairs[nn].v);
+                        for (int j = 0; j < nn; j++) {
+                            free((void *)pairs[j].k);
+                            vus_rtval_free(pairs[j].v);
+                            free(pairs[j].v);
+                        }
+                        free(pairs);
+                        vus_unref(keys);
+                        rc = -1;
+                        break;
+                    }
+                    nn++;
+                }
+                if (rc == 0) { out->t = VUS_RT_DICT; out->v.map.pairs = pairs; out->v.map.n = nn; }
+                vus_unref(keys);
+                break;
+            }
+            default:
+                rc = ext_errv(env, "无法映射类型（VUS 对象 type=%d）", o->type);
+                break;
+        }
+    } while (0);
+    s_ext_conv_depth--;
+    if (rc != 0 && env) strncpy(s_ext_err, env->errs, sizeof(s_ext_err) - 1);
+    return rc;
+}
+
+/* 递归释放一个 VusRTValue 的堆内存（s/arr/map） */
+void vus_rtval_free(VusRTValue *v) {
+    if (!v) return;
+    if (v->t == VUS_RT_STR) { free((void *)v->v.s); v->v.s = NULL; }
+    else if (v->t == VUS_RT_LIST) {
+        for (int i = 0; i < v->v.arr.n; i++) vus_rtval_free(&v->v.arr.items[i]);
+        free(v->v.arr.items); v->v.arr.items = NULL;
+    } else if (v->t == VUS_RT_DICT) {
+        for (int i = 0; i < v->v.map.n; i++) {
+            free((void *)v->v.map.pairs[i].k);
+            vus_rtval_free(v->v.map.pairs[i].v);
+            free(v->v.map.pairs[i].v);
+        }
+        free(v->v.map.pairs); v->v.map.pairs = NULL;
+    }
+}
+
+/* 将 VusRTValue 构造为 VUS 值。
+ * 返回约定（与生成器 R6 一致）：标量/字符串 vus_string_new 出生 ref=1；
+ * 容器返回 ref=0（宿主精确转让，调用点 vus_var_set +1 即唯一持有，不需 unref）；
+ * NIL/空 返回 NULL。调用点对标量需 vus_unref 归还出生引用。 */
+int vus_rt_to_val(const VusRTValue *in, void **out_vus, VusRTEnv *env) {
+    *out_vus = NULL;
+    if (!in) return 0;
+    if (s_ext_conv_depth >= VUS_EXT_DEPTH_LIMIT)
+        return ext_errv(env, "容器嵌套过深（>%d）", VUS_EXT_DEPTH_LIMIT);
+    s_ext_conv_depth++;
+    int rc = 0;
+    do {
+        switch (in->t) {
+            case VUS_RT_NIL: break;
+            case VUS_RT_INT: {
+                char nb[32];
+                snprintf(nb, sizeof(nb), "%lld", in->v.i64);
+                *out_vus = vus_string_new(nb);
+                break;
+            }
+            case VUS_RT_FLOAT: {
+                char nb[48];
+                snprintf(nb, sizeof(nb), "%.15g", in->v.f64);
+                *out_vus = vus_string_new(nb);
+                break;
+            }
+            case VUS_RT_BOOL:
+                *out_vus = vus_string_new(in->v.b ? "true" : "false");
+                break;
+            case VUS_RT_STR:
+                *out_vus = in->v.s ? vus_string_new(in->v.s) : NULL;
+                break;
+            case VUS_RT_LIST: {
+                VusObject *o = vus_object_list();
+                VusList *l = o->u.list;
+                for (int i = 0; i < in->v.arr.n; i++) {
+                    void *e = NULL;
+                    if (vus_rt_to_val(&in->v.arr.items[i], &e, env) != 0) {
+                        vus_unref(o);
+                        rc = -1;
+                        goto out;
+                    }
+                    if (e) { vus_list_append(l, e); vus_unref(e); }
+                }
+                *out_vus = o;
+                break;
+            }
+            case VUS_RT_DICT: {
+                VusObject *o = vus_object_dict();
+                VusDict *d = o->u.dict;
+                for (int i = 0; i < in->v.map.n; i++) {
+                    if (!in->v.map.pairs[i].k || !in->v.map.pairs[i].v) continue;
+                    void *e = NULL;
+                    if (vus_rt_to_val(in->v.map.pairs[i].v, &e, env) != 0) {
+                        vus_unref(o);
+                        rc = -1;
+                        goto out;
+                    }
+                    if (!e) { rc = ext_errv(env, "字典不能包含空值（%s）", in->v.map.pairs[i].k); vus_unref(o); goto out; }
+                    VusString *k = vus_string_new(in->v.map.pairs[i].k);
+                    vus_dict_set(d, k, e);
+                    vus_unref(k);
+                    vus_unref(e);
+                }
+                *out_vus = o;
+                break;
+            }
+            default:
+                rc = ext_errv(env, "无法映射类型（VusRTValue t=%d）", (int)in->t);
+                break;
+        }
+    } while (0);
+out:
+    s_ext_conv_depth--;
+    if (rc != 0 && env) strncpy(s_ext_err, env->errs, sizeof(s_ext_err) - 1);
+    return rc;
+}
+
+/* 赋值 helper：vus_var_set 然后按出生引用规则归还（容器 ref=0 不归还） */
+static void ext_var_assign(VusString **slot, void *v) {
+    vus_var_set(slot, v);
+    if (v && !vus_is_container(v)) vus_unref(v);
+}
+
+/* ---- 域加载/分发（无 USE_PY 时 Python 域报未启用；C 域暂桩） ---- */
+
+#ifdef VUS_USE_PY
+int vus_py_ext_load(const char *ns, const char *src, const VusRTValue *params);
+int vus_py_ext_call(const char *ns, const char *fname, const VusRTValue *args, int nargs, VusRTValue *out);
+int vus_py_ext_get(const char *ns, const char *vname, VusRTValue *out);
+int vus_py_ext_set(const char *ns, const char *vname, const VusRTValue *val);
+#else
+#define vus_py_ext_load NULL
+#define vus_py_ext_call NULL
+#define vus_py_ext_get  NULL
+#define vus_py_ext_set  NULL
+#endif
+
+/* C 域（c-impl 接入点；当前桩） */
+int vus_c_ext_load(const char *ns, const char *src, const VusRTValue *params) {
+    (void)ns; (void)src; (void)params;
+    ext_set_err("C 域尚未实现");
+    return -1;
+}
+int vus_c_ext_call(const char *ns, const char *fname, const VusRTValue *args, int nargs, VusRTValue *out) {
+    (void)ns; (void)fname; (void)args; (void)nargs; (void)out;
+    ext_set_err("C 域尚未实现");
+    return -1;
+}
+int vus_c_ext_get(const char *ns, const char *vname, VusRTValue *out) {
+    (void)ns; (void)vname; (void)out;
+    ext_set_err("C 域尚未实现");
+    return -1;
+}
+int vus_c_ext_set(const char *ns, const char *vname, const VusRTValue *val) {
+    (void)ns; (void)vname; (void)val;
+    ext_set_err("C 域尚未实现");
+    return -1;
+}
+
+/* 域内变量可见性（py 白名单 / c 变量表） */
+static int ext_domain_has_var(const VusExtDomain *d, const char *vname) {
+    if (d->type == VUS_EXT_DOMAIN_PY) {
+        for (int i = 0; d->py_vars && d->py_vars[i]; i++)
+            if (strcmp(d->py_vars[i], vname) == 0) return 1;
+        for (int i = 0; d->py_ros && d->py_ros[i]; i++)
+            if (strcmp(d->py_ros[i], vname) == 0) return 2;   /* 2 = 只读 */
+        return 0;
+    }
+    if (d->type == VUS_EXT_DOMAIN_C && d->c_mod && d->c_mod->vars) {
+        for (int i = 0; d->c_mod->vars[i].name[0]; i++)
+            if (strcmp(d->c_mod->vars[i].name, vname) == 0)
+                return d->c_mod->vars[i].readonly ? 2 : 1;
+    }
+    return 0;
+}
+
+/* ---- 惰性加载支撑：声明式注册 + 首次使用 ensure ----
+ * 生成代码入口统一走 vus_ext_*_v（值级、自带错误挂载）；vus_ext_load 保留为
+ * 兼容/宿主直调入口（等价：声明 + 立即加载）。 */
+
+static int ext_dom_set_type(VusExtDomain *d, const char *src) {
+    size_t sl = strlen(src);
+    if ((sl >= 3 && strcmp(src + sl - 3, ".so") == 0) ||
+        (sl >= 7 && strcmp(src + sl - 7, ".vulage") == 0)) {
+        d->type = VUS_EXT_DOMAIN_C;
+        return 0;
+    }
+    d->type = VUS_EXT_DOMAIN_PY;
+    return 0;
+}
+
+/* 递归深拷贝 VusRTValue（str/list/dict），配合 vus_rtval_free 释放 */
+static void ext_rtval_deepcopy(const VusRTValue *s, VusRTValue *d) {
+    memset(d, 0, sizeof(*d));
+    if (!s) return;
+    d->t = s->t;
+    switch (s->t) {
+    case VUS_RT_STR:
+        d->v.s = s->v.s ? strdup(s->v.s) : NULL;
+        break;
+    case VUS_RT_LIST: {
+        d->v.arr.n = s->v.arr.n;
+        d->v.arr.items = s->v.arr.n ? (VusRTValue *)calloc((size_t)s->v.arr.n, sizeof(VusRTValue)) : NULL;
+        for (int i = 0; i < s->v.arr.n; i++)
+            ext_rtval_deepcopy(&s->v.arr.items[i], &d->v.arr.items[i]);
+        break;
+    }
+    case VUS_RT_DICT: {
+        d->v.map.n = s->v.map.n;
+        d->v.map.pairs = s->v.map.n ? (VusRTKv *)calloc((size_t)s->v.map.n, sizeof(VusRTKv)) : NULL;
+        for (int i = 0; i < s->v.map.n; i++) {
+            d->v.map.pairs[i].k = s->v.map.pairs[i].k ? strdup(s->v.map.pairs[i].k) : NULL;
+            d->v.map.pairs[i].v = (VusRTValue *)calloc(1, sizeof(VusRTValue));
+            if (s->v.map.pairs[i].v)
+                ext_rtval_deepcopy(s->v.map.pairs[i].v, d->v.map.pairs[i].v);
+        }
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+/* 首次使用触发加载（惰性语义核心）：声明后首次 调用/读写 才真正加载并 init */
+static int ext_ensure_loaded(VusExtDomain *d) {
+    if (!d) return -1;
+    if (d->loaded) return 0;
+    const VusRTValue *p = d->has_params ? &d->params : NULL;
+    int rc;
+    if (d->type == VUS_EXT_DOMAIN_C) {
+        rc = vus_c_ext_load(d->ns, d->src, p);
+    } else {
+#ifdef VUS_USE_PY
+        rc = vus_py_ext_load(d->ns, d->src, p);
+#else
+        ext_set_err("本构建未启用 Python 域（需 VUS_USE_PY + libpython）");
+        rc = -1;
+#endif
+    }
+    if (rc == 0) d->loaded = 1;
+    return rc;
+}
+
+/* 声明式注册（惰性）：别名→源+参数 登记但**不加载**。幂等（同源重复成功）；
+ * 异源/别名冲突报错。params_vus 为 VUS 字典值（VusObject*）或 NULL。 */
+int vus_ext_declare_v(const char *ns, const char *src, void *params_vus) {
+    if (!ns || !ns[0] || !src || !src[0]) { ext_set_err("导入外部 参数无效"); return -1; }
+    VusExtDomain *d = ext_find_ns(ns);
+    if (d) {
+        /* 幂等：同源重复导入成功；异源报错（别名冲突） */
+        if (strcmp(d->src, src) == 0) return 0;
+        ext_set_err("别名 %s 已绑定到 %s，不能重复导入 %s", ns, d->src, src);
+        return -1;
+    }
+    d = ext_create_ns(ns);
+    if (!d) { ext_set_err("外部别名超过上限 %d", VUS_EXT_MAX_NS); return -1; }
+    d->src = strdup(src);
+    ext_dom_set_type(d, src);
+    /* 参数深拷贝保有（供首次加载时传予域 init） */
+    if (params_vus) {
+        if (vus_val_to_rt(params_vus, &d->params, NULL) != 0) {
+            ext_set_err("导入外部 参数无法转换（需为字典）");
+            free(d->src);
+            d->src = NULL;
+            return -1;
+        }
+        d->has_params = 1;
+    }
+    return 0;
+}
+
+int vus_ext_load(const char *ns, const char *src, const VusRTValue *params) {
+    if (!ns || !ns[0] || !src || !src[0]) { ext_set_err("导入外部 参数无效"); return -1; }
+    VusExtDomain *d = ext_find_ns(ns);
+    if (!d) {
+        d = ext_create_ns(ns);
+        if (!d) { ext_set_err("外部别名超过上限 %d", VUS_EXT_MAX_NS); return -1; }
+        d->src = strdup(src);
+        ext_dom_set_type(d, src);
+    } else if (strcmp(d->src, src) != 0) {
+        ext_set_err("别名 %s 已绑定到 %s，不能重复导入 %s", ns, d->src, src);
+        return -1;
+    }
+    if (params && !d->has_params) {
+        ext_rtval_deepcopy(params, &d->params);
+        d->has_params = 1;
+    }
+    return ext_ensure_loaded(d);
+}
+
+int vus_ext_call(const char *ns, const char *fname, const VusRTValue *args, int nargs, VusRTValue *out) {
+    VusExtDomain *d = ext_find_ns(ns);
+    if (!d) { ext_set_err("外部域 %s 未导入", ns ? ns : "(空)"); return -1; }
+    if (ext_ensure_loaded(d) != 0) return -1;
+    memset(out, 0, sizeof(*out));
+    if (d->type == VUS_EXT_DOMAIN_PY) {
+#ifdef VUS_USE_PY
+        return vus_py_ext_call(ns, fname, args, nargs, out);
+#else
+        ext_set_err("本构建未启用 Python 域"); return -1;
+#endif
+    }
+    return vus_c_ext_call(ns, fname, args, nargs, out);
+}
+
+int vus_ext_get(const char *ns, const char *vname, VusRTValue *out) {
+    VusExtDomain *d = ext_find_ns(ns);
+    if (!d) { ext_set_err("外部域 %s 未导入", ns ? ns : "(空)"); return -1; }
+    if (ext_ensure_loaded(d) != 0) return -1;
+    memset(out, 0, sizeof(*out));
+    int rw = ext_domain_has_var(d, vname);
+    if (rw) {
+        if (d->type == VUS_EXT_DOMAIN_PY) {
+#ifdef VUS_USE_PY
+            return vus_py_ext_get(ns, vname, out);
+#else
+            ext_set_err("本构建未启用 Python 域"); return -1;
+#endif
+        }
+        return vus_c_ext_get(ns, vname, out);
+    }
+    /* 域内无 → 全局导出槽 */
+    VusString **slot = ext_find_export(vname);
+    if (!slot) { ext_set_err("<%s>.%s 不存在", ns, vname); return -1; }
+    return vus_val_to_rt(*slot, out, NULL);
+}
+
+int vus_ext_set(const char *ns, const char *vname, const VusRTValue *val) {
+    VusExtDomain *d = ext_find_ns(ns);
+    if (!d) { ext_set_err("外部域 %s 未导入", ns ? ns : "(空)"); return -1; }
+    if (ext_ensure_loaded(d) != 0) return -1;
+    int rw = ext_domain_has_var(d, vname);
+    if (rw == 2) { ext_set_err("%s.%s 为只读", ns, vname); return -1; }
+    if (rw == 1) {
+        if (d->type == VUS_EXT_DOMAIN_PY) {
+#ifdef VUS_USE_PY
+            return vus_py_ext_set(ns, vname, val);
+#else
+            ext_set_err("本构建未启用 Python 域"); return -1;
+#endif
+        }
+        return vus_c_ext_set(ns, vname, val);
+    }
+    /* 域内无 → 全局导出槽（只读性与类型在 VUS 侧无声明约束，直读直写） */
+    VusString **slot = ext_find_export(vname);
+    if (!slot) { ext_set_err("<%s>.%s 不存在", ns, vname); return -1; }
+    void *v = NULL;
+    if (vus_rt_to_val(val, &v, NULL) != 0) return -1;
+    ext_var_assign(slot, v);
+    return 0;
+}
+
+/* ---- 生成代码入口（vus_ext_*_v）：值级互操作，失败挂载 VusError（类型"外部错误"） ---- */
+
+static int ext_fail_v(VusError **err_out) {
+    if (err_out) {
+        *err_out = vus_error_new_typed(1, "外部错误",
+                                       vus_ext_last_error()[0] ? vus_ext_last_error() : "外部域调用失败",
+                                       0, 0);
+    }
+    return -1;
+}
+
+int vus_ext_call_v(const char *ns, const char *fname, void *const *args, int nargs,
+                   void **out_vus, VusError **err_out) {
+    if (out_vus) *out_vus = NULL;
+    if (err_out) *err_out = NULL;
+    VusExtDomain *d = ext_find_ns(ns);
+    if (!d) { ext_set_err("外部域 %s 未导入", ns ? ns : "(空)"); return ext_fail_v(err_out); }
+    if (ext_ensure_loaded(d) != 0) return ext_fail_v(err_out);
+
+    VusRTValue *rtargs = NULL;
+    if (nargs > 0) {
+        rtargs = (VusRTValue *)calloc((size_t)nargs, sizeof(VusRTValue));
+        if (!rtargs) { ext_set_err("内存不足"); return ext_fail_v(err_out); }
+        for (int i = 0; i < nargs; i++) {
+            if (vus_val_to_rt(args[i], &rtargs[i], NULL) != 0) {
+                for (int j = 0; j < i; j++) vus_rtval_free(&rtargs[j]);
+                free(rtargs);
+                ext_set_err("实参 #%d 无法转换", i + 1);
+                return ext_fail_v(err_out);
+            }
+        }
+    }
+    VusRTValue out = {0};
+    int rc = vus_ext_call(ns, fname, rtargs, nargs, &out);
+    for (int i = 0; i < nargs; i++) vus_rtval_free(&rtargs[i]);
+    free(rtargs);
+    if (rc != 0) return ext_fail_v(err_out);
+    void *v = NULL;
+    if (vus_rt_to_val(&out, &v, NULL) != 0) {
+        vus_rtval_free(&out);
+        if (!vus_ext_last_error()[0]) ext_set_err("返回值无法转换");
+        return ext_fail_v(err_out);
+    }
+    vus_rtval_free(&out);
+    if (out_vus) *out_vus = v;
+    return 0;
+}
+
+int vus_ext_get_v(const char *ns, const char *vname, void **out_vus, VusError **err_out) {
+    if (out_vus) *out_vus = NULL;
+    if (err_out) *err_out = NULL;
+    VusExtDomain *d = ext_find_ns(ns);
+    if (!d) { ext_set_err("外部域 %s 未导入", ns ? ns : "(空)"); return ext_fail_v(err_out); }
+    if (ext_ensure_loaded(d) != 0) return ext_fail_v(err_out);
+    VusRTValue out = {0};
+    if (vus_ext_get(ns, vname, &out) != 0) return ext_fail_v(err_out);
+    void *v = NULL;
+    if (vus_rt_to_val(&out, &v, NULL) != 0) {
+        vus_rtval_free(&out);
+        if (!vus_ext_last_error()[0]) ext_set_err("变量值无法转换");
+        return ext_fail_v(err_out);
+    }
+    vus_rtval_free(&out);
+    if (out_vus) *out_vus = v;
+    return 0;
+}
+
+int vus_ext_set_v(const char *ns, const char *vname, void *val_vus, VusError **err_out) {
+    if (err_out) *err_out = NULL;
+    VusExtDomain *d = ext_find_ns(ns);
+    if (!d) { ext_set_err("外部域 %s 未导入", ns ? ns : "(空)"); return ext_fail_v(err_out); }
+    if (ext_ensure_loaded(d) != 0) return ext_fail_v(err_out);
+    VusRTValue rv;
+    if (vus_val_to_rt(val_vus, &rv, NULL) != 0) return ext_fail_v(err_out);
+    int rc = vus_ext_set(ns, vname, &rv);
+    vus_rtval_free(&rv);
+    if (rc != 0) return ext_fail_v(err_out);
+    return 0;
+}
+
+int vus_ext_export_v(const char *name, void **ptr) {
+    return vus_ext_export(name, (VusString **)ptr);
+}
+
+void vus_ext_shutdown_all(void) {
+#ifdef VUS_USE_PY
+    for (int i = 0; i < s_ext_n_ns; i++) {
+        VusExtDomain *d = &s_ext_ns[i];
+        if (d->type == VUS_EXT_DOMAIN_PY && d->py_mod) {
+            /* __vus_cleanup__（若模块定义） */
+            void *cf = vus_py_PyObject_GetAttrStringFn(d->py_mod, "__vus_cleanup__");
+            if (cf && !vus_py_PyErr_OccurredFn()) {
+                (void)vus_py_PyObject_CallObjectFn(cf, NULL);
+                if (vus_py_PyErr_OccurredFn()) { vus_py_PyErr_PrintFn(); vus_py_PyErr_ClearFn(); }
+            }
+            if (cf) vus_py_Py_XDECREF_Fn(cf);
+            vus_py_Py_XDECREF_Fn(d->py_mod);
+            d->py_mod = NULL;
+        }
+    }
+#endif
+    for (int i = 0; i < s_ext_n_ns; i++) {
+        char **arrs[3] = { s_ext_ns[i].py_funcs, s_ext_ns[i].py_vars, s_ext_ns[i].py_ros };
+        for (int a = 0; a < 3; a++)
+            for (int j = 0; arrs[a] && arrs[a][j]; j++) free(arrs[a][j]);
+        for (int a = 0; a < 3; a++) free(arrs[a]);
+        if (s_ext_ns[i].src) { free(s_ext_ns[i].src); s_ext_ns[i].src = NULL; }
+        if (s_ext_ns[i].has_params) { vus_rtval_free(&s_ext_ns[i].params); s_ext_ns[i].has_params = 0; }
+    }
+    s_ext_n_ns = 0;
+    for (int i = 0; i < s_ext_n_exports; i++) {
+        free(s_ext_exports[i].name);
+        s_ext_exports[i].name = NULL;
+    }
+    s_ext_n_exports = 0;
+}
+
+#ifdef VUS_USE_PY
+/* =====================================================================
+ * Python 域实现（在既有 vus_py_* 嵌入通道之上）
+ * ===================================================================== */
+
+/* 对象类型指针相等判定（替代 Py*_Check 宏；朴素对象相等，子类视为自定义类型） */
+static int vus_py_is_type(void *o, void *t) {
+    return o && t && vus_py_PyObject_TypeFn(o) == t;
+}
+
+/* VusRTValue → PyObject*（桥层转换，深拷贝） */
+static void *vus_py_rt_to_obj(const VusRTValue *in, VusRTEnv *env) {
+    if (s_ext_conv_depth >= VUS_EXT_DEPTH_LIMIT) {
+        ext_errv(env, "容器嵌套过深（>%d）", VUS_EXT_DEPTH_LIMIT); return NULL;
+    }
+    if (!in) return NULL;
+    s_ext_conv_depth++;
+    void *o = NULL;
+    switch (in->t) {
+        case VUS_RT_NIL:   o = vus_py_Py_None; break;
+        case VUS_RT_INT:   o = vus_py_PyLong_FromLongLongFn(in->v.i64); break;
+        case VUS_RT_FLOAT: o = vus_py_PyFloat_FromDoubleFn(in->v.f64); break;
+        case VUS_RT_BOOL:  o = vus_py_PyBool_FromLongFn(in->v.b); break;
+        case VUS_RT_STR:
+            o = in->v.s ? vus_py_PyUnicode_FromStringFn(in->v.s) : vus_py_Py_None;
+            break;
+        case VUS_RT_LIST: {
+            /* PyList_New(n) 在 3.12+ 语义为「创建长度 n 的列表」而非「预分配容量」，
+             * 直接 New(n)+Append 会多出 n 个空槽（ob_size 翻倍）。统一 New(0)+Append。 */
+            o = vus_py_PyList_NewFn(0);
+            if (!o) break;
+            for (int i = 0; i < in->v.arr.n; i++) {
+                void *e = vus_py_rt_to_obj(&in->v.arr.items[i], env);
+                if (!e) { vus_py_Py_XDECREF_Fn(o); o = NULL; break; }
+                if (vus_py_PyList_AppendFn(o, e) != 0) { vus_py_Py_XDECREF_Fn(e); vus_py_Py_XDECREF_Fn(o); o = NULL; break; }
+                vus_py_Py_XDECREF_Fn(e);
+            }
+            break;
+        }
+        case VUS_RT_DICT: {
+            o = vus_py_PyDict_NewFn();
+            if (!o) break;
+            for (int i = 0; i < in->v.map.n; i++) {
+                void *v = vus_py_rt_to_obj(in->v.map.pairs[i].v, env);
+                if (!v) { vus_py_Py_XDECREF_Fn(o); o = NULL; break; }
+                void *k = vus_py_PyUnicode_FromStringFn(in->v.map.pairs[i].k);
+                if (vus_py_PyDict_SetItemFn(o, k, v) != 0) { vus_py_Py_XDECREF_Fn(k); vus_py_Py_XDECREF_Fn(v); vus_py_Py_XDECREF_Fn(o); o = NULL; break; }
+                vus_py_Py_XDECREF_Fn(k);
+                vus_py_Py_XDECREF_Fn(v);
+            }
+            break;
+        }
+        default:
+            ext_errv(env, "无法映射类型（VusRTValue t=%d）", (int)in->t);
+            break;
+    }
+    s_ext_conv_depth--;
+    return o;
+}
+
+/* 提取 PyErr 当前异常为 "类型: 消息" 文本 */
+static void vus_py_err_text(char *buf, size_t cap) {
+    buf[0] = '\0';
+    if (!vus_py_PyErr_FetchFn || !vus_py_PyErr_OccurredFn) return;
+    void *t = NULL, *v = NULL, *tb = NULL;
+    vus_py_PyErr_FetchFn(&t, &v, &tb);
+    if (t) {
+        void *ts = vus_py_PyObject_StrFn(t);
+        const char *tc = ts ? vus_py_PyUnicode_AsUTF8Fn(ts) : NULL;
+        snprintf(buf, cap, "%s", tc ? tc : "异常");
+        if (ts) vus_py_Py_XDECREF_Fn(ts);
+    }
+    if (v) {
+        void *vs = vus_py_PyObject_StrFn(v);
+        const char *vc = vs ? vus_py_PyUnicode_AsUTF8Fn(vs) : NULL;
+        if (vc && vc[0]) {
+            size_t l = strlen(buf);
+            snprintf(buf + l, cap - l, ": %s", vc);
+        }
+        if (vs) vus_py_Py_XDECREF_Fn(vs);
+    }
+    if (t) vus_py_Py_XDECREF_Fn(t);
+    if (v) vus_py_Py_XDECREF_Fn(v);
+    if (tb) vus_py_Py_XDECREF_Fn(tb);
+}
+
+/* PyObject* → VusRTValue（深拷贝；None→NIL；list/tuple→LIST；dict 键限 str；
+ * 自定义类型走 __vus_tovalue__ 协议，未实现则报错） */
+static int vus_py_obj_to_rt(void *obj, VusRTValue *out, VusRTEnv *env) {
+    memset(out, 0, sizeof(*out));
+    if (s_ext_conv_depth >= VUS_EXT_DEPTH_LIMIT)
+        return ext_errv(env, "容器嵌套过深（>%d）", VUS_EXT_DEPTH_LIMIT);
+    if (!obj || obj == vus_py_Py_None) { out->t = VUS_RT_NIL; return 0; }
+    s_ext_conv_depth++;
+    int rc = 0;
+    if (vus_py_is_type(obj, vus_py_PyBool_Type)) {
+        out->t = VUS_RT_BOOL;
+        out->v.b = vus_py_PyObject_IsTrueFn(obj) ? 1 : 0;
+    } else if (vus_py_is_type(obj, vus_py_PyLong_Type)) {
+        long v = vus_py_PyLong_AsLongFn(obj);
+        if (vus_py_PyErr_OccurredFn()) { vus_py_PyErr_ClearFn(); rc = ext_errv(env, "整数超出范围"); }
+        else { out->t = VUS_RT_INT; out->v.i64 = (long long)v; }
+    } else if (vus_py_is_type(obj, vus_py_PyFloat_Type)) {
+        out->t = VUS_RT_FLOAT;
+        out->v.f64 = vus_py_PyFloat_AsDoubleFn(obj);
+    } else if (vus_py_is_type(obj, vus_py_PyUnicode_Type)) {
+        const char *cs = vus_py_PyUnicode_AsUTF8Fn(obj);
+        if (!cs) { rc = ext_errv(env, "字符串解码失败"); }
+        else { out->t = VUS_RT_STR; out->v.s = strdup(cs); }
+    } else if (vus_py_is_type(obj, vus_py_PyList_Type) || vus_py_is_type(obj, vus_py_PyTuple_Type)) {
+        int is_list = vus_py_is_type(obj, vus_py_PyList_Type);
+        long n = is_list ? vus_py_PyList_SizeFn(obj) : vus_py_PyTuple_SizeFn(obj);
+        VusRTValue *items = (VusRTValue *)calloc(n > 0 ? (size_t)n : 1, sizeof(VusRTValue));
+        if (!items) { rc = ext_errv(env, "内存不足"); }
+        else {
+            for (long i = 0; i < n; i++) {
+                void *e = is_list ? vus_py_PyList_GetItemFn(obj, i)
+                                  : vus_py_PyTuple_GetItemFn(obj, i);
+                if (vus_py_obj_to_rt(e, &items[i], env) != 0) {
+                    for (long j = 0; j < i; j++) vus_rtval_free(&items[j]);
+                    free(items);
+                    rc = -1;
+                    break;
+                }
+            }
+            if (rc == 0) { out->t = VUS_RT_LIST; out->v.arr.items = items; out->v.arr.n = (int)n; }
+        }
+    } else if (vus_py_is_type(obj, vus_py_PyDict_Type)) {
+        long n = vus_py_PyDict_SizeFn(obj);
+        VusRTKv *pairs = (VusRTKv *)calloc(n > 0 ? (size_t)n : 1, sizeof(VusRTKv));
+        if (!pairs) { rc = ext_errv(env, "内存不足"); }
+        else {
+            long pos = 0, nn = 0;
+            void *k = NULL, *v = NULL;
+            while (vus_py_PyDict_NextFn(obj, &pos, &k, &v)) {
+                if (!vus_py_is_type(k, vus_py_PyUnicode_Type)) { rc = ext_errv(env, "字典键必须是字符串"); break; }
+                const char *ks = vus_py_PyUnicode_AsUTF8Fn(k);
+                pairs[nn].k = strdup(ks);
+                pairs[nn].v = (VusRTValue *)calloc(1, sizeof(VusRTValue));
+                if (vus_py_obj_to_rt(v, pairs[nn].v, env) != 0) {
+                    for (long j = 0; j <= nn; j++) {
+                        if (pairs[j].k) free((void *)pairs[j].k);
+                        if (pairs[j].v) { vus_rtval_free(pairs[j].v); free(pairs[j].v); }
+                    }
+                    free(pairs);
+                    rc = -1;
+                    break;
+                }
+                nn++;
+            }
+            if (rc == 0) { out->t = VUS_RT_DICT; out->v.map.pairs = pairs; out->v.map.n = (int)nn; }
+        }
+    } else {
+        /* 自定义类型：__vus_tovalue__ 协议 */
+        void *fv = vus_py_PyObject_GetAttrStringFn(obj, "__vus_tovalue__");
+        if (fv && vus_py_PyErr_OccurredFn()) vus_py_PyErr_ClearFn();
+        if (fv) {
+            void *r = vus_py_PyObject_CallObjectFn(fv, NULL);
+            if (r) {
+                rc = vus_py_obj_to_rt(r, out, env);
+                vus_py_Py_XDECREF_Fn(r);
+            } else {
+                char eb[192]; vus_py_err_text(eb, sizeof(eb));
+                vus_py_PyErr_ClearFn();
+                rc = ext_errv(env, "__vus_tovalue__ 调用失败: %s", eb);
+            }
+            vus_py_Py_XDECREF_Fn(fv);
+        } else {
+            void *ts = vus_py_PyObject_StrFn(vus_py_PyObject_TypeFn(obj));
+            const char *tn = ts ? vus_py_PyUnicode_AsUTF8Fn(ts) : "未知";
+            if (ts) vus_py_Py_XDECREF_Fn(ts);
+            rc = ext_errv(env, "无法映射类型: %s", tn ? tn : "未知");
+        }
+    }
+    s_ext_conv_depth--;
+    if (rc != 0 && env) strncpy(s_ext_err, env->errs, sizeof(s_ext_err) - 1);
+    return rc;
+}
+
+/* sys.path 预置注入（不重复） */
+static void vus_py_ext_ensure_path(const char *dir) {
+    if (!dir || !dir[0]) return;
+    void *path = vus_py_PySys_GetObjectFn("path");
+    if (!path || !vus_py_is_type(path, vus_py_PyList_Type)) return;
+    long n = vus_py_PyList_SizeFn(path);
+    for (long i = 0; i < n; i++) {
+        void *it = vus_py_PyList_GetItemFn(path, i);
+        if (it && vus_py_is_type(it, vus_py_PyUnicode_Type)) {
+            const char *cs = vus_py_PyUnicode_AsUTF8Fn(it);
+            if (cs && strcmp(cs, dir) == 0) return;
+        }
+    }
+    void *u = vus_py_PyUnicode_FromStringFn(dir);
+    if (u) { vus_py_PyList_AppendFn(path, u); vus_py_Py_XDECREF_Fn(u); }
+}
+
+/* Python str 列表（如 __vus_export__ 的 函数/变量 值）→ char** 数组（NULL 结尾）。失败返回 NULL */
+static char **vus_py_strlist_from(void *obj) {
+    if (!obj || !vus_py_is_type(obj, vus_py_PyList_Type)) return NULL;
+    long n = vus_py_PyList_SizeFn(obj);
+    char **arr = (char **)calloc((size_t)n + 1, sizeof(char *));
+    if (!arr) return NULL;
+    long m = 0;
+    for (long i = 0; i < n; i++) {
+        void *it = vus_py_PyList_GetItemFn(obj, i);
+        if (it && vus_py_is_type(it, vus_py_PyUnicode_Type)) {
+            const char *cs = vus_py_PyUnicode_AsUTF8Fn(it);
+            arr[m++] = cs ? strdup(cs) : NULL;
+        } else {
+            for (long j = 0; j < m; j++) free(arr[j]);
+            free(arr);
+            return NULL;
+        }
+    }
+    arr[m] = NULL;
+    return arr;
+}
+
+/* 缺省回退采集：模块公开命名空间（跳过下划线开头、桥保留名、可调用对象） */
+static void vus_py_export_fallback(void *dict, char ***pu_funcs, char ***pu_vars, char ***pu_ros) {
+    (void)pu_ros; /* 默认无可写/只读区分，全为可读写变量 */
+    long pos = 0;
+    void *k = NULL, *v = NULL;
+    char **funcs = NULL, **vars = NULL;
+    int nf = 0, nv = 0, cf = 0, cv = 0;
+    while (vus_py_PyDict_NextFn(dict, &pos, &k, &v)) {
+        if (!vus_py_is_type(k, vus_py_PyUnicode_Type)) continue;
+        const char *ks = vus_py_PyUnicode_AsUTF8Fn(k);
+        if (!ks || !ks[0] || ks[0] == '_') continue;               /* 跳过 dunder/私有 */
+        if (strncmp(ks, "__vus_", 6) == 0) continue;               /* 桥保留名 */
+        if (vus_py_PyCallable_CheckFn(v)) {                         /* 可调用 → 函数表 */
+            funcs = funcs ? funcs : (char **)calloc(64, sizeof(char *));
+            if (nf < 63) funcs[nf++] = strdup(ks);
+        } else if (vus_py_PySequence_CheckFn(v) || vus_py_PyMapping_CheckFn(v) ||
+                   vus_py_is_type(v, vus_py_PyLong_Type) || vus_py_is_type(v, vus_py_PyFloat_Type) ||
+                   vus_py_is_type(v, vus_py_PyBool_Type) || vus_py_is_type(v, vus_py_PyUnicode_Type) || v == vus_py_Py_None) {
+            vars = vars ? vars : (char **)calloc(64, sizeof(char *));
+            if (nv < 63) vars[nv++] = strdup(ks);
+        }
+    }
+    funcs = funcs ? funcs : (char **)calloc(1, sizeof(char *));
+    vars  = vars  ? vars  : (char **)calloc(1, sizeof(char *));
+    *pu_funcs = funcs; *pu_vars = vars; *pu_ros = NULL;
+    (void)cf; (void)cv;
+}
+
+int vus_py_ext_load(const char *ns, const char *src, const VusRTValue *params) {
+    VusExtDomain *d = ext_find_ns(ns);
+    if (!d) { ext_set_err("域 %s 不存在", ns); return -1; }
+    if (vus_py_init() != 0) { ext_set_err("Python 域不可用（无 libpython 或未启用 VUS_USE_PY）"); return -1; }
+
+    /* sys.path 注入（插件根/安装目录/脚本目录） */
+    const char *pd = getenv("VUS_PLUGIN_DIR");
+    if (pd && pd[0]) vus_py_ext_ensure_path(pd);
+    const char *home = getenv("VUS_HOME");
+    if (home && home[0]) vus_py_ext_ensure_path(home);
+    const char *cdir = getenv("PWD");
+    if (cdir && cdir[0]) vus_py_ext_ensure_path(cdir);
+
+    void *mod = vus_py_PyImport_ImportModuleFn(src);
+    if (!mod) {
+        char eb[192]; vus_py_err_text(eb, sizeof(eb));
+        vus_py_PyErr_ClearFn();
+        ext_set_err("导入外部 失败: %s: %s", src, eb);
+        return -1;
+    }
+
+    /* __vus_init__(api_dict, 参数) */
+    void *initerr = NULL;
+    void *initfn = vus_py_PyObject_GetAttrStringFn(mod, "__vus_init__");
+    if (initfn && !vus_py_PyErr_OccurredFn()) {
+        void *api = vus_py_PyDict_NewFn();
+        if (api) {
+            void *vk = vus_py_PyUnicode_FromStringFn("version");
+            void *vv = vus_py_PyLong_FromLongLongFn(VUS_RT_BRIDGE_ABI);
+            vus_py_PyDict_SetItemFn(api, vk, vv);
+            vus_py_Py_XDECREF_Fn(vk); vus_py_Py_XDECREF_Fn(vv);
+            void *nk = vus_py_PyUnicode_FromStringFn("别名");
+            void *nv = vus_py_PyUnicode_FromStringFn(ns);
+            vus_py_PyDict_SetItemFn(api, nk, nv);
+            vus_py_Py_XDECREF_Fn(nk); vus_py_Py_XDECREF_Fn(nv);
+            void *sk = vus_py_PyUnicode_FromStringFn("源");
+            void *sv = vus_py_PyUnicode_FromStringFn(src);
+            vus_py_PyDict_SetItemFn(api, sk, sv);
+            vus_py_Py_XDECREF_Fn(sk); vus_py_Py_XDECREF_Fn(sv);
+            VusRTEnv env = { VUS_RT_BRIDGE_ABI, {0} };
+            void *pobj = params ? vus_py_rt_to_obj(params, &env) : vus_py_PyDict_NewFn();
+            if (!pobj) { ext_set_err("初始化参数无法映射: %s", env.errs); vus_py_Py_XDECREF_Fn(api); vus_py_Py_XDECREF_Fn(mod); return -1; }
+            void *r = vus_py_PyObject_CallObjectFn(initfn,
+                        vus_py_Py_BuildValueFn("(OO)", api, pobj));
+            if (!r) {
+                char eb[192]; vus_py_err_text(eb, sizeof(eb));
+                vus_py_PyErr_ClearFn();
+                initerr = strdup(eb);
+            } else {
+                long code = vus_py_is_type(r, vus_py_PyLong_Type) ? vus_py_PyLong_AsLongFn(r) : 0;
+                if (vus_py_PyErr_OccurredFn()) vus_py_PyErr_ClearFn();
+                if (code != 0) {
+                    char eb[192]; snprintf(eb, sizeof(eb), "初始化返回码 %ld", code);
+                    initerr = strdup(eb);
+                }
+                vus_py_Py_XDECREF_Fn(r);
+            }
+            vus_py_Py_XDECREF_Fn(pobj);
+            vus_py_Py_XDECREF_Fn(api);
+        }
+    } else if (initfn && vus_py_PyErr_OccurredFn()) {
+        vus_py_PyErr_ClearFn();
+    }
+    if (initfn) vus_py_Py_XDECREF_Fn(initfn);
+    if (initerr) {
+        ext_set_err("%s 初始化失败: %s", src, initerr);
+        free(initerr);
+        vus_py_Py_XDECREF_Fn(mod);
+        return -1;
+    }
+
+    /* 导出清单采集：__vus_export__（声明式）或公开命名空间（回退） */
+    char **funcs = NULL, **vars = NULL, **ros = NULL;
+    void *ex = vus_py_PyObject_GetAttrStringFn(mod, "__vus_export__");
+    if (ex && !vus_py_PyErr_OccurredFn()) {
+        if (!vus_py_is_type(ex, vus_py_PyDict_Type)) {
+            ext_set_err("%s: __vus_export__ 必须是字典", src);
+            vus_py_Py_XDECREF_Fn(ex); vus_py_Py_XDECREF_Fn(mod);
+            return -1;
+        }
+        funcs = vus_py_strlist_from(vus_py_PyDict_GetItemStringFn(ex, "函数"));
+        vars  = vus_py_strlist_from(vus_py_PyDict_GetItemStringFn(ex, "变量"));
+        ros   = vus_py_strlist_from(vus_py_PyDict_GetItemStringFn(ex, "只读"));
+        /* 校验：白名单里模块属性必须存在；函数必须可调用 */
+        char errb[256] = {0};
+        for (int i = 0; funcs && funcs[i] && !errb[0]; i++) {
+            void *a = vus_py_PyObject_GetAttrStringFn(mod, funcs[i]);
+            if (vus_py_PyErr_OccurredFn()) { vus_py_PyErr_ClearFn(); snprintf(errb, sizeof(errb), "函数 %s 不存在", funcs[i]); }
+            else if (!vus_py_PyCallable_CheckFn(a)) { snprintf(errb, sizeof(errb), "%s 不可调用", funcs[i]); }
+            if (a) vus_py_Py_XDECREF_Fn(a);
+        }
+        for (int i = 0; i < 2 && vars && vars[i] && !errb[0]; i++) {}
+        if (!errb[0]) {
+            for (int i = 0; vars && vars[i] && !errb[0]; i++) {
+                void *a = vus_py_PyObject_GetAttrStringFn(mod, vars[i]);
+                if (vus_py_PyErr_OccurredFn()) { vus_py_PyErr_ClearFn(); snprintf(errb, sizeof(errb), "变量 %s 不存在", vars[i]); }
+                if (a) vus_py_Py_XDECREF_Fn(a);
+            }
+        }
+        if (!errb[0]) {
+            for (int i = 0; ros && ros[i] && !errb[0]; i++) {
+                void *a = vus_py_PyObject_GetAttrStringFn(mod, ros[i]);
+                if (vus_py_PyErr_OccurredFn()) { vus_py_PyErr_ClearFn(); snprintf(errb, sizeof(errb), "只读变量 %s 不存在", ros[i]); }
+                if (a) vus_py_Py_XDECREF_Fn(a);
+            }
+        }
+        if (errb[0]) {
+            ext_set_err("%s: __vus_export__ 校验失败: %s", src, errb);
+            vus_py_Py_XDECREF_Fn(ex); vus_py_Py_XDECREF_Fn(mod);
+            return -1;
+        }
+    } else {
+        if (ex && vus_py_PyErr_OccurredFn()) vus_py_PyErr_ClearFn();
+        void *mdc = vus_py_PyModule_GetDictFn(mod);
+        vus_py_export_fallback(mdc, &funcs, &vars, &ros);
+    }
+    if (ex) vus_py_Py_XDECREF_Fn(ex);
+
+    d->py_mod   = mod;   /* new-ref 持有 */
+    d->py_funcs = funcs ? funcs : (char **)calloc(1, sizeof(char *));
+    d->py_vars  = vars  ? vars  : (char **)calloc(1, sizeof(char *));
+    d->py_ros   = ros   ? ros   : (char **)calloc(1, sizeof(char *));
+    return 0;
+}
+
+static VusExtDomain *ext_ns_loaded(const char *ns) {
+    VusExtDomain *d = ext_find_ns(ns);
+    if (!d || !d->loaded || d->type != VUS_EXT_DOMAIN_PY || !d->py_mod) {
+        ext_set_err("外部域 %s 未加载", ns ? ns : "(空)");
+        return NULL;
+    }
+    return d;
+}
+
+static int ext_py_func_exists(const VusExtDomain *d, const char *fname) {
+    for (int i = 0; d->py_funcs && d->py_funcs[i]; i++)
+        if (strcmp(d->py_funcs[i], fname) == 0) return 1;
+    return 0;
+}
+
+int vus_py_ext_call(const char *ns, const char *fname, const VusRTValue *args, int nargs, VusRTValue *out) {
+    VusExtDomain *d = ext_ns_loaded(ns);
+    if (!d) return -1;
+    memset(out, 0, sizeof(*out));
+    if (!ext_py_func_exists(d, fname)) {
+        ext_set_err("外部函数 %s.%s 不存在（或未导出）", ns, fname);
+        return -1;
+    }
+    void *fn = vus_py_PyObject_GetAttrStringFn(d->py_mod, fname);
+    if (!fn || vus_py_PyErr_OccurredFn()) {
+        if (vus_py_PyErr_OccurredFn()) vus_py_PyErr_ClearFn();
+        ext_set_err("外部函数 %s.%s 不存在", ns, fname);
+        return -1;
+    }
+    void *tup = vus_py_PyTuple_NewFn(nargs);
+    for (int i = 0; i < nargs; i++) {
+        VusRTEnv env = { VUS_RT_BRIDGE_ABI, {0} };
+        void *o = vus_py_rt_to_obj(&args[i], &env);
+        if (!o) {
+            ext_set_err("参数 %d 无法映射: %s", i + 1, env.errs[0] ? env.errs : "未知");
+            if (tup) vus_py_Py_XDECREF_Fn(tup);
+            vus_py_Py_XDECREF_Fn(fn);
+            return -1;
+        }
+        vus_py_PyTuple_SetItemFn(tup, i, o);   /* 窃取引用 */
+    }
+    void *r = vus_py_PyObject_CallObjectFn(fn, tup);
+    if (tup) vus_py_Py_XDECREF_Fn(tup);
+    vus_py_Py_XDECREF_Fn(fn);
+    if (!r) {
+        char eb[192]; vus_py_err_text(eb, sizeof(eb));
+        vus_py_PyErr_ClearFn();
+        ext_set_err("%s.%s: %s", ns, fname, eb);
+        return -1;
+    }
+    VusRTEnv env = { VUS_RT_BRIDGE_ABI, {0} };
+    int rc = vus_py_obj_to_rt(r, out, &env);
+    vus_py_Py_XDECREF_Fn(r);
+    return rc;
+}
+
+int vus_py_ext_get(const char *ns, const char *vname, VusRTValue *out) {
+    VusExtDomain *d = ext_ns_loaded(ns);
+    if (!d) return -1;
+    memset(out, 0, sizeof(*out));
+    void *o = vus_py_PyObject_GetAttrStringFn(d->py_mod, vname);
+    if (!o || vus_py_PyErr_OccurredFn()) {
+        if (vus_py_PyErr_OccurredFn()) vus_py_PyErr_ClearFn();
+        ext_set_err("<%s>.%s 不存在", ns, vname);
+        return -1;
+    }
+    VusRTEnv env = { VUS_RT_BRIDGE_ABI, {0} };
+    int rc = vus_py_obj_to_rt(o, out, &env);
+    vus_py_Py_XDECREF_Fn(o);
+    return rc;
+}
+
+int vus_py_ext_set(const char *ns, const char *vname, const VusRTValue *val) {
+    VusExtDomain *d = ext_ns_loaded(ns);
+    if (!d) return -1;
+    VusRTEnv env = { VUS_RT_BRIDGE_ABI, {0} };
+    void *o = vus_py_rt_to_obj(val, &env);
+    if (!o) { ext_set_err("值无法映射: %s", env.errs[0] ? env.errs : "未知"); return -1; }
+    int is_none = (o == vus_py_Py_None);
+    if (vus_py_PyObject_SetAttrStringFn(d->py_mod, vname, o) != 0) {
+        char eb[192]; vus_py_err_text(eb, sizeof(eb));
+        vus_py_PyErr_ClearFn();
+        if (!is_none) vus_py_Py_XDECREF_Fn(o);
+        ext_set_err("<%s>.%s 写入失败: %s", ns, vname, eb);
+        return -1;
+    }
+    if (!is_none) vus_py_Py_XDECREF_Fn(o);
+    return 0;
+}
 #endif /* VUS_USE_PY */
 
 /* ---- 文件操作 ---- */

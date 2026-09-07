@@ -390,6 +390,57 @@ VusAstAccess *vus_ast_access_new(VusAstNode *obj, const char *member, int line, 
     return node;
 }
 
+/* ============ 运行期外部桥节点创建函数 ============ */
+
+VusAstImportExt *vus_ast_import_ext_new(const char *alias, const char *src,
+                                        VusAstNode *params, int line, int col) {
+    VusAstImportExt *node = calloc(1, sizeof(VusAstImportExt));
+    if (!node) return NULL;
+    node->type = VUS_AST_IMPORT_EXT;
+    node->line = line;
+    node->column = col;
+    node->alias = alias ? strdup(alias) : NULL;
+    node->src = src ? strdup(src) : NULL;
+    node->params = params;
+    return node;
+}
+
+VusAstExportVar *vus_ast_export_var_new(VusAstList *names, int line, int col) {
+    VusAstExportVar *node = calloc(1, sizeof(VusAstExportVar));
+    if (!node) return NULL;
+    node->type = VUS_AST_EXPORT_VAR;
+    node->line = line;
+    node->column = col;
+    node->names = names;
+    return node;
+}
+
+VusAstMemberCall *vus_ast_member_call_new(const char *alias, const char *member,
+                                          VusAstList *args, int line, int col) {
+    VusAstMemberCall *node = calloc(1, sizeof(VusAstMemberCall));
+    if (!node) return NULL;
+    node->type = VUS_AST_MEMBER_CALL;
+    node->line = line;
+    node->column = col;
+    node->alias = alias ? strdup(alias) : NULL;
+    node->member = member ? strdup(member) : NULL;
+    node->args = args;
+    return node;
+}
+
+VusAstMemberAssign *vus_ast_member_assign_new(const char *alias, const char *member,
+                                              VusAstNode *value, int line, int col) {
+    VusAstMemberAssign *node = calloc(1, sizeof(VusAstMemberAssign));
+    if (!node) return NULL;
+    node->type = VUS_AST_MEMBER_ASSIGN;
+    node->line = line;
+    node->column = col;
+    node->alias = alias ? strdup(alias) : NULL;
+    node->member = member ? strdup(member) : NULL;
+    node->value = value;
+    return node;
+}
+
 /* ============ 线程/协程节点创建函数 ============ */
 
 VusAstThreadCreate *vus_ast_thread_create_new(VusAstNode *func, VusAstNode *arg, int line, int col) {
@@ -669,6 +720,33 @@ void vus_ast_node_free(VusAstNode *node) {
         VusAstAccess *n = (VusAstAccess *)node;
         vus_ast_node_free(n->object);
         free(n->member);
+        break;
+    }
+    /* 运行期外部桥节点释放 */
+    case VUS_AST_IMPORT_EXT: {
+        VusAstImportExt *n = (VusAstImportExt *)node;
+        free(n->alias);
+        free(n->src);
+        vus_ast_node_free(n->params);
+        break;
+    }
+    case VUS_AST_EXPORT_VAR: {
+        VusAstExportVar *n = (VusAstExportVar *)node;
+        vus_ast_list_free(n->names);
+        break;
+    }
+    case VUS_AST_MEMBER_CALL: {
+        VusAstMemberCall *n = (VusAstMemberCall *)node;
+        free(n->alias);
+        free(n->member);
+        vus_ast_list_free(n->args);
+        break;
+    }
+    case VUS_AST_MEMBER_ASSIGN: {
+        VusAstMemberAssign *n = (VusAstMemberAssign *)node;
+        free(n->alias);
+        free(n->member);
+        vus_ast_node_free(n->value);
         break;
     }
     /* 线程/协程节点释放 */

@@ -477,17 +477,45 @@ m.计数 = 10
 
 ---
 
-## 10. 实施顺序（文档确认后按此推进）
+## 10. 实施顺序与协作边界（文档确认后按此推进）
 
-> 两域并行独立实现，共享桥注册表 + 生成器 + lexer 改动为公共前置/协同点。
+> 两域并行独立实现。**公共前置唯一负责方 = Python 侧实现（本设计文档维护方）**；C 侧实现者一律拉取仓库后取用公共件，**不得自建**。
 
-**公共前置（P）**
-1. `include/vus/vus_rt_bridge.h`：值/函数/变量/slot/env/模块结构体（§5 全量，见 C 实现文档）与 `vus_ext_*` 接口；
-2. libvus_rt 桥注册表（ns 表、全局导出槽表）与 `vus_ext_load/call/get/set/export` 框架（域类型分发的骨架）；
-3. 生成器 + lexer：`导入外部`/`导出变量` 语句、`VUS_AST_MEMBER_*` 解析与代码生成（§3.5）。
+### 10.1 公共前置归属（只写一份，Python 侧负责）
 
-**Python 域（本文档读者：Python 侧 AI）**：按 py-impl 文档实现（桥桩/转换/C-API 符号/示例/测试）。
+| 公共件 | 现状 |
+|--------|------|
+| `include/vus/vus_rt_bridge.h`（结构体全量） | Python 侧创建并提交仓库 |
+| libvus_rt 桥注册表 + `vus_ext_load/call/get/set/export/shutdown_all` | Python 侧实现（C 域装载以桩/分发钩子预留） |
+| lexer `.` token、parser（`导入外部`/`导出变量`/成员访问）、generator 生成调用 | Python 侧实现 |
 
-**C 域（另一 AI）**：按 c-impl 文档实现（dlopen 装载/宿主槽/示例/测试）。
+依赖这些公共件的 C 侧实现者：`git pull` 最新 `master` 后，从仓库取得 `vus_rt_bridge.h` 与注册表分发点，**只实现** `vus_c_ext_load/call/get/set`（域内逻辑），不触碰公共文件与生成器。
 
-**联调（两个域完成后）**：错误/边界回归（`tests/`）+ `PLUGIN_USAGE.md` 章节 + LSP 补全表登记 `导入外部` 与成员访问补全。
+### 10.2 域类型分发约定（注册表公共代码，两域共用）
+
+`vus_ext_load(ns, src, params)` 按源判定域类型：
+
+```
+.iso/.vulage 结尾(或绝对路径含 '/' 且 pointing to file) → C 域 → vus_c_ext_load(...)
+其余 → Python 域 → vus_py_ext_load(...)
+```
+
+C 域未实现（桩）时返回 `"外部错误"「C 域尚未实现」`；两域就绪后各自填充。
+
+### 10.3 提交时序（防双写）
+
+1. Python 侧完成公共前置 + Python 域 → 提交推送（commit 消息标记 `ffi: 公共前置 + Python 域`）；
+2. C 侧在此提交之上开发 C 域，**diff 仅限自己新增文件与 `vus_c_ext_*` 注册表接入点**；
+3. bridge.h 变更（若 C 侧发现缺陷）→ 先在 commit 说明，按 §8 尾部扩展规则提交，不破坏既有段偏移。
+
+### 10.4 Python 侧交付范围（本会话）
+
+按 py-impl 文档实现：公共前置（bridge.h、注册表骨架、lexer/parser/generator 支持）+ Python 域全部能力（桥桩/转换/C-API 符号/示例/测试）。
+
+### 10.5 C 侧交付范围（另一 AI）
+
+按 c-impl 文档实现，且仅限这些内容：`rt/vus_rt_c_impl.c`（`vus_c_ext_load/call/get/set` 域内实现）、`examples/ext_c_plugin/c_math.c`、`tests/test_ext_c.vus`、`docs/PLUGIN_USAGE.md` C 域章节。不触碰公共文件。
+
+### 10.6 联调（两个域完成后）
+
+错误/边界回归（`tests/`）+ `PLUGIN_USAGE.md` 章节 + LSP 补全表登记 `导入外部` 与成员访问补全。

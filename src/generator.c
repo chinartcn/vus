@@ -1313,7 +1313,71 @@ static VusAstFunctionDef *gen_vua_find_func(const char *name) {
     return NULL;
 }
 
+/* ============ 运行期外部桥：外部域别名登记 ============
+ * 在 vus_generate_c 开头预扫描顶层 导入外部 语句，把别名收集到哈希桶；
+ * 成员调用/成员读取生成时按别名判定走 vus_ext_*_v 通道。 */
+#define VUS_MAX_EXT_ALIAS 64
+
+static char s_ext_aliases[VUS_MAX_EXT_ALIAS][128];
+static int  s_ext_alias_count = 0;
+static int  s_ext_alias_bkt[VUS_NAME_BKTS]; /* 别名桶头（-1 空） */
+static int  s_ext_alias_nxt[VUS_MAX_EXT_ALIAS];
+
+static int gen_is_ext_alias(const char *name) {
+    if (!name) return 0;
+    unsigned h = gen_name_hash(name) % VUS_NAME_BKTS;
+    for (int i = s_ext_alias_bkt[h]; i >= 0; i = s_ext_alias_nxt[i])
+        if (strcmp(s_ext_aliases[i], name) == 0) return 1;
+    return 0;
+}
+
+static void gen_ext_scan_aliases(VusAstProgram *program) {
+    s_ext_alias_count = 0;
+    for (int i = 0; i < VUS_NAME_BKTS; i++) s_ext_alias_bkt[i] = -1;
+    if (!program || !program->statements) return;
+    for (size_t i = 0; i < program->statements->count; i++) {
+        VusAstNode *n = program->statements->items[i];
+        if (!n || n->type != VUS_AST_IMPORT_EXT) continue;
+        VusAstImportExt *ie = (VusAstImportExt *)n;
+        if (!ie->alias || !ie->alias[0]) continue;
+        if (s_ext_alias_count >= VUS_MAX_EXT_ALIAS) {
+            gen_error("导入外部 别名超过 %d 上限", VUS_MAX_EXT_ALIAS);
+            return;
+        }
+        if (gen_is_ext_alias(ie->alias)) {
+            gen_error("导入外部 别名 %s 重复定义", ie->alias);
+            return;
+        }
+        int idx = s_ext_alias_count++;
+        snprintf(s_ext_aliases[idx], sizeof(s_ext_aliases[0]), "%s", ie->alias);
+        /* A1：同步插入别名哈希桶 */
+        unsigned ah = gen_name_hash(ie->alias) % VUS_NAME_BKTS;
+        s_ext_alias_nxt[idx] = s_ext_alias_bkt[ah];
+        s_ext_alias_bkt[ah] = idx;
+    }
+}
+
 static char *gen_expr_access(GenBuf *buf, VusAstAccess *access) {
+    /* ---------- 运行期外部桥拦截：别名.变量（读） ----------
+     * base 为已登记外部域别名 → 走 vus_ext_get_v。结构体字段访问语义不变。 */
+    if (access->object && access->object->type == VUS_AST_IDENTIFIER) {
+        VusAstIdentifier *oid = (VusAstIdentifier *)access->object;
+        if (gen_is_ext_alias(oid->name)) {
+            char alias_esc[256], member_esc[256];
+            gen_string_escape(oid->name, alias_esc, sizeof(alias_esc));
+            gen_string_escape(access->member, member_esc, sizeof(member_esc));
+            long long seq = s_call_seq++;
+            char result[2048];
+            snprintf(result, sizeof(result),
+                "({void* _eo%lld=NULL;VusError* _ee%lld=NULL;"
+                "if (vus_ext_get_v(\"%s\",\"%s\",&_eo%lld,&_ee%lld)!=0){"
+                "_vus_err=_ee%lld?_ee%lld:vus_error_new_typed(1,\"外部错误\",vus_ext_last_error(),__LINE__,__func__);_eo%lld=NULL;}"
+                "(VusString*)_eo%lld;})",
+                seq, seq, alias_esc, member_esc, seq, seq, seq, seq, seq, seq);
+            return strdup(result);
+        }
+    }
+    /* 原有结构体字段访问逻辑 */
     /* 生成成员访问表达式
      * 对于 p.name，生成 ((vus_struct_StructName*)vus_p)->vus_name
      * 通过检查 s_gen_structs 列表来尝试匹配字段。
@@ -1834,6 +1898,7 @@ static char *gen_expr_unary(GenBuf *buf, VusAstUnaryOp *un) {
 #define GEN_OWNED_NEW     1  /* 确证新建 VusString：无条件 unref 配平出生份 */
 #define GEN_OWNED_UNKNOWN 2  /* 用户调用（返回动态）：赋值处运行时容器判定收割 */
 static int gen_expr_owned(GenBuf *buf, const VusAstNode *node);
+static char *gen_expr_member_call(GenBuf *buf, VusAstMemberCall *mc);
 static void gen_note_user_call(const char *name);
 static int gen_fn_borrows_param(const char *name);
 
@@ -4558,6 +4623,8 @@ static char *gen_expr(GenBuf *buf, VusAstNode *node) {
             return strdup("NULL");
         case VUS_AST_ACCESS:
             return gen_expr_access(buf, (VusAstAccess *)node);
+        case VUS_AST_MEMBER_CALL:
+            return gen_expr_member_call(buf, (VusAstMemberCall *)node);
         case VUS_AST_STRUCT_INSTANTIATE: {
             VusAstStructInst *si = (VusAstStructInst *)node;
             char san[256];
@@ -4905,9 +4972,162 @@ static int gen_expr_owned(GenBuf *buf, const VusAstNode *node) {
             return GEN_OWNED_UNKNOWN;
         return gen_expr_owned_builtin(c->func_name) ? GEN_OWNED_NEW : GEN_OWNED_BORROW;
     }
+    case VUS_AST_MEMBER_CALL:
+        /* 外部桥返回值：动态类型（标量 ref=1 / 容器 ref=0 / NIL=NULL）→ 运行时收割 */
+        return GEN_OWNED_UNKNOWN;
+    case VUS_AST_ACCESS: {
+        const VusAstAccess *a = (const VusAstAccess *)node;
+        if (a->object && a->object->type == VUS_AST_IDENTIFIER &&
+            gen_is_ext_alias(((const VusAstIdentifier *)a->object)->name))
+            return GEN_OWNED_UNKNOWN;   /* 别名.变量 读 → 桥返回值（运行时收割） */
+        return GEN_OWNED_BORROW;
+    }
     default:
         return GEN_OWNED_BORROW;
     }
+}
+
+/* ---------- 运行期外部桥：别名.函数(实参) 成员调用表达式 ----------
+ * 发射 GNU 语句表达式：实参逐个暂存（按 R6 出生份归属）、桥调用、结果透出。
+ * 结果约定（vus_ext_call_v）：标量 ref=1 / 容器 ref=0 / NIL=NULL —— 由调用方
+ * （赋值/表达式语句的 RAII 收割）按 GEN_OWNED_UNKNOWN 统一处理。 */
+static char *gen_expr_member_call(GenBuf *buf, VusAstMemberCall *mc) {
+    const char *alias = mc->alias;
+    if (!gen_is_ext_alias(alias)) {
+        gen_error("别名 %s 未导入（需先 导入外部 (..., {源: ...})）", alias ? alias : "(空)");
+        return strdup("NULL");
+    }
+    /* 运行时按名字精确匹配（Python 导出名/C 符号表），须原样转义，不可 sanitize */
+    char alias_esc[256], member_esc[256];
+    gen_string_escape(alias, alias_esc, sizeof(alias_esc));
+    gen_string_escape(mc->member, member_esc, sizeof(member_esc));
+    size_t nargs = mc->args ? mc->args->count : 0;
+    char **arg_exprs = NULL;
+    int  *arg_owned = NULL;
+    if (nargs > 0) {
+        arg_exprs = (char **)calloc(nargs, sizeof(char *));
+        arg_owned = (int *)calloc(nargs, sizeof(int));
+        for (size_t i = 0; i < nargs; i++) {
+            arg_exprs[i] = gen_expr(buf, mc->args->items[i]);
+            arg_owned[i] = gen_expr_owned(buf, mc->args->items[i]);
+        }
+    }
+    long long seq = s_call_seq++;
+    /* 组装：先逐实参暂存（裸指针借出），再调用，最后按出生份归还/释放实参 */
+    GenBuf *b = gen_buf_new();
+    gen_emitf(b, "({");
+    for (size_t i = 0; i < nargs; i++)
+        gen_emitf(b, "VusString* _ma%lld_%zu=%s;", seq, i, arg_exprs[i]);
+    gen_emitf(b, "void* _mo%lld=NULL;VusError* _me%lld=NULL;", seq, seq);
+    if (nargs > 0) {
+        gen_emitf(b, "void* _margs%lld[%zu]={", seq, nargs);
+        for (size_t i = 0; i < nargs; i++)
+            gen_emitf(b, "%s((void*)_ma%lld_%zu)", i > 0 ? "," : "", seq, i);
+        gen_emitf(b, "};");
+        gen_emitf(b, "if (vus_ext_call_v(\"%s\",\"%s\",_margs%lld,%zu,&_mo%lld,&_me%lld)!=0){",
+                  alias_esc, member_esc, seq, nargs, seq, seq);
+    } else {
+        gen_emitf(b, "if (vus_ext_call_v(\"%s\",\"%s\",NULL,0,&_mo%lld,&_me%lld)!=0){",
+                  alias_esc, member_esc, seq, seq);
+    }
+    gen_emitf(b, "_vus_err=_me%lld?_me%lld:vus_error_new_typed(1,\"外部错误\",vus_ext_last_error(),__LINE__,__func__);_mo%lld=NULL;}",
+              seq, seq, seq);
+    /* 实参出生份归还：新建/未知归属才归还（借用实参不动，桥已深拷贝） */
+    for (size_t i = 0; i < nargs; i++) {
+        if (arg_owned[i] == GEN_OWNED_BORROW) continue;
+        gen_emitf(b, "if (_ma%lld_%zu && !vus_is_container(_ma%lld_%zu)) vus_unref(_ma%lld_%zu);",
+                  seq, i, seq, i, seq, i);
+    }
+    gen_emitf(b, "(VusString*)_mo%lld;})", seq);
+    for (size_t i = 0; i < nargs; i++) free(arg_exprs[i]);
+    free(arg_exprs);
+    free(arg_owned);
+    char *out = strdup(b->data ? b->data : "");
+    if (b->data) free(b->data); else free(b);
+    return out;
+}
+
+/* ---------- 运行期外部桥：导入外部 语句（文件级，惰性声明） ---------- */
+static void gen_stmt_import_ext(GenBuf *buf, VusAstImportExt *ie) {
+    if (!s_gen_in_main) {
+        gen_error("导入外部 仅允许文件级语句（第 %d 行）", ie->line);
+        return;
+    }
+    if (gen_is_global_name(ie->alias)) {
+        gen_error("导入外部 别名 %s 与全局变量名冲突（第 %d 行）", ie->alias, ie->line);
+        return;
+    }
+    char alias_esc[256], src_esc[512];
+    gen_string_escape(ie->alias, alias_esc, sizeof(alias_esc));
+    gen_string_escape(ie->src, src_esc, sizeof(src_esc));
+    if (ie->params) {
+        char *pexpr = gen_expr(buf, ie->params);
+        long long seq = s_call_seq++;
+        gen_emit_linef(buf,
+            "({VusString* _rp%lld=%s; if (vus_ext_declare_v(\"%s\",\"%s\",_rp%lld)!=0){"
+            "_vus_err=vus_error_new_typed(1,\"外部错误\",vus_ext_last_error(),__LINE__,__func__);}"
+            " if (_rp%lld && !vus_is_container(_rp%lld)) vus_unref(_rp%lld);});",
+            seq, pexpr, alias_esc, src_esc, seq, seq, seq, seq);
+        free(pexpr);
+    } else {
+        gen_emit_linef(buf,
+            "if (vus_ext_declare_v(\"%s\",\"%s\",NULL)!=0){"
+            "_vus_err=vus_error_new_typed(1,\"外部错误\",vus_ext_last_error(),__LINE__,__func__);}",
+            alias_esc, src_esc);
+    }
+}
+
+/* ---------- 运行期外部桥：导出变量 语句（文件级） ----------
+ * 编译期校验名字为「已登记的文件级全局」；运行期注册槽指针（零拷贝双向同步）。 */
+static void gen_stmt_export_var(GenBuf *buf, VusAstExportVar *ev) {
+    if (!s_gen_in_main) {
+        gen_error("导出变量 仅允许文件级语句（第 %d 行）", ev->line);
+        return;
+    }
+    if (!ev->names) return;
+    for (size_t i = 0; i < ev->names->count; i++) {
+        VusAstString *s = (VusAstString *)ev->names->items[i];
+        if (!s->value || !gen_is_global_name(s->value)) {
+            gen_error("导出变量 %s 未定义（需为文件级全局变量，第 %d 行）", s->value ? s->value : "(空)", ev->line);
+            return;
+        }
+        char name_esc[512];
+        gen_string_escape(s->value, name_esc, sizeof(name_esc));
+        char san[256];
+        gen_sanitize_name(s->value, san, sizeof(san));
+        gen_emit_linef(buf, "vus_ext_export_v(\"%s\", (void**)&vus_%s);", name_esc, san);
+    }
+}
+
+/* ---------- 运行期外部桥：别名.变量 = 值（成员赋值语句） ---------- */
+static void gen_stmt_member_assign(GenBuf *buf, VusAstMemberAssign *ma) {
+    const char *alias = ma->alias;
+    if (!gen_is_ext_alias(alias)) {
+        gen_error("别名 %s 未导入（需先 导入外部 (..., {源: ...})）", alias ? alias : "(空)");
+        return;
+    }
+    char alias_esc[256], member_esc[256];
+    gen_string_escape(alias, alias_esc, sizeof(alias_esc));
+    gen_string_escape(ma->member, member_esc, sizeof(member_esc));
+    char *val = gen_expr(buf, ma->value);
+    int owned = gen_expr_owned(buf, ma->value);
+    long long seq = s_call_seq++;
+    if (owned == GEN_OWNED_BORROW) {
+        /* 借用值（变量/字面量/比较）：直接传递，桥深拷贝后双方共享安全，不归还 */
+        gen_emit_linef(buf,
+            "({VusError* _me%lld=NULL; if (vus_ext_set_v(\"%s\",\"%s\",(void*)%s,&_me%lld)!=0){"
+            "_vus_err=_me%lld?_me%lld:vus_error_new_typed(1,\"外部错误\",vus_ext_last_error(),__LINE__,__func__);}});",
+            seq, alias_esc, member_esc, val, seq, seq, seq);
+    } else {
+        /* 新建/未知归属：按 R6 归还出生引用（容器由释放链按 ref0 精确转让回收） */
+        gen_emit_linef(buf,
+            "({VusString* _ra%lld=%s;VusError* _me%lld=NULL;"
+            " if (vus_ext_set_v(\"%s\",\"%s\",_ra%lld,&_me%lld)!=0){"
+            "_vus_err=_me%lld?_me%lld:vus_error_new_typed(1,\"外部错误\",vus_ext_last_error(),__LINE__,__func__);}"
+            " if (_ra%lld && !vus_is_container(_ra%lld)) vus_unref(_ra%lld);});",
+            seq, val, seq, alias_esc, member_esc, seq, seq, seq, seq, seq, seq, seq);
+    }
+    free(val);
 }
 
 /* 把 `目标 = EXPR` 的赋值改造成 RAII 形态（出生份归还）。发射完整语句（含分号）。
@@ -5431,6 +5651,15 @@ static void gen_statement(GenBuf *buf, VusAstNode *node) {
         case VUS_AST_THROW:
             gen_stmt_throw(buf, (VusAstThrow *)node);
             break;
+        case VUS_AST_IMPORT_EXT:
+            gen_stmt_import_ext(buf, (VusAstImportExt *)node);
+            break;
+        case VUS_AST_EXPORT_VAR:
+            gen_stmt_export_var(buf, (VusAstExportVar *)node);
+            break;
+        case VUS_AST_MEMBER_ASSIGN:
+            gen_stmt_member_assign(buf, (VusAstMemberAssign *)node);
+            break;
         case VUS_AST_STRUCT_DEF:
             /* 结构体定义在顶层生成 C 类型，语句级别跳过 */
             break;
@@ -5466,11 +5695,92 @@ static int gen_is_param_name(VusAstFunctionDef *func, const char *name) {
  * 是否含 尝试/排除（决定 _vus_err 声明）。无对应特征即省略模板，减小生成体积。 */
 static void gen_scan_block(VusAstList *body, int *has_ret, int *has_try);
 
+/* 表达式递归扫描：是否含「运行期外部桥」成员运算（需 _vus_err 挂载错误）。
+ * 覆盖全部表达式子位置：调用实参、二元/一元、列表/字典字面量、下标、访问、成员调用嵌套。 */
+static int gen_expr_has_ext(VusAstNode *n) {
+    if (!n) return 0;
+    switch (n->type) {
+    case VUS_AST_MEMBER_CALL: {
+        VusAstMemberCall *mc = (VusAstMemberCall *)n;
+        if (mc->args)
+            for (size_t i = 0; i < mc->args->count; i++)
+                if (gen_expr_has_ext(mc->args->items[i])) return 1;
+        return 1;
+    }
+    case VUS_AST_ACCESS: {
+        VusAstAccess *a = (VusAstAccess *)n;
+        if (a->object && a->object->type == VUS_AST_IDENTIFIER &&
+            gen_is_ext_alias(((VusAstIdentifier *)a->object)->name))
+            return 1;
+        return gen_expr_has_ext(a->object);
+    }
+    case VUS_AST_BINARY_OP: {
+        VusAstBinaryOp *b = (VusAstBinaryOp *)n;
+        return gen_expr_has_ext(b->left) || gen_expr_has_ext(b->right);
+    }
+    case VUS_AST_UNARY_OP:
+        return gen_expr_has_ext(((VusAstUnaryOp *)n)->operand);
+    case VUS_AST_CALL: {
+        VusAstCall *c = (VusAstCall *)n;
+        if (c->args)
+            for (size_t i = 0; i < c->args->count; i++)
+                if (gen_expr_has_ext(c->args->items[i])) return 1;
+        return 0;
+    }
+    case VUS_AST_STRUCT_INSTANTIATE: {
+        VusAstStructInst *si = (VusAstStructInst *)n;
+        if (si->args)
+            for (size_t i = 0; i < si->args->count; i++)
+                if (gen_expr_has_ext(si->args->items[i])) return 1;
+        return 0;
+    }
+    case VUS_AST_LIST_LITERAL: {
+        VusAstListLiteral *l = (VusAstListLiteral *)n;
+        if (l->items)
+            for (size_t i = 0; i < l->items->count; i++)
+                if (gen_expr_has_ext(l->items->items[i])) return 1;
+        return 0;
+    }
+    case VUS_AST_DICT_LITERAL: {
+        VusAstDictLiteral *d = (VusAstDictLiteral *)n;
+        if (d->keys)
+            for (size_t i = 0; i < d->keys->count; i++)
+                if (gen_expr_has_ext(d->keys->items[i])) return 1;
+        if (d->values)
+            for (size_t i = 0; i < d->values->count; i++)
+                if (gen_expr_has_ext(d->values->items[i])) return 1;
+        return 0;
+    }
+    case VUS_AST_SUBSCRIPT: {
+        VusAstSubscript *s = (VusAstSubscript *)n;
+        return gen_expr_has_ext(s->object) || gen_expr_has_ext(s->index);
+    }
+    default:
+        return 0;
+    }
+}
+
 static void gen_scan_node(VusAstNode *node, int *has_ret, int *has_try) {
     if (!node) return;
     switch (node->type) {
         case VUS_AST_RETURN:
-            if (((VusAstReturn *)node)->value) *has_ret = 1;
+            if (((VusAstReturn *)node)->value) {
+                *has_ret = 1;
+                if (gen_expr_has_ext(((VusAstReturn *)node)->value)) *has_try = 1;
+            }
+            break;
+        case VUS_AST_ASSIGN:
+            if (gen_expr_has_ext(((VusAstAssign *)node)->value)) *has_try = 1;
+            break;
+        case VUS_AST_EXPR_STMT:
+            if (gen_expr_has_ext(((VusAstExprStmt *)node)->expr)) *has_try = 1;
+            break;
+        case VUS_AST_THROW:
+            /* 抛出 直接写 _vus_err，必须预声明 */
+            *has_try = 1;
+            break;
+        case VUS_AST_MEMBER_ASSIGN:
+            *has_try = 1;
             break;
         case VUS_AST_TRY: {
             VusAstTry *t = (VusAstTry *)node;
@@ -5485,6 +5795,7 @@ static void gen_scan_node(VusAstNode *node, int *has_ret, int *has_try) {
         }
         case VUS_AST_IF: {
             VusAstIf *f = (VusAstIf *)node;
+            if (gen_expr_has_ext(f->condition)) *has_try = 1;
             gen_scan_block(f->then_body, has_ret, has_try);
             if (f->elif_bodies)
                 for (size_t i = 0; i < f->elif_bodies->count; i++) {
@@ -5496,16 +5807,20 @@ static void gen_scan_node(VusAstNode *node, int *has_ret, int *has_try) {
         }
         case VUS_AST_WHILE: {
             VusAstWhile *w = (VusAstWhile *)node;
+            if (gen_expr_has_ext(w->condition)) *has_try = 1;
             gen_scan_block(w->body, has_ret, has_try);
             break;
         }
         case VUS_AST_FOR_RANGE: {
             VusAstForRange *fr = (VusAstForRange *)node;
+            if (gen_expr_has_ext(fr->start)) *has_try = 1;
+            if (gen_expr_has_ext(fr->end)) *has_try = 1;
             gen_scan_block(fr->body, has_ret, has_try);
             break;
         }
         case VUS_AST_FOR_EACH: {
             VusAstForEach *fe = (VusAstForEach *)node;
+            if (gen_expr_has_ext(fe->iterable)) *has_try = 1;
             gen_scan_block(fe->body, has_ret, has_try);
             break;
         }
@@ -5800,6 +6115,8 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config,
     s_gen_error[0] = '\0';
     s_user_call_count = 0;   /* R6：重置按需登记的用户调用集合 */
     s_fn_borrow_count = 0;   /* R6：重置函数借用返回扫描表 */
+    s_ext_alias_count = 0;   /* 运行期外部桥：重置外部域别名登记 */
+    for (int i = 0; i < VUS_NAME_BKTS; i++) s_ext_alias_bkt[i] = -1;
     if (g_inst_fwd) { free(g_inst_fwd->data); free(g_inst_fwd); g_inst_fwd = NULL; }
     if (g_inst_body) { free(g_inst_body->data); free(g_inst_body); g_inst_body = NULL; }
 
@@ -5835,6 +6152,13 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config,
         fprintf(stderr, "[vus] 类型校验错误: %s\n", s_gen_error);
         free(g_inst_fwd->data); free(g_inst_fwd); g_inst_fwd = NULL;
         free(g_inst_body->data); free(g_inst_body); g_inst_body = NULL;
+        return NULL;
+    }
+
+    /* 运行期外部桥：预扫描 导入外部 登记外部域别名（成员调用/读取生成时查表） */
+    gen_ext_scan_aliases(program);
+    if (s_gen_has_error) {
+        fprintf(stderr, "[vus] 类型校验错误: %s\n", s_gen_error);
         return NULL;
     }
 

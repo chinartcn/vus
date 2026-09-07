@@ -106,6 +106,8 @@ const char *vus_token_type_name(VusTokenType type)
     case VUS_TOKEN_CN_CONTINUE:  return "继续";
     case VUS_TOKEN_CN_THROW:     return "抛出";
     case VUS_TOKEN_CN_IN:        return "在";
+    case VUS_TOKEN_CN_EXT_IMPORT: return "导入外部";
+    case VUS_TOKEN_CN_EXPORT_VAR: return "导出变量";
 
     case VUS_TOKEN_STRUCT:       return "struct";
     case VUS_TOKEN_CN_STRUCT:    return "结构";
@@ -252,6 +254,10 @@ static const KeywordEntry s_keywords[] = {
     {"线程",     6, VUS_TOKEN_CN_THREAD},
     {"等待线程", 12, VUS_TOKEN_CN_JOIN_THREAD},
     {"睡眠",     6, VUS_TOKEN_CN_THREAD_SLEEP},
+
+    /* 运行期外部桥关键字 */
+    {"导入外部", 12, VUS_TOKEN_CN_EXT_IMPORT},
+    {"导出变量", 12, VUS_TOKEN_CN_EXPORT_VAR},
 
     /* 协程关键字 */
     {"协程",     6, VUS_TOKEN_CN_COROUTINE},
