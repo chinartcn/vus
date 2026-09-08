@@ -48,7 +48,13 @@ for test_file in "${TEST_DIR}/test_"*.vus; do
     # FFI Python 域用例：模块 ext_py.samplemath 位于 ../examples，注入
     # VUS_PLUGIN_DIR 使其进入 sys.path（与 C 单测段 test_plugin_inproc 同风格）
     RUN_ENV=()
-    if [ "$test_name" = "test_ext_py.vus" ] || [ "$test_name" = "test_ext_py_vars.vus" ]; then
+    if [ "$test_name" = "test_ext_py.vus" ] || [ "$test_name" = "test_ext_py_vars.vus" ] \
+       || [ "$test_name" = "test_py_game.vus" ]; then
+        # test_py_game 还需 .vux 插件就位于 ~/.vus/plugins/猜数游戏
+        if [ "$test_name" = "test_py_game.vus" ]; then
+            mkdir -p "$HOME/.vus/plugins"
+            cp -r ../examples/plugins/猜数游戏 "$HOME/.vus/plugins/" 2>/dev/null
+        fi
         RUN_ENV=(env VUS_PLUGIN_DIR="../examples")
     fi
     if output="$("${RUN_ENV[@]}" "$VUS" run "$test_file" 2>&1)"; then

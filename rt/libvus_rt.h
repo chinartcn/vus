@@ -493,3 +493,7 @@ void *vus_ext_c_handle(const char *ns);                    /* 按别名取 C 域
 /* Cordis 式运行时上下文元框架（服务容器/DI/effect/事件四模式，路线 A）
  * 置于文件末尾：全部 VUS 核心类型就绪后展开，生成 C 自动获得 vus_ctx_*。 */
 #include "vus_cordis.h"
+
+/* TUI 画布子系统（帧缓冲 + 差分刷新 + 按键/行编辑输入）
+ * 同样置于末尾：依赖 vus_string_new 等核心类型，生成 C 自动获得 vus_tui_*。 */
+#include "vus_tui.h"

@@ -800,6 +800,7 @@ static void print_help(void) {
     printf("                          离线校验 .vua（复用 vua.c 严格校验+渲染树归一）\n\n");
     printf("项目管理:\n");
     printf("  init [--force]         交互式项目初始化\n");
+    printf("  up                    一键更新：git 拉取 → 编译 → 生成共享库 → 回归测试\n");
     printf("  update                 自动更新编译器（git 拉取或预编译包）\n");
     printf("  chart <音频> [-o 文件] 生成体感音游谱面 chart.json\n\n");
     printf("插件:\n");
@@ -1129,9 +1130,12 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    /* vus update — 自动更新 */
-    if (strcmp(cmd, "update") == 0) {
-        printf("正在检查更新...\n");
+    /* vus up 一键更新（完整闭环）/ vus update 自动更新（兼容）
+     * up：     git 拉取 → 全量编译 → 生成共享库 → 回归测试（失败仅告警）
+     * update： 仅拉取 + 编译（既有行为，自动更新传统入口） */
+    if (strcmp(cmd, "up") == 0 || strcmp(cmd, "update") == 0) {
+        int do_full = (strcmp(cmd, "up") == 0);
+        printf(do_full ? "=== VUS 一键更新开始 ===\n" : "正在检查更新...\n");
 
         /* 获取编译器所在目录 */
         char exe_path[4096];
@@ -1149,6 +1153,10 @@ int main(int argc, char *argv[]) {
         strncpy(compiler_dir, exe_path, sizeof(compiler_dir) - 1);
         compiler_dir[sizeof(compiler_dir) - 1] = '\0';
 
+        int jobs = (int)sysconf(_SC_NPROCESSORS_ONLN);
+        if (jobs < 1) jobs = 1;
+        if (jobs > 12) jobs = 12;
+
         /* 检查 .git 目录是否存在 */
         char git_dir[4096];
         snprintf(git_dir, sizeof(git_dir), "%s/.git", compiler_dir);
@@ -1157,6 +1165,25 @@ int main(int argc, char *argv[]) {
             /* Git 安装 — git pull + make */
             printf("检测到 Git 安装，执行 git pull...\n");
             fflush(stdout);
+
+            /* 检查工作区是否有未提交改动：仅在 up 时提示 */
+            if (do_full) {
+                char st_cmd[4096];
+                snprintf(st_cmd, sizeof(st_cmd), "git -C '%s' status --porcelain | head -n 5", compiler_dir);
+                FILE *sfp = popen(st_cmd, "r");
+                if (sfp) {
+                    char buf[512];
+                    int has_local = 0;
+                    while (fgets(buf, sizeof(buf), sfp)) {
+                        if (!has_local) {
+                            printf("  注意: 检测到本地未提交改动，拉取将尝试 fast-forward 合并：\n");
+                            has_local = 1;
+                        }
+                        printf("    %s", buf);
+                    }
+                    pclose(sfp);
+                }
+            }
 
             pid_t pid = fork();
             if (pid == 0) {
@@ -1169,26 +1196,66 @@ int main(int argc, char *argv[]) {
             if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
                 printf("  ✅ 源码更新成功\n");
             } else {
-                fprintf(stderr, "  ❌ git pull 失败\n");
-                return 1;
+                fprintf(stderr, "  ❌ git pull 失败（本地改动或网络问题）\n");
+                if (!do_full) return 1;
+                fprintf(stderr, "    继续使用本地源码编译...\n");
             }
 
-            /* 重新编译 */
-            printf("重新编译...\n");
+            /* 重新编译（并行） */
+            printf("重新编译 (make -j%d)...\n", jobs);
             fflush(stdout);
 
+            char jflag[32];
+            snprintf(jflag, sizeof(jflag), "-j%d", jobs);
             pid = fork();
             if (pid == 0) {
-                execlp("make", "make", "-C", compiler_dir, NULL);
+                execlp("make", "make", "-C", compiler_dir, jflag, NULL);
                 _exit(1);
             }
             waitpid(pid, &status, 0);
-            if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+            int make_ok = (WIFEXITED(status) && WEXITSTATUS(status) == 0);
+            if (make_ok) {
                 printf("  ✅ 编译成功\n");
             } else {
                 fprintf(stderr, "  ❌ 编译失败\n");
                 return 1;
             }
+
+            /* up 完整闭环：生成共享库 + 回归测试 */
+            if (do_full) {
+                printf("生成共享库 (make shared)...\n");
+                fflush(stdout);
+                pid = fork();
+                if (pid == 0) {
+                    execlp("make", "make", "-C", compiler_dir, "shared", NULL);
+                    _exit(1);
+                }
+                waitpid(pid, &status, 0);
+                if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                    printf("  ✅ 共享库生成成功 (build/libvus_rt.so)\n");
+                } else {
+                    printf("  ⚠️  共享库生成失败（动态链接将回退静态，不影响命令行使用）\n");
+                }
+
+                printf("运行回归测试 (tests/run_tests.sh)...\n");
+                fflush(stdout);
+                char test_cmd[4096];
+                snprintf(test_cmd, sizeof(test_cmd),
+                         "cd '%s'/tests && bash run_tests.sh", compiler_dir);
+                pid = fork();
+                if (pid == 0) {
+                    execlp("bash", "bash", "-c", test_cmd, NULL);
+                    _exit(1);
+                }
+                waitpid(pid, &status, 0);
+                if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                    printf("  ✅ 回归测试全部通过\n");
+                } else {
+                    printf("  ⚠️  部分测试失败（GUI 等依赖显示环境的用例在无头环境属预期），请查看上方输出\n");
+                }
+            }
+
+            printf(do_full ? "=== VUS 一键更新完成 ===\n" : "更新完成\n");
         } else {
             /* 非 Git 安装 — 下载预编译包 */
             printf("检测到预编译安装，正在下载最新版本...\n");

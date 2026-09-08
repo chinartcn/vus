@@ -3666,6 +3666,126 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
         }
     }
 
+    /* ============= TUI 画布子系统（帧缓冲 + 差分刷新 + 输入） =============
+     * 绘制类写入画布（不立即输出），tui_刷新 差分上屏；
+     * 无终端环境（管道/CI/APK）静默缓冲、读取类返回空串。 */
+    if (strcmp(call->func_name, "tui_绘制文本") == 0) {
+        if (call->args && call->args->count >= 3) {
+            char *row = gen_expr(buf, call->args->items[0]);
+            char *col = gen_expr(buf, call->args->items[1]);
+            char *txt = gen_expr(buf, call->args->items[2]);
+            /* 可选：前景/背景/样式（缺省 -1/-1/0，以 VusString* 字面量传递） */
+            char *fg = call->args->count >= 4 ? gen_expr(buf, call->args->items[3]) : gen_static_lit(s_lit_seq++, "-1");
+            char *bg = call->args->count >= 5 ? gen_expr(buf, call->args->items[4]) : gen_static_lit(s_lit_seq++, "-1");
+            char *st = call->args->count >= 6 ? gen_expr(buf, call->args->items[5]) : gen_static_lit(s_lit_seq++, "0");
+            char result[4096];
+            snprintf(result, sizeof(result),
+                     "({vus_tui_canvas_put((int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), vus_string_cstr(%s), "
+                     "(int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err)); vus_string_new(\"\");})",
+                     row, col, txt, fg, bg, st);
+            free(row); free(col); free(txt); free(fg); free(bg); free(st);
+            return strdup(result);
+        }
+        return strdup("vus_string_new(\"\") /* tui_绘制文本: 参数不足 */");
+    }
+    if (strcmp(call->func_name, "tui_刷新") == 0) {
+        return strdup("({vus_tui_flush(); vus_string_new(\"\");})");
+    }
+    if (strcmp(call->func_name, "tui_清画布") == 0) {
+        /* 仅清空帧缓冲（不清终端、不失效差分基准）：逐帧全量重绘后差分上屏 */
+        return strdup("({vus_tui_canvas_clear(); vus_string_new(\"\");})");
+    }
+    if (strcmp(call->func_name, "tui_边框") == 0) {
+        if (call->args && call->args->count >= 4) {
+            char *row = gen_expr(buf, call->args->items[0]);
+            char *col = gen_expr(buf, call->args->items[1]);
+            char *hgt = gen_expr(buf, call->args->items[2]);
+            char *wid = gen_expr(buf, call->args->items[3]);
+            char *title = call->args->count >= 5 ? gen_expr(buf, call->args->items[4]) : NULL;
+            char *title_arg = NULL;
+            if (title) {
+                size_t tlen = strlen(title) + 32;
+                title_arg = (char *)malloc(tlen);
+                snprintf(title_arg, tlen, "vus_string_cstr(%s)", title);
+            } else {
+                title_arg = strdup("NULL");
+            }
+            char result[4096];
+            snprintf(result, sizeof(result),
+                     "({vus_tui_canvas_box((int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), "
+                     "(int)vus_to_int(%s, &_err), %s); vus_string_new(\"\");})",
+                     row, col, hgt, wid, title_arg);
+            free(row); free(col); free(hgt); free(wid); free(title_arg);
+            if (title) free(title);
+            return strdup(result);
+        }
+        return strdup("vus_string_new(\"\") /* tui_边框: 参数不足 */");
+    }
+    if (strcmp(call->func_name, "tui_画布") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *row = gen_expr(buf, call->args->items[0]);
+            char *col = gen_expr(buf, call->args->items[1]);
+            char result[1024];
+            snprintf(result, sizeof(result),
+                     "({vus_tui_canvas_resize((int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err)); vus_string_new(\"\");})",
+                     row, col);
+            free(row); free(col);
+            return strdup(result);
+        }
+        return strdup("vus_string_new(\"\") /* tui_画布: 参数不足 */");
+    }
+    if (strcmp(call->func_name, "tui_清行") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *row = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result),
+                     "({vus_tui_clear_line((int)vus_to_int(%s, &_err)); vus_string_new(\"\");})", row);
+            free(row);
+            return strdup(result);
+        }
+        return strdup("vus_string_new(\"\") /* tui_清行: 参数不足 */");
+    }
+    if (strcmp(call->func_name, "tui_读取按键") == 0) {
+        return strdup("vus_tui_read_key()");
+    }
+    if (strcmp(call->func_name, "tui_输入文本") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *prompt = gen_expr(buf, call->args->items[0]);
+            char *maxlen = call->args->count >= 2 ? gen_expr(buf, call->args->items[1]) : gen_static_lit(s_lit_seq++, "64");
+            char result[2048];
+            snprintf(result, sizeof(result),
+                     "vus_tui_input(vus_string_cstr(%s), (int)vus_to_int(%s, &_err))", prompt, maxlen);
+            free(prompt); free(maxlen);
+            return strdup(result);
+        }
+        return strdup("vus_string_new(\"\") /* tui_输入文本: 参数不足 */");
+    }
+    if (strcmp(call->func_name, "tui_文本样式") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *st = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result),
+                     "({vus_tui_style((int)vus_to_int(%s, &_err)); vus_string_new(\"\");})", st);
+            free(st);
+            return strdup(result);
+        }
+        return strdup("vus_string_new(\"\") /* tui_文本样式: 参数不足 */");
+    }
+    if (strcmp(call->func_name, "tui_光标") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *show = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result),
+                     "({vus_tui_cursor((int)vus_to_int(%s, &_err) != 0); vus_string_new(\"\");})", show);
+            free(show);
+            return strdup(result);
+        }
+        return strdup("vus_string_new(\"\") /* tui_光标: 参数不足 */");
+    }
+    if (strcmp(call->func_name, "tui_终端尺寸") == 0) {
+        return strdup("({char _ts_[32]; snprintf(_ts_, sizeof(_ts_), \"%d,%d\", vus_tui_rows(), vus_tui_cols()); vus_string_new(_ts_);})");
+    }
+
     /* ============= 网络插件内置函数 ============= */
     if (strcmp(call->func_name, "网络_GET") == 0) {
         if (call->args && call->args->count >= 1) {
@@ -5100,6 +5220,7 @@ static void gen_line_map(GenBuf *buf, int vus_line) {
 static int gen_expr_owned_builtin(const char *name) {
     if (!name) return 0;
     if (strcmp(name, "转数字") == 0) return 1;    /* vus_to_string(vus_to_int(...)) 新建 */
+    if (strncmp(name, "tui_", 4) == 0) return 1;  /* TUI 内建全部新建返回（空串/按键/输入/尺寸） */
     return 0;   /* 未知/可能借用/void：保守不入名单 */
 }
 
@@ -6642,6 +6763,15 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config,
             const char *mk = "int main(void) {";
             char *at = strstr(result, mk);
             size_t head = at ? (size_t)(at - result) : strlen(result);
+            /* 声明区锚点：include 区（#include "libvus_rt.h"）之后、用户函数区之前。
+             * 用户函数体内可能直接调用 挂载效果/注册服务 等（生成 _vus_ctx()/
+             * _cde_N 引用），其声明必须先于用户函数出现，否则 GCC 隐式声明报错。 */
+            size_t fwd_head = 0;
+            char *inc = strstr(result, "#include \"libvus_rt.h\"");
+            if (inc) {
+                char *eol = strchr(inc, '\n');
+                if (eol) fwd_head = (size_t)(eol + 1 - result);
+            }
             size_t pos = 0;
             const char *infra =
                 "\n/* Cordis 式上下文：惰性单例，atexit 时逆序回退 effect 栈 */\n"
@@ -6650,13 +6780,18 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config,
                 "static void _g_ctx_exit(void){ if (_g_ctx) { vus_ctx_dispose(_g_ctx); _g_ctx = NULL; } }\n"
                 "static VusCtx* _vus_ctx(void){ if (!_g_ctx) { _g_ctx = vus_ctx_create(); "
                 "if (!_g_ctx_done) { _g_ctx_done = 1; atexit(_g_ctx_exit); } } return _g_ctx; }\n";
-            strncpy(as2 + pos, result, head); pos += head;           /* include 区 */
-            snprintf(as2 + pos, total - pos, "%s", infra);
+            const char *vus_ctx_decl = "static VusCtx* _vus_ctx(void);\n";
+            strncpy(as2 + pos, result, fwd_head); pos += fwd_head;   /* include 区 */
+            snprintf(as2 + pos, total - pos, "\n%s", vus_ctx_decl);  /* _vus_ctx 前置声明 */
             pos += strlen(as2 + pos);
-            if (g_cdis_fwd && g_cdis_fwd->data) {
-                snprintf(as2 + pos, total - pos, "%s\n", g_cdis_fwd->data);
+            if (g_cdis_fwd && g_cdis_fwd->data) {                   /* 包装函数前向声明 */
+                snprintf(as2 + pos, total - pos, "%s", g_cdis_fwd->data);
                 pos += strlen(as2 + pos);
             }
+            strncpy(as2 + pos, result + fwd_head, head - fwd_head); /* 用户函数区 */
+            pos += head - fwd_head;
+            snprintf(as2 + pos, total - pos, "%s", infra);          /* _vus_ctx 定义 */
+            pos += strlen(as2 + pos);
             if (g_cdis_premain && g_cdis_premain->data) {
                 snprintf(as2 + pos, total - pos, "\n%s\n", g_cdis_premain->data);
                 pos += strlen(as2 + pos);

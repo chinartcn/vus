@@ -1278,13 +1278,17 @@ VusString* vus_plugin_tui_clear(VusString* dummy) {
     (void)dummy;
     printf("\033[2J\033[H");
     fflush(stdout);
+    /* 画布联动：清空帧 + 失效差分基准（下次刷新全量输出） */
+    vus_tui_canvas_resize(0, 0);
+    vus_tui_canvas_clear();
     return vus_string_new("");
 }
 
 VusString* vus_plugin_tui_set_color(VusString* fg, VusString* bg) {
-    const char* c_fg = fg ? vus_string_cstr(fg) : "37";
-    const char* c_bg = bg ? vus_string_cstr(bg) : "40";
-    printf("\033[38;5;%sm\033[48;5;%sm", c_fg, c_bg);
+    int f = fg ? atoi(vus_string_cstr(fg)) : -1;
+    int b = bg ? atoi(vus_string_cstr(bg)) : -1;
+    vus_tui_color_clamp(&f, &b);
+    printf("\033[38;5;%dm\033[48;5;%dm", f >= 0 ? f : 37, b >= 0 ? b : 40);
     fflush(stdout);
     return vus_string_new("");
 }
