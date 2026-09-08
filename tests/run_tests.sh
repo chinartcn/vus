@@ -167,6 +167,23 @@ else
     FAILED_FILES="$FAILED_FILES vua_api_ext(C)"
 fi
 
+# ---- TUI 画布子系统回归（test_tui_flush：差分刷新定位 + read_key 16 字节边界）----
+# 需要 util（openpty）；无 pty 环境降级跳过
+echo ""
+echo "运行 TUI 画布回归: test_tui_flush（差分定位/读键边界）"
+if gcc -I../rt -Wall -O0 test_tui_flush.c ../build/libvus_rt.a -o test_tui_flush -lutil 2>/dev/null; then
+    if ./test_tui_flush >/dev/null 2>&1; then
+        echo "  ✅ test_tui_flush 通过"
+        PASS=$((PASS + 1))
+    else
+        echo "  ❌ test_tui_flush 失败（重跑: ./test_tui_flush）"
+        FAIL=$((FAIL + 1))
+        FAILED_FILES="$FAILED_FILES test_tui_flush(C)"
+    fi
+else
+    echo "  ⚠️  test_tui_flush 编译失败，跳过（记录降级）"
+fi
+
 echo ""
 echo "=========================================="
 printf "含 C 单测：共 %d 个用例，通过 %d 个，失败 %d 个\n" $((PASS + FAIL)) $PASS $FAIL

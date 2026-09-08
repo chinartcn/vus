@@ -15,6 +15,7 @@
 #include <unistd.h>
 #include <termios.h>
 #include <sys/ioctl.h>
+#include <time.h>
 
 /* 画布单元格：UTF-8 序列（≤7 字节 + NUL）+ 颜色 + 样式位 */
 typedef struct {
@@ -146,12 +147,18 @@ void vus_tui_flush(void) {
         return;
     }
     int fg = -1, bg = -1, st = -1;
+    /* 逻辑光标（0 基）：初始 \033[H 归位后光标位于 (0,0)。差分跳过未变单元格
+     * 不会推进终端光标，因此每输出一个变更单元格都要核对终端光标是否恰在其位，
+     * 否则内容会写到错误列（旧实现仅 c==0 定位，行中变更整行错位）。
+     * 连续单元格（光标恰在下一格）不重复发定位序列，保持差分输出紧凑。 */
+    int cur_r = 0, cur_c = -1;
     fputs("\033[?25l\033[H", stdout);   /* 隐藏光标 + 归位 */
     for (int r = 0; r < s_rows; r++) {
         for (int c = 0; c < s_cols; c++) {
             TuiCell *n = &s_cur[r][c];
             if (s_has_prev && memcmp(n, &s_prev[r][c], sizeof(*n)) == 0) continue;
-            if (c == 0) fprintf(stdout, "\033[%d;1H", r + 1);
+            if (r != cur_r || c != cur_c + 1)
+                fprintf(stdout, "\033[%d;%dH", r + 1, c + 1);
             /* 颜色/样式切换优化 */
             if (n->fg != fg || n->bg != bg || n->style != st) {
                 fputs("\033[0m", stdout);
@@ -164,6 +171,8 @@ void vus_tui_flush(void) {
                 fg = n->fg; bg = n->bg; st = n->style;
             }
             fputs(n->ch, stdout);
+            cur_r = r;
+            cur_c = c;
         }
     }
     fputs("\033[0m\033[?25h", stdout);  /* 复位 + 显示光标 */
@@ -242,7 +251,7 @@ VusString *vus_tui_read_key(void) {
     if (!tui_is_tty_in()) return vus_string_new("");
     struct termios save;
     if (tui_raw_on(&save) != 0) return vus_string_new("");
-    unsigned char buf[16];
+    unsigned char buf[17];   /* 16 字节数据 + NUL（buf[16]='\0' 需在界内） */
     int n = (int)read(STDIN_FILENO, buf, 16);
     tui_raw_off(&save);
     if (n <= 0) return vus_string_new("");
@@ -275,7 +284,10 @@ VusString *vus_tui_input(const char *prompt, int maxlen) {
         ssize_t n = read(STDIN_FILENO, &b, 1);
         if (n <= 0) {
             if (len == 0) { free(buf); tui_raw_off(&save); return vus_string_new(""); }
-            continue;   /* 非阻塞：无输入继续等（已有输入则保持等待） */
+            /* 非阻塞读无输入：让出 CPU 1ms，避免已输入字符时忙等空转烧满单核 */
+            struct timespec ts = {0, 1000000};
+            nanosleep(&ts, NULL);
+            continue;
         }
         if (b == '\r' || b == '\n') break;
         if (b == 3) {  /* CTRL-C：放弃 */
