@@ -138,7 +138,39 @@ void vus_tui_canvas_box(int row, int col, int h, int w, const char *title) {
     }
 }
 
-/* 差分上屏：只输出与显示缓冲不同的单元格；颜色/样式变化才发 ANSI */
+/* 单元格终端显示宽度（列）：全角字符（中文/假名/谚文/全角符号）占 2 列，其余占 1 列。
+ * 差分刷新的定位必须按「终端列」而非「画布列」计算：画布每个单元格记 1 列，但全角
+ * 字符在终端实际占 2 列；仅按画布列定位会在全角字符之后错位，把变更内容写到前一
+ * 字符上面（覆盖其右半）。边框/制表符（U+2500 区，如 ┌─┐│）在终端为 1 列，不判为全角。 */
+static int tui_cell_width(const char *ch) {
+    if (!ch || !ch[0]) return 1;
+    unsigned char b0 = (unsigned char)ch[0];
+    if (b0 < 0x80) return 1;                    /* ASCII */
+    if ((b0 & 0xE0) == 0xC0) return 1;          /* 2 字节：无全角 */
+    unsigned cp;
+    if ((b0 & 0xF0) == 0xE0) {                  /* 3 字节 */
+        cp = ((unsigned)(b0 & 0x0F) << 12) | ((unsigned)((unsigned char)ch[1] & 0x3F) << 6)
+           | (unsigned)((unsigned char)ch[2] & 0x3F);
+    } else if ((b0 & 0xF8) == 0xF0) {           /* 4 字节：emoji 等按近似全角 */
+        return 2;
+    } else {
+        return 1;
+    }
+    if (cp >= 0x3000 && cp <= 0x30FF) return 2; /* CJK 标点/假名 */
+    if (cp >= 0x3400 && cp <= 0x9FFF) return 2; /* CJK 统一表意（含扩展 A） */
+    if (cp >= 0xAC00 && cp <= 0xD7A3) return 2; /* 谚文音节 */
+    if (cp >= 0xF900 && cp <= 0xFAFF) return 2; /* CJK 兼容表意 */
+    if (cp >= 0xFE30 && cp <= 0xFE4F) return 2; /* 竖排变体 */
+    if (cp >= 0xFF00 && cp <= 0xFF60) return 2; /* 全角 ASCII */
+    if (cp >= 0xFFE0 && cp <= 0xFFE6) return 2; /* 全角符号 */
+    return 1;
+}
+
+/* 差分上屏：只输出与显示缓冲不同的单元格；颜色/样式变化才发 ANSI。
+ * 定位按「终端列」累计：光标初始在 (0,0)（\033[H 后）。每行逐格累计已占用终端列
+ * （被跳过的未变更单元格同样占宽，计入列位置），变更单元格若非恰在当前光标处则发
+ * \033[%d;%dH 定位；连续单元格不重复定位保持差分输出紧凑。全角字符占 2 列，由
+ * tui_cell_width 计入，避免在全角字符之后的变更落到错误列（覆盖前一字符）。 */
 void vus_tui_flush(void) {
     if (!tui_is_tty_out()) {
         /* 非终端：仅推进差分基准（输出被管道/文件吞掉无意义） */
@@ -147,18 +179,18 @@ void vus_tui_flush(void) {
         return;
     }
     int fg = -1, bg = -1, st = -1;
-    /* 逻辑光标（0 基）：初始 \033[H 归位后光标位于 (0,0)。差分跳过未变单元格
-     * 不会推进终端光标，因此每输出一个变更单元格都要核对终端光标是否恰在其位，
-     * 否则内容会写到错误列（旧实现仅 c==0 定位，行中变更整行错位）。
-     * 连续单元格（光标恰在下一格）不重复发定位序列，保持差分输出紧凑。 */
-    int cur_r = 0, cur_c = -1;
+    int cur_r = 0, cur_c = 0;   /* 逻辑光标（0 基）：\033[H 归位后位于 (0,0) */
     fputs("\033[?25l\033[H", stdout);   /* 隐藏光标 + 归位 */
     for (int r = 0; r < s_rows; r++) {
+        int term_col = 0;       /* 本行已占用终端列：下一变更单元格的应处位置 */
         for (int c = 0; c < s_cols; c++) {
             TuiCell *n = &s_cur[r][c];
-            if (s_has_prev && memcmp(n, &s_prev[r][c], sizeof(*n)) == 0) continue;
-            if (r != cur_r || c != cur_c + 1)
-                fprintf(stdout, "\033[%d;%dH", r + 1, c + 1);
+            if (s_has_prev && memcmp(n, &s_prev[r][c], sizeof(*n)) == 0) {
+                term_col += tui_cell_width(n->ch);   /* 未变更格上一帧已上屏，占宽照计 */
+                continue;
+            }
+            if (r != cur_r || term_col != cur_c)
+                fprintf(stdout, "\033[%d;%dH", r + 1, term_col + 1);
             /* 颜色/样式切换优化 */
             if (n->fg != fg || n->bg != bg || n->style != st) {
                 fputs("\033[0m", stdout);
@@ -172,7 +204,8 @@ void vus_tui_flush(void) {
             }
             fputs(n->ch, stdout);
             cur_r = r;
-            cur_c = c;
+            cur_c = term_col + tui_cell_width(n->ch);
+            term_col = cur_c;
         }
     }
     fputs("\033[0m\033[?25h", stdout);  /* 复位 + 显示光标 */
