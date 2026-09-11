@@ -1,0 +1,108 @@
+# =============================================================================
+# VUS 语法高亮文件（MT 文本编辑器 .mtsx）
+# -----------------------------------------------------------------------------
+# 支持高亮：注释(# //)、字符串("..."/f"..."插值串/"""多行模板+插值)、数字、
+# 英文/中文关键字、内建类型、函数调用、运算符、{}配对。
+#
+# 安装：在 MT 管理器 / MT 文本编辑器中打开本文件，按提示"安装语法"即可；
+#       .vus 文件即自动应用该高亮（也可在编辑器中手动切换语法为 VUS）。
+#
+# 说明：
+#   - MT 语法引擎基于 Java 正则。`\b` 对中文无效，故中文关键词一律使用
+#     Unicode 范围 + 前后否定环视做词边界（[一-鿿] = \x{4E00}-\x{9FFF}）。
+#   - 匹配器按"同一位置写在前面的优先"竞争；字符串/注释类放在最前，避免
+#     优先级后的匹配器误吞字符串内容。
+# =============================================================================
+{
+    name: ["VUS", ".vus"]
+    ignoreCase: false
+
+    bracketPairs: ["{}", "[]", "()"]
+
+    styles: [
+        "func" #6F42C1
+        "placeholder" #E36209
+    ]
+
+    contains: [
+        // ---- 1) 三引号多行字符串 """..."""（跨行，含 {插值}） ----
+        {
+            start: /"""/
+            end: /"""/
+            childrenStyle: "string"
+            contains: [
+                {match: /\\(?:["'\\abfnrtvx]|x[0-9A-Fa-f]{2})/, 0: "strEscape"}
+                {
+                    start: /\{/
+                    end: /\}/
+                    childrenStyle: "placeholder"
+                    contains: [
+                        {match: /\d+/, 0: "number"}
+                        {match: /(?:\.\.|<<|>>|<=|>=|==|!=|&&|\|\||[+\-*\/%=<>!&|^~])/, 0: "operator"}
+                    ]
+                }
+            ]
+        }
+
+        // ---- 2) 插值串 f"..."（单行，含 {插值}） ----
+        {
+            start: /f"/
+            end: /"/
+            childrenStyle: "string"
+            contains: [
+                {match: /\\(?:["'\\abfnrtvx]|x[0-9A-Fa-f]{2})/, 0: "strEscape"}
+                {
+                    start: /\{/
+                    end: /\}/
+                    childrenStyle: "placeholder"
+                    contains: [
+                        {match: /\d+/, 0: "number"}
+                        {match: /(?:\.\.|<<|>>|<=|>=|==|!=|&&|\|\||[+\-*\/%=<>!&|^~])/, 0: "operator"}
+                    ]
+                }
+            ]
+        }
+
+        // ---- 3) 普通字符串 "..."（含转义） ----
+        {
+            start: /"/
+            end: /"/
+            childrenStyle: "string"
+            contains: [
+                {match: /\\(?:["'\\abfnrtvx]|x[0-9A-Fa-f]{2})/, 0: "strEscape"}
+            ]
+        }
+
+        // ---- 4) 注释：# 行注释 与 // 行注释 ----
+        {start: /#/, end: /$/, childrenStyle: "comment"}
+        {start: /\/\//, end: /$/, childrenStyle: "comment"}
+
+        // ---- 5) 数字：二进制/十进制/十六进制/浮点/科学计数 ----
+        {number: "2|10|16|F|E", style: "number"}
+
+        // ---- 6) 英文关键字 ----
+        {match: keywordsToRegex("and break continue def elif else except false for from global if import in not null or return throw true try while"), 0: "keyword"}
+
+        // ---- 7) 中文关键字（Unicode 词边界） ----
+        {
+            match: /(?<![\x{4E00}-\x{9FFF}A-Za-z0-9_])(?:否则如果|当循环|等待线程|导入外部|导出变量|定义|如果|返回|循环|继续|跳出|导入|尝试|捕获|抛出|全局|线程|睡眠|协程|恢复|让出|等待|否则|从|到|和|或|非|在|真|假|空)(?![\x{4E00}-\x{9FFF}A-Za-z0-9_])/
+            0: "keyword"
+        }
+
+        // ---- 8) 内建类型断言/标注 ----
+        {match: keywordsToRegex("bool dict float int list str"), 0: "type"}
+        {
+            match: /(?<![\x{4E00}-\x{9FFF}A-Za-z0-9_])(?:布尔型|整型|浮点型|字符串|结构)(?![\x{4E00}-\x{9FFF}A-Za-z0-9_])/
+            0: "type"
+        }
+
+        // ---- 9) 函数调用：任意标识符( （含中文函数名/内建函数） ----
+        {
+            match: /(?<![\x{4E00}-\x{9FFF}A-Za-z0-9_])[A-Za-z_\x{4E00}-\x{9FFF}][A-Za-z0-9_\x{4E00}-\x{9FFF}]*(?=\s*\()/
+            0: "func"
+        }
+
+        // ---- 10) 运算符 ----
+        {match: /(?:\.\.|<<|>>|<=|>=|==|!=|&&|\|\||[+\-*\/%=<>!&|^~])/, 0: "operator"}
+    ]
+}

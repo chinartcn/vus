@@ -44,7 +44,7 @@ DOMAINS=(
   "语言核心-泛型结构体:test_generic.vus test_generic_call.vus test_generic_mono.vus test_generic_unused.vus test_type_annot.vus test_struct_basic.vus test_struct_chain.vus test_cast.vus"
   "运行时-并发内存:test_await.vus test_await_multi.vus test_thread_coro.vus test_container_release.vus test_r6_forward_chain.vus test_platform_light.vus"
   "异常系统:test_error.vus test_exception.vus test_exception_types.vus"
-  "内置标准库:test_ext_builtins.vus test_legacy_stdlib.vus test_file_io.vus test_network.vus test_logger.vus test_sleep.vus test_tui.vus test_tui_editor.vus"
+  "内置标准库:test_ext_builtins.vus test_legacy_stdlib.vus test_file_io.vus test_network.vus test_logger.vus test_sleep.vus test_tui.vus test_tui_editor.vus test_ai_agg.vus"
   "导入多模块:test_import.vus test_pages_ext.vus"
   "FFI-插件-ABI:test_ext_c.vus test_plugin_run_json.vus test_plugins.vus plugin_realtime_call.vus test_vus_abi.vus test_vus_chart.vus test_vus_lang.vus test_vus_plugin.vus"
   "Cordis 元框架:test_cordis.vus test_cordis_multi.vus"

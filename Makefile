@@ -51,6 +51,10 @@ CORDIS_SRC = $(RT_DIR)/vus_cordis.c
 CORDIS_OBJ = $(BUILD_DIR)/vus_cordis.o
 TUI_SRC   = $(RT_DIR)/vus_tui.c
 TUI_OBJ   = $(BUILD_DIR)/vus_tui.o
+AI_SRC    = $(RT_DIR)/vus_ai.c
+AI_OBJ    = $(BUILD_DIR)/vus_ai.o
+WEB_SRC   = $(RT_DIR)/vus_web.c
+WEB_OBJ   = $(BUILD_DIR)/vus_web.o
 RT_LIB   = $(BUILD_DIR)/libvus_rt.a
 RT_SO    = $(BUILD_DIR)/libvus_rt.so
 
@@ -155,7 +159,7 @@ VUS_EXT_OBJ = $(VUS_EXT_SRC:$(RT_DIR)/%.c=$(BUILD_DIR)/%.o)
 # CLI `vus lint` 与 LSP .vua 校验闭环进程内复用 vua.c 严格校验 + 渲染树归一）
 # 注：Oniguruma/扩展内建/miniz 对象同时被 libvus_rt.a 与 vus 引用，必须同时
 # 列入 vus 的前置依赖，否则 `make vus`/`make` 单独构建时缺对象链接失败。
-vus: $(OBJS) $(YYJSON_OBJ) $(VUA_OBJ) $(RT_OBJ) $(RT_CORO_OBJ) $(RT_C_IMPL_OBJ) $(CORDIS_OBJ) $(TUI_OBJ) $(EL_OBJ) \
+vus: $(OBJS) $(YYJSON_OBJ) $(VUA_OBJ) $(RT_OBJ) $(RT_CORO_OBJ) $(RT_C_IMPL_OBJ) $(CORDIS_OBJ) $(TUI_OBJ) $(AI_OBJ) $(WEB_OBJ) $(EL_OBJ) \
       $(ONIG_OBJ) $(VUS_EXT_OBJ) $(MINIZ_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^ -lm -ldl -lpthread
 
@@ -265,6 +269,14 @@ $(CORDIS_OBJ): $(CORDIS_SRC) $(RT_DIR)/vus_cordis.h $(RT_H) | $(BUILD_DIR)
 $(TUI_OBJ): $(TUI_SRC) $(RT_DIR)/vus_tui.h $(RT_H) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -I$(RT_DIR) -c -o $@ $<
 
+# 编译 AI 聚合模块（服务商池/OpenAI 兼容端点/对话调用/图像生成/工作流，随运行时库归档）
+$(AI_OBJ): $(AI_SRC) $(RT_DIR)/libvus_rt.h $(RT_H) $(RT_DIR)/yyjson/yyjson.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(RT_DIR) -c -o $@ $<
+
+# 编译网页服务模块（极简 POSIX HTTP 服务器：内容/目录双模式，随运行时库归档）
+$(WEB_OBJ): $(WEB_SRC) $(RT_DIR)/libvus_rt.h $(RT_H) $(RT_DIR)/yyjson/yyjson.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(RT_DIR) -c -o $@ $<
+
 # 编译 EasyLogger 核心源码
 $(BUILD_DIR)/elog.o: $(EL_DIR)/src/elog.c $(EL_DIR)/inc/elog.h $(EL_DIR)/inc/elog_cfg.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(EL_INC) -c -o $@ $<
@@ -332,14 +344,14 @@ $(BUILD_DIR)/vus_regex.o: $(RT_DIR)/vus_regex.c $(RT_H) | $(BUILD_DIR)
 # 运行时库静态归档（含 vus_coro.o、yyjson、easylogger elog.o 与 GuiLite 图形库）
 # 顺序注意：GNU ld 对归档只做单遍扫描，被依赖对象须排在其引用者之后——
 # oniguruma 排在 vus_regex 前；miniz 排在最后（vus_zip 引用 mz_*）。
-$(RT_LIB): $(RT_OBJ) $(RT_CORO_OBJ) $(RT_C_IMPL_OBJ) $(CORDIS_OBJ) $(TUI_OBJ) $(YYJSON_OBJ) $(EL_OBJ) $(GUI_OBJ) $(XYZ_OBJ) $(GLES_ARCHIVE_OBJ) \
+$(RT_LIB): $(RT_OBJ) $(RT_CORO_OBJ) $(RT_C_IMPL_OBJ) $(CORDIS_OBJ) $(TUI_OBJ) $(AI_OBJ) $(WEB_OBJ) $(YYJSON_OBJ) $(EL_OBJ) $(GUI_OBJ) $(XYZ_OBJ) $(GLES_ARCHIVE_OBJ) \
            $(ONIG_OBJ) $(VUS_EXT_OBJ) $(MINIZ_OBJ)
 	ar rcs $@ $^
 
 # 运行时共享库（动态链接可选，install 时生成；对象已统一 -fPIC，直接二次链接）
 # 未定义的外部符号（curl/X11/png/freetype 等）按探测结果携带；pkg-config 缺失时
 # 留空并用 -Wl,--allow-shlib-undefined 兜底，无法链成的场景由编译器回退静态。
-$(RT_SO): $(RT_OBJ) $(RT_CORO_OBJ) $(RT_C_IMPL_OBJ) $(CORDIS_OBJ) $(TUI_OBJ) $(YYJSON_OBJ) $(EL_OBJ) $(GUI_OBJ) $(XYZ_OBJ) $(GLES_ARCHIVE_OBJ) \
+$(RT_SO): $(RT_OBJ) $(RT_CORO_OBJ) $(RT_C_IMPL_OBJ) $(CORDIS_OBJ) $(TUI_OBJ) $(AI_OBJ) $(WEB_OBJ) $(YYJSON_OBJ) $(EL_OBJ) $(GUI_OBJ) $(XYZ_OBJ) $(GLES_ARCHIVE_OBJ) \
           $(ONIG_OBJ) $(VUS_EXT_OBJ) $(MINIZ_OBJ)
 	$(CC) -shared -fPIC -o $@ $^ -lm -ldl -lpthread -lstdc++ \
 		$(CURL_LIBS) $(IMG_LIBS) $(FT_LIBS) $(GLES_LIBS) -Wl,--allow-shlib-undefined

@@ -3888,6 +3888,212 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
         }
     }
 
+    /* ============= AI 聚合模块（rt/vus_ai.c） =============
+     * AI_api池(配置JSON)          —— 导入 {服务名: 令牌} 池；无参返回当前池 JSON
+     * AI_open兼容(服务名, 地址)   —— 绑定 OpenAI 兼容端点（覆盖内置默认）
+     * AI_请求(名称, 模型[, 消息]) —— 对话调用；两参时消息缺省 "你好"
+     * AI_服务列表() / AI_移除(服务名)                    */
+    if (strcmp(call->func_name, "AI_请求") == 0) {
+        char *name = call->args && call->args->count >= 1 ? gen_expr(buf, call->args->items[0]) : NULL;
+        char *model = call->args && call->args->count >= 2 ? gen_expr(buf, call->args->items[1]) : NULL;
+        if (name && model) {
+            char *msg = call->args->count >= 3 ? gen_expr(buf, call->args->items[2])
+                                               : strdup("vus_string_new(\"你好\")");
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_ai_chat(%s, %s, %s)", name, model, msg);
+            free(name); free(model); free(msg);
+            return strdup(result);
+        }
+        free(name); free(model);
+    }
+    if (strcmp(call->func_name, "AI_api池") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *cfg = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_ai_pool(%s)", cfg);
+            free(cfg);
+            return strdup(result);
+        }
+        return strdup("vus_ai_pool(vus_string_new(\"\"))");
+    }
+    if (strcmp(call->func_name, "AI_open兼容") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *name = gen_expr(buf, call->args->items[0]);
+            char *base = gen_expr(buf, call->args->items[1]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_ai_open_compat(%s, %s)", name, base);
+            free(name); free(base);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "AI_服务列表") == 0) {
+        return strdup("vus_ai_list(vus_string_new(\"\"))");
+    }
+    if (strcmp(call->func_name, "AI_模型列表") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *name = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_ai_models(%s)", name);
+            free(name);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "AI_移除") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *name = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_ai_del(%s)", name);
+            free(name);
+            return strdup(result);
+        }
+    }
+
+    /* AI_文生图(服务商, 模型, 提示词[, 尺寸]) */
+    if (strcmp(call->func_name, "AI_文生图") == 0) {
+        char *name = call->args && call->args->count >= 1 ? gen_expr(buf, call->args->items[0]) : NULL;
+        char *model = call->args && call->args->count >= 2 ? gen_expr(buf, call->args->items[1]) : NULL;
+        char *prompt = call->args && call->args->count >= 3 ? gen_expr(buf, call->args->items[2]) : NULL;
+        if (name && model && prompt) {
+            char *size = call->args->count >= 4 ? gen_expr(buf, call->args->items[3])
+                                                : strdup("vus_string_new(\"\")");
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_ai_image_gen(%s, %s, %s, %s)", name, model, prompt, size);
+            free(name); free(model); free(prompt); free(size);
+            return strdup(result);
+        }
+        free(name); free(model); free(prompt);
+    }
+
+    /* AI_图生图(服务商, 模型, 图片路径, 提示词[, 强度]) */
+    if (strcmp(call->func_name, "AI_图生图") == 0) {
+        char *name = call->args && call->args->count >= 1 ? gen_expr(buf, call->args->items[0]) : NULL;
+        char *model = call->args && call->args->count >= 2 ? gen_expr(buf, call->args->items[1]) : NULL;
+        char *path = call->args && call->args->count >= 3 ? gen_expr(buf, call->args->items[2]) : NULL;
+        char *prompt = call->args && call->args->count >= 4 ? gen_expr(buf, call->args->items[3]) : NULL;
+        if (name && model && path && prompt) {
+            char *str = call->args->count >= 5 ? gen_expr(buf, call->args->items[4])
+                                               : strdup("vus_string_new(\"\")");
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_ai_image_edit(%s, %s, %s, %s, %s)",
+                     name, model, path, prompt, str);
+            free(name); free(model); free(path); free(prompt); free(str);
+            return strdup(result);
+        }
+        free(name); free(model); free(path); free(prompt);
+    }
+
+    /* ============= AI 工作流（后台协程 + 进度回调） =============
+     * AI_启动工作流(槽名, 函数, 参数) / AI_推进(槽名)
+     * AI_返回(值) / AI_完成返回()（工作流体内）
+     * AI_回调(槽名) / AI_清空回调(槽名) / AI_回调_完成(槽名) / AI_工作流状态(槽名) */
+    if (strcmp(call->func_name, "AI_启动工作流") == 0) {
+        char *slot = call->args && call->args->count >= 1 ? gen_expr(buf, call->args->items[0]) : NULL;
+        char *fn   = call->args && call->args->count >= 2 ? gen_expr(buf, call->args->items[1]) : NULL;
+        char *arg  = call->args && call->args->count >= 3 ? gen_expr(buf, call->args->items[2])
+                                                          : strdup("vus_string_new(\"\")");
+        if (slot && fn) {
+            char result[4096];
+            snprintf(result, sizeof(result),
+                "vus_ai_wf_start(%s, (void(*)(void*))(%s), (void*)(%s))",
+                slot, fn, arg);
+            free(slot); free(fn); free(arg);
+            return strdup(result);
+        }
+        free(slot); free(fn); free(arg);
+    }
+    if (strcmp(call->func_name, "AI_推进") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *slot = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result), "vus_ai_wf_step(%s)", slot);
+            free(slot);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "AI_返回") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *v = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result), "vus_ai_wf_return(%s)", v);
+            free(v);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "AI_完成返回") == 0) {
+        return strdup("vus_ai_wf_done()");
+    }
+    if (strcmp(call->func_name, "AI_回调") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *slot = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result), "vus_ai_wf_value(%s)", slot);
+            free(slot);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "AI_清空回调") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *slot = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result), "vus_ai_wf_clear(%s)", slot);
+            free(slot);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "AI_回调_完成") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *slot = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result), "vus_ai_wf_done_q(%s)", slot);
+            free(slot);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "AI_工作流状态") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *slot = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result), "vus_ai_wf_status(%s)", slot);
+            free(slot);
+            return strdup(result);
+        }
+    }
+
+    /* ============= 网页服务（极简 POSIX HTTP 服务器） =============
+     * 网页_服务(端口, 内容)       —— 内容模式：返回该 HTML
+     * 网页_服务目录(目录[, 端口])  —— 目录模式：静态文件服务，网页.json 配置入口/端口
+     * 网页_停止(端口)              —— 停止服务 */
+    if (strcmp(call->func_name, "网页_服务") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *port = gen_expr(buf, call->args->items[0]);
+            char *content = gen_expr(buf, call->args->items[1]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_web_serve(%s, %s)", port, content);
+            free(port); free(content);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "网页_服务目录") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *dir = gen_expr(buf, call->args->items[0]);
+            char *port = call->args->count >= 2 ? gen_expr(buf, call->args->items[1])
+                                                : strdup("vus_string_new(\"\")");
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_web_serve_dir(%s, %s)", dir, port);
+            free(dir); free(port);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "网页_停止") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *port = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result), "vus_web_stop(%s)", port);
+            free(port);
+            return strdup(result);
+        }
+    }
+
     /* ============= 文件操作内置函数 ============= */
     if (strcmp(call->func_name, "文件_读取") == 0) {
         if (call->args && call->args->count >= 1) {
@@ -4966,11 +5172,16 @@ static char *gen_expr_identifier(GenBuf *buf, VusAstIdentifier *ident) {
 
 static char *gen_expr_string(GenBuf *buf, VusAstString *str) {
     (void)buf;
-    char escaped[4096];
-    gen_string_escape(str->value, escaped, sizeof(escaped));
+    /* 动态分配转义缓冲：单行/三引号多行内容均无 4KB 截断（HTML 模板可达数十 KB） */
+    size_t slen = str->value ? strlen(str->value) : 0;
+    size_t cap = slen * 6 + 16;   /* 最坏情形：每个字节转成 \xHH（4 字节）+ 余量 */
+    char *escaped = (char *)malloc(cap);
+    if (!escaped) return NULL;
+    gen_string_escape(str->value ? str->value : "", escaped, cap);
     /* R2：static 缓存字面量指针（首次 vus_literal 一次，热路径仅一次判空）；
      * 静态持有自己的引用，即使池槽被其它字面量换出也不悬垂。 */
     char *result = gen_static_lit(s_lit_seq++, escaped);
+    free(escaped);
     return result;
 }
 
