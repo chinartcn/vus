@@ -20,16 +20,25 @@
     bracketPairs: ["{}", "[]", "()"]
 
     styles: [
-        // IntelliJ/Java 风格配色（与 MT 内置 Python/Java 语法一致）：
+        // 亮色/暗色透明主题统一使用暗色 IntelliJ 风格配色：
+        // 下面两槽位（日间/夜间）填同一色值，任意主题下颜色一致。
         // keyword=橙 #CC7832、string=绿 #6A8759、number=蓝 #6897BB、
         // function=黄 #FFCB6B、method=紫蓝 #8888C6、parameter=红 #CA5936。
-        "func"          #1E6F94    #FFCB6B    @_
-        "placeholder"   #830000    #CA5936    @_
+        "func"          #FFCB6B    #FFCB6B    @_
+        "placeholder"   #CA5936    #CA5936    @_
         // 行背景色：$ 后的颜色为行背景色（非文字背景）
-        "defLine"       #4A3A75$EAE2F8    #C9B8EC$241A33    @_
-        "sectionLine"   #2E6B46$DCF0E2    #8FD9A0$122B18    @_
+        "defLine"       #C9B8EC$241A33    #C9B8EC$241A33    @_
+        "sectionLine"   #8FD9A0$122B18    #8FD9A0$122B18    @_
         // 内置模块前缀（图形_/界面_/AI_/JSON_ 等），method 色
-        "module"        #05A7B0    #8888C6    @_
+        "module"        #8888C6    #8888C6    @_
+        // 同名覆盖内置风格（两槽位同色，保证亮色/暗色主题一致）
+        "keyword"       #CC7832    #CC7832    @_
+        "string"        #6A8759    #6A8759    @_
+        "strEscape"     #CC7832    #CC7832    @_
+        "number"        #6897BB    #6897BB    @_
+        "comment"       #808080    #808080    @_
+        "operator"      #508090    #508090    @_
+        "type"          #808000    #808000    @_
     ]
 
     contains: [
