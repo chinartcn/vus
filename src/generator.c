@@ -7128,11 +7128,23 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
        用于在低性能设备（如 Termux）上加速编译大型生成 C；否则按配置。 */
     const char *opt_level = "-O2";
     const char *env_opt = getenv("VUS_OPT");
+    /* 体积档裁剪开关：优化=体积 时启用函数级裁剪（依赖运行时库
+       -ffunction-sections/-fdata-sections 预编译，见 Makefile CFLAGS）。
+       -Os -flto：代码密度 + LTO 跨 TU 优化；
+       -Wl,--gc-sections：链接时回收未被引用的运行时函数/数据段；
+       -Wl,--strip-all：删除全部符号表（等效外部 strip）。
+       用户显式 VUS_OPT 覆盖时视为手动接管，不再追加裁剪参数，
+       以免调试（VUS_OPT="-O0 -g"）被误剥符号。 */
+    int size_mode = 0;
+    char size_link_opts[96] = "";
     if (env_opt && env_opt[0]) {
         opt_level = env_opt;
     } else if (config->optimization[0]) {
         if (strcmp(config->optimization, "体积") == 0) {
-            opt_level = "-Os";
+            opt_level = "-Os -flto -ffunction-sections -fdata-sections";
+            snprintf(size_link_opts, sizeof(size_link_opts),
+                     " -Wl,--gc-sections -Wl,--strip-all");
+            size_mode = 1;
         } else if (strcmp(config->optimization, "调试") == 0) {
             opt_level = "-O0 -g";
         }
@@ -7392,10 +7404,25 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
         return -1;
     }
 
+    /* 体积档：在链接命令尾部注入函数级裁剪参数（--gc-sections 回收未引用段、
+       --strip-all 删符号）。各分支模板统一以 " 2>&1" 结尾，这里在结尾前插入，
+       与下方 strip 的"替换尾部"手法一致；动态链接路径同样受益（主程序瘦身）。 */
+    if (size_mode && size_link_opts[0]) {
+        char *tail = strstr(cmd, " 2>&1");
+        if (tail) {
+            size_t prefix_len = (size_t)(tail - cmd);
+            if (prefix_len + strlen(size_link_opts) + 6 < sizeof(cmd)) {
+                memcpy(tail, size_link_opts, strlen(size_link_opts));
+                memcpy(tail + strlen(size_link_opts), " 2>&1", 6);
+            }
+        }
+    }
+
     /* strip（可选）：链接成功后瘦身。三个分支模板统一以 " 2>&1" 结尾，这里替换为
        " && strip --strip-unneeded <输出> 2>&1"——链错即短路，绝不影响原失败诊断；
-       GUI 场景 -rdynamic 的导出符号在 dynsym 中，--strip-unneeded 不会误删。 */
-    if (do_strip && cached_has_strip()) {
+       GUI 场景 -rdynamic 的导出符号在 dynsym 中，--strip-unneeded 不会误删。
+       体积档已内置 --strip-all，不再叠加外部 strip。 */
+    if (do_strip && !size_mode && cached_has_strip()) {
         char *tail = strstr(cmd, " 2>&1");
         if (tail) {
             char strip_suffix[1100];

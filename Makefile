@@ -7,7 +7,11 @@ CC       = gcc
 CXX      = g++
 # -fPIC：运行时对象统一位置无关，静态归档照常，同时允许 install 直接用
 # 同一批对象二次链接出共享库 build/libvus_rt.so（动态链接可选）。
-CFLAGS   = -Wall -Wextra -g -O2 -std=c11 -Wno-format-truncation -fPIC $(VERSION_DEF)
+# -ffunction-sections/-fdata-sections：每个函数/数据独立 ELF section，
+# 供用户程序链接时 -Wl,--gc-sections 回收未引用的运行时函数（函数级裁剪，
+# 体积档 vus.json 编译.优化=体积 自动启用：只链接实际用到的部分）。
+CFLAGS   = -Wall -Wextra -g -O2 -std=c11 -Wno-format-truncation -fPIC \
+           -ffunction-sections -fdata-sections $(VERSION_DEF)
 PIC      = -fPIC
 SRC_DIR  = src
 RT_DIR   = rt

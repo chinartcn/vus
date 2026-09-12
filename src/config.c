@@ -127,7 +127,9 @@ static void json_read_bool_field(JsonCtx *ctx, const char *key, int *out)
     if (json_peek(ctx) != '{') return;
     json_next(ctx); /* 跳过 { */
 
+    /* 逐字段扫描：每轮循环先消费上一字段后的逗号（若无逗号则保持原状） */
     while (json_peek(ctx) != '}' && ctx->pos < ctx->len && !ctx->error) {
+        if (json_peek(ctx) == ',') json_next(ctx); /* 跳过字段分隔逗号 */
         /* 解析 key */
         char field_key[256];
         if (json_peek(ctx) != '"') {
@@ -213,7 +215,9 @@ static int json_read_string_field(JsonCtx *ctx, const char *key,
     if (json_peek(ctx) != '{') return 0;
     json_next(ctx); /* 跳过 { */
 
+    /* 逐字段扫描：每轮循环先消费上一字段后的逗号（若无逗号则保持原状） */
     while (json_peek(ctx) != '}' && ctx->pos < ctx->len && !ctx->error) {
+        if (json_peek(ctx) == ',') json_next(ctx); /* 跳过字段分隔逗号 */
         /* 解析 key */
         char field_key[256];
         if (json_peek(ctx) != '"') {
