@@ -152,6 +152,8 @@ for ABI in "${ABIS[@]}"; do
     "$VUA_SRC/vua.c" \
     "$VUA_SRC/libvus_rt.c" \
     "$VUA_SRC/vus_coro.c" \
+    "$VUA_SRC/vus_rt_c_impl.c" \
+    "$VUA_SRC/vus_tui.c" \
     "$VUA_SRC/easylogger/src/elog.c" \
     "$VUA_SRC/easylogger/src/elog_utils.c" \
     "$VUA_SRC/elog_port.c" \
