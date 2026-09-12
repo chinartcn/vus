@@ -274,7 +274,12 @@ public final class VuaRenderer implements RenderAdapter {
             String snap = node.snapshot();
             IdEntry hit = idCache.get(id);
             if (hit != null && hit.sid == idCacheSid && snap.equals(hit.snap)) {
-                /* 复用：登记快照并回（等价于该子树本次“重建登记”，值取上次快照） */
+                /* 复用：登记快照并回（等价于该子树本次“重建登记”，值取上次快照）。
+                 * 必须先解绑旧 parent：全量重建时 root.removeAllViews() 只摘直接子节点
+                 * （wrapper），不会递归解绑子孙——旧实例的 parent 仍是旧 wrapper，
+                 * 直接 addView 到新树会抛 "already has a parent"。 */
+                ViewGroup oldP = (ViewGroup) hit.view.getParent();
+                if (oldP != null) oldP.removeView(hit.view);
                 inputs.putAll(hit.subInputs);
                 varTexts.putAll(hit.subVarTexts);
                 builtVars.putAll(hit.subVars);
