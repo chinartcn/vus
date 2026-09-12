@@ -5,6 +5,7 @@
  * （type/id/children/variable/event），其余键按 type 归集的控件属性读取。
  *
  * 职责划分（2026-09 重构）：
+ *   - RenderAdapter：vui 与宿主渲染器之间的翻译通道契约（M5；本类 = Gvui 实现）；
  *   - 本类：渲染管线——版本号协议缓存 / View diff / 页面 LRU / 屏内 id 子树复用 /
  *           容器（布局/侧边栏）递归构建 / 变量收集与保存；
  *   - Controls：叶子控件构建器（文本/按钮/输入/列表/课表/网页等外观逻辑）；
@@ -17,6 +18,7 @@ package com.vus.android;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.os.Build;
 import android.util.LruCache;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -35,7 +37,9 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
-public final class VuaRenderer {
+/** Gvui 渲染实现：把规范化渲染树 JSON 建成 Android View 树（RenderAdapter 首个实现；
+ *  vkt 将来是第二个实现，宿主侧只依赖接口）。 */
+public final class VuaRenderer implements RenderAdapter {
 
     private static final int PAGE_CACHE_MAX = 6;           // 页面 View 缓存上限（LRU 逐出）
     private static final int DEFAULT_PAGE_CACHE_MAX = PAGE_CACHE_MAX;
@@ -336,6 +340,8 @@ public final class VuaRenderer {
             case "列表": case "list": case "listview": { controls.listView(node, parent); return; }
             case "侧边栏": case "drawer": case "sidebar": { drawerView(node, parent, builtVars); return; }
             case "网页": case "web": case "浏览器": { controls.webView(node, parent); return; }
+            case "音乐播放器": case "music_player": case "musicplayer": { controls.musicPlayerView(node, parent); return; }
+            case "视频播放器": case "video_player": case "videoplayer": { controls.videoPlayerView(node, parent); return; }
             default: {
                 // 未知/扩展 type：降级为一个文本框占位（严格原则下应报错，这里保证不崩）。
                 parent.addView(TextView(ctx, "[" + node.type() + "]"));
@@ -604,11 +610,20 @@ public final class VuaRenderer {
         return "";
     }
 
-    /** 重建前保存所有输入控件当前值，供重建后恢复（避免整树刷新导致控件复位）。 */
-    private void saveInputs() {
+    /** 重建前保存所有输入控件当前值，供重建后恢复（避免整树刷新导致控件复位）。
+     *  RenderAdapter：宿主（VusSession 快照）与整树重建前共用；整树重建由 render 调用。 */
+    @Override public void saveInputs() {
         for (Map.Entry<String, View> e : inputs.entrySet()) {
             savedVals.put(e.getKey(), inputOf(e.getValue()));
         }
+    }
+
+    /** RenderAdapter：输入控件值保存表（variable/id -> 值，可序列化）。 */
+    @Override public Map<String, String> savedVals() { return savedVals; }
+
+    /** 恢复会话快照状态：把快照的变量/控件值写回保存表（随后按节点 restore 生效）。 */
+    @Override public void restoreSaved(Map<String, String> vals) {
+        if (vals != null) savedVals.putAll(vals);
     }
 
     /* ---------- 便捷工厂（Controls 经包级访问） ---------- */

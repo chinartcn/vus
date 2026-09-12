@@ -3900,6 +3900,73 @@ VusString* vus_plugin_theme_primary(VusString* color) {
     return vus_string_new("0");
 }
 
+/* ---- 媒体播放（APK：Java 平台桥 MediaPlayer/VideoView；桌面：无害降级） ----
+ * 音乐_播放(源, 循环, 音量) / 音乐_停止 / 音乐_暂停 / 音乐_继续 /
+ * 音乐_跳转(秒) / 音乐_状态() / 视频_播放(源)。
+ * 桌面侧无系统媒体框架，调用时按"空操作成功/固定状态"降级，脚本无需分支。 */
+
+VusString* vus_plugin_media_play(VusString* src, VusString* loop, VusString* volume) {
+    const char *s = (src && vus_string_cstr(src)) ? vus_string_cstr(src) : "";
+    if (!s[0]) return vus_string_new("0");
+    const char *lp = (loop && vus_string_cstr(loop)) ? vus_string_cstr(loop) : "0";
+    const char *vol = (volume && vus_string_cstr(volume)) ? vus_string_cstr(volume) : "1";
+    char *aj = (char *)malloc(strlen(s) * 2 + strlen(lp) + strlen(vol) + 32);
+    if (!aj) return vus_string_new("0");
+    char *p = aj;
+    p += sprintf(p, "{\"src\":\"");
+    for (size_t i = 0; i < strlen(s); i++) {
+        char c = s[i];
+        if (c == '"' || c == '\\') *p++ = '\\';
+        *p++ = c;
+    }
+    p += sprintf(p, "\",\"loop\":\"%s\",\"volume\":\"%s\"}", lp, vol);
+    VusString *jr = vus_java_rpc("media.play", aj);
+    free(aj);
+    return jr ? jr : vus_string_new("0");
+}
+
+VusString* vus_plugin_media_stop(void) {
+    VusString *jr = vus_java_rpc("media.stop", "{}");
+    return jr ? jr : vus_string_new("0");
+}
+
+VusString* vus_plugin_media_pause(void) {
+    VusString *jr = vus_java_rpc("media.pause", "{}");
+    return jr ? jr : vus_string_new("0");
+}
+
+VusString* vus_plugin_media_resume(void) {
+    VusString *jr = vus_java_rpc("media.resume", "{}");
+    return jr ? jr : vus_string_new("0");
+}
+
+VusString* vus_plugin_media_seek(VusString* pos) {
+    if (pos && vus_string_cstr(pos)) {
+        char *aj = vus_java_json_kv("pos", vus_string_cstr(pos));
+        VusString *jr = aj ? vus_java_rpc("media.seek", aj) : NULL;
+        free(aj);
+        if (jr) return jr;
+    }
+    return vus_string_new("0");
+}
+
+VusString* vus_plugin_media_status(void) {
+    VusString *jr = vus_java_rpc("media.status", "{}");
+    if (jr) return jr;
+    /* 桌面降级：无播放器，返回统一空闲状态 */
+    return vus_string_new("{\"state\":\"idle\",\"src\":\"\",\"loop\":false,\"err\":\"\",\"duration\":0,\"position\":0}");
+}
+
+VusString* vus_plugin_video_play(VusString* src) {
+    if (src && vus_string_cstr(src)) {
+        char *aj = vus_java_json_kv("src", vus_string_cstr(src));
+        VusString *jr = aj ? vus_java_rpc("video.play", aj) : NULL;
+        free(aj);
+        if (jr) return jr;
+    }
+    return vus_string_new("0");
+}
+
 /* ---- shell 命令执行（供"终端"使用） ---- */
 VusString* vus_plugin_shell_exec(VusString* cmd) {
     if (!cmd) return vus_string_new("");

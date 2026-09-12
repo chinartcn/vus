@@ -28,5 +28,11 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 全屏视频播放器（VusMedia.video / 视频_播放） -->
+        <activity
+            android:name="com.vus.android.MediaActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
     </application>
 </manifest>

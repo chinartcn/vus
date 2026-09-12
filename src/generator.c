@@ -3658,6 +3658,64 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
         return strdup("vus_plugin_theme_primary(vus_string_new(\"默认\"))");
     }
 
+    /* ============= 媒体播放内建（APK Java 平台桥；桌面无害降级） ============= */
+    if (strcmp(call->func_name, "音乐_播放") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            if (call->args->count >= 2) {
+                char *b = gen_expr(buf, call->args->items[1]);
+                if (call->args->count >= 3) {
+                    char *c = gen_expr(buf, call->args->items[2]);
+                    char result[4096];
+                    snprintf(result, sizeof(result), "vus_plugin_media_play(%s, %s, %s)", a, b, c);
+                    free(a); free(b); free(c);
+                    return strdup(result);
+                }
+                char result[4096];
+                snprintf(result, sizeof(result), "vus_plugin_media_play(%s, %s, vus_string_new(\"1\"))", a, b);
+                free(a); free(b);
+                return strdup(result);
+            }
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_media_play(%s, vus_string_new(\"0\"), vus_string_new(\"1\"))", a);
+            free(a);
+            return strdup(result);
+        }
+        return strdup("vus_plugin_media_play(vus_string_new(\"\"), vus_string_new(\"0\"), vus_string_new(\"1\"))");
+    }
+    if (strcmp(call->func_name, "音乐_停止") == 0) {
+        return strdup("vus_plugin_media_stop()");
+    }
+    if (strcmp(call->func_name, "音乐_暂停") == 0) {
+        return strdup("vus_plugin_media_pause()");
+    }
+    if (strcmp(call->func_name, "音乐_继续") == 0) {
+        return strdup("vus_plugin_media_resume()");
+    }
+    if (strcmp(call->func_name, "音乐_跳转") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_media_seek(%s)", a);
+            free(a);
+            return strdup(result);
+        }
+        return strdup("vus_plugin_media_seek(vus_string_new(\"0\"))");
+    }
+    if (strcmp(call->func_name, "音乐_状态") == 0) {
+        return strdup("vus_plugin_media_status()");
+    }
+    if (strcmp(call->func_name, "视频_播放") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *a = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_plugin_video_play(%s)", a);
+            free(a);
+            return strdup(result);
+        }
+        return strdup("vus_plugin_video_play(vus_string_new(\"\"))");
+    }
+
     /* shell 命令执行：popen 捕获输出，供"终端"应用使用 */
     if (strcmp(call->func_name, "命令_执行") == 0) {
         if (call->args && call->args->count >= 1) {

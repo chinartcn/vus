@@ -226,3 +226,32 @@ Java_com_vus_android_VuaBridge_vuaTriggerById(JNIEnv *env, jclass clazz, jstring
 
 }
 
+/* ---- vuaSessionSnapshot ------------------------------------------------------- */
+JNIEXPORT jstring JNICALL
+Java_com_vus_android_VuaBridge_vuaSessionSnapshot(JNIEnv *env, jclass clazz) {
+    (void)env; (void)clazz;
+
+    char *json = NULL;
+    if (vua_session_snapshot(vua_global_session(NULL), &json, NULL) != 0 || !json)
+        return NULL;
+    jstring out = (*env)->NewStringUTF(env, json);
+    free(json);
+    return out;
+
+}
+
+/* ---- vuaSessionRestore ------------------------------------------------------- */
+JNIEXPORT jint JNICALL
+Java_com_vus_android_VuaBridge_vuaSessionRestore(JNIEnv *env, jclass clazz, jstring snapshotJson) {
+
+    if (!snapshotJson) return -1;
+    const char *c = (*env)->GetStringUTFChars(env, snapshotJson, 0);
+    int rc = -1;
+    if (c) {
+        rc = vua_session_restore(vua_global_session(NULL), c, NULL);
+        (*env)->ReleaseStringUTFChars(env, snapshotJson, c);
+    }
+    return rc;
+
+}
+

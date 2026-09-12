@@ -169,6 +169,7 @@ public final class UpdateManager {
                 rb.delete();                                      // 安全完成，退出防御期
                 cleanupTransition();
                 Log.i(TAG, "更新包已应用, 版本 " + ver + "（.vua/.dex 实时生效，.so 下次启动）");
+                ReloadManager.noteApplied(ver, applied);          // Cordis_dc：进入事务（.so → Pending_Reload）
                 return 0;
             } catch (Throwable t) {
                 Log.w(TAG, "应用更新包失败: " + t);

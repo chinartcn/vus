@@ -20,26 +20,12 @@
 package com.vus.android;
 
 import android.app.Activity;
-import android.app.Notification;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
-import android.content.ClipData;
-import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
-import android.content.IntentFilter;
-import android.net.ConnectivityManager;
-import android.net.Network;
-import android.net.NetworkCapabilities;
-import android.os.BatteryManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.VibrationEffect;
-import android.os.Vibrator;
-import android.os.VibratorManager;
 import android.util.Log;
-import android.widget.Toast;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
@@ -185,22 +171,25 @@ public final class VuaBridge {
                 VusIo.writeBytes(f, b, false);
                 return ok("1");
             }
-            /* ---- Android 轻量能力（纯 Java 实现）：振动/剪贴板/设备信息/Toast ---- */
-            if ("vibrate".equals(api)) { vibrate(num(a, 100, "ms")); return ok("0"); }
-            if ("clipboard.read".equals(api)) return ok(clipboardRead());
-            if ("clipboard.write".equals(api)) { clipboardWrite(str(a, "text")); return ok("0"); }
-            if ("device.info".equals(api)) return ok(deviceInfo());
-            if ("toast".equals(api)) { toast(str(a, "text"), num(a, 0, "long") != 0); return ok("0"); }
-            /* 系统能力延伸：分享 / 电量 / 屏幕常亮 / 网络类型 / 通知 */
-            if ("share.text".equals(api)) return ok(shareText(str(a, "text")));
-            if ("battery.status".equals(api)) return ok(batteryStatus());
-            if ("screen.keepon".equals(api)) { keepScreenOn(str(a, "flag", "1")); return ok("0"); }
-            if ("network.type".equals(api)) return ok(networkType());
-            if ("notify.send".equals(api)) return ok(sendNotify(str(a, "title"), str(a, "body")));
+            /* ---- vce 面（宿主能力桥）：振动/剪贴板/设备/Toast/分享/电量/屏幕/网络/通知。
+             * 归属由 CapabilityRegistry 登记（vce 面），实现见 VceApi（M3 拆包）；
+             * theme.* 属 gvui 面（UI 外观）留在下方，不随 vce 走。 */
+            String vceRes = CapabilityRegistry.isVce(api) ? VceApi.handle(api, a) : null;
+            if (vceRes != null) return vceRes;
             /* 主题：脚本运行时切换浅色/暗色/跟随系统（覆盖页面声明） */
             if ("theme.set".equals(api)) { themeSet(str(a, "name")); return ok("0"); }
             if ("theme.get".equals(api)) return ok(themeGet());
             if ("theme.primary".equals(api)) { themePrimary(str(a, "color")); return ok("0"); }
+            /* 媒体：音频后台播放（单例）+ 视频全屏。桌面环境无实现，调用方不应在纯桌面触发。 */
+            if ("media.play".equals(api))
+                return VusMedia.play(str(a, "src"), !"0".equals(str(a, "loop")),
+                                     (float) dbl(a, 1.0, "volume"));
+            if ("media.stop".equals(api)) return VusMedia.stop();
+            if ("media.pause".equals(api)) return VusMedia.pause();
+            if ("media.resume".equals(api)) return VusMedia.resume();
+            if ("media.seek".equals(api)) return VusMedia.seek(str(a, "pos"));
+            if ("media.status".equals(api)) return VusMedia.status();
+            if ("video.play".equals(api)) return VusMedia.video(str(a, "src"));
             // DEX 逻辑拓展：api 形如 "ext.<插件名>.<操作>"，交给 ExtensionLoader 动态加载调用。
             // 插件 dex 位于 filesDir/plugins/<插件名>.dex，支持运行期热更新（配合 http.download）。
             if (api.startsWith("ext.")) {
@@ -254,6 +243,13 @@ public final class VuaBridge {
         return def;
     }
 
+    private static double dbl(JsonObject o, double def, String key) {
+        if (o != null && o.has(key) && !o.get(key).isJsonNull()) {
+            try { return o.get(key).getAsDouble(); } catch (Throwable ignored) { }
+        }
+        return def;
+    }
+
     private static JsonObject obj(JsonObject o, String key) {
         if (o != null && o.has(key) && !o.get(key).isJsonNull()) {
             try { return o.getAsJsonObject(key); } catch (Throwable ignored) { }
@@ -302,188 +298,6 @@ public final class VuaBridge {
         File f = new File(name == null ? "" : name);
         if (f.isAbsolute() || appContext == null) return f;
         return new File(appContext.getFilesDir(), name);
-    }
-
-    /* ---- Android 轻量能力（纯 Java）：振动/剪贴板/设备信息/Toast ---- */
-
-    /** 振动（毫秒）。API 26+ 用 VibrationEffect；API 31+ 走 VibratorManager。
-     * 无振动器/无权限时静默失败（VUS 侧只关心调用不报错）。 */
-    private static void vibrate(long ms) {
-        if (appContext == null || ms <= 0) return;
-        try {
-            if (Build.VERSION.SDK_INT >= 31) {
-                VibratorManager vm = (VibratorManager) appContext.getSystemService(Context.VIBRATOR_MANAGER_SERVICE);
-                if (vm != null)
-                    vm.getDefaultVibrator().vibrate(
-                            VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE));
-            } else {
-                Vibrator v = (Vibrator) appContext.getSystemService(Context.VIBRATOR_SERVICE);
-                if (v == null) return;
-                if (Build.VERSION.SDK_INT >= 26)
-                    v.vibrate(VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE));
-                else
-                    //noinspection deprecation
-                    v.vibrate(ms);
-            }
-        } catch (Throwable ignored) { }
-    }
-
-    /** 读系统剪贴板文本；无剪贴板管理器/无内容/读取受限返回 ""。 */
-    private static String clipboardRead() {
-        if (appContext == null) return "";
-        try {
-            ClipboardManager cm = (ClipboardManager) appContext.getSystemService(Context.CLIPBOARD_SERVICE);
-            if (cm == null || !cm.hasPrimaryClip() || cm.getPrimaryClip() == null
-                    || cm.getPrimaryClip().getItemCount() == 0) return "";
-            return String.valueOf(cm.getPrimaryClip().getItemAt(0).coerceToText(appContext));
-        } catch (Throwable t) {
-            return "";
-        }
-    }
-
-    /** 写系统剪贴板（text 为空串则清空）。 */
-    private static void clipboardWrite(String text) {
-        if (appContext == null || text == null) return;
-        try {
-            ClipboardManager cm = (ClipboardManager) appContext.getSystemService(Context.CLIPBOARD_SERVICE);
-            if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("vus", text));
-        } catch (Throwable ignored) { }
-    }
-
-    /** 设备信息（JSON 字符串）：品牌/型号/系统版本/SDK/应用版本。 */
-    private static String deviceInfo() {
-        JsonObject o = new JsonObject();
-        o.addProperty("品牌", Build.MANUFACTURER == null ? "" : Build.MANUFACTURER);
-        o.addProperty("型号", Build.MODEL == null ? "" : Build.MODEL);
-        o.addProperty("系统版本", Build.VERSION.RELEASE == null ? "" : Build.VERSION.RELEASE);
-        o.addProperty("SDK", Build.VERSION.SDK_INT);
-        if (appContext != null) {
-            try {
-                o.addProperty("应用版本", appContext.getPackageManager()
-                        .getPackageInfo(appContext.getPackageName(), 0).versionName);
-            } catch (Throwable ignored) { }
-        }
-        return GSON.toJson(o);
-    }
-
-    /** Toast 提示（isLong=true 约 3.5s，默认 2s）；统一切主线程弹出。 */
-    private static void toast(String text, boolean isLong) {
-        if (appContext == null || text == null || text.isEmpty()) return;
-        final String t = text;
-        final int len = isLong ? Toast.LENGTH_LONG : Toast.LENGTH_SHORT;
-        sMain.post(() -> Toast.makeText(appContext.getApplicationContext(), t, len).show());
-    }
-
-    /* ---- 系统能力延伸：分享 / 电量 / 屏幕常亮 / 网络类型 / 通知 ---- */
-
-    /** 分享文本（系统分享面板）。无可用面板返回 "-1"，已发起分享返回 "0"。 */
-    private static String shareText(String text) {
-        if (appContext == null || text == null || text.isEmpty()) return "0";
-        try {
-            Intent i = new Intent(Intent.ACTION_SEND);
-            i.setType("text/plain");
-            i.putExtra(Intent.EXTRA_TEXT, text);
-            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            appContext.startActivity(Intent.createChooser(i, "分享到"));
-            return "0";
-        } catch (Throwable t) {
-            return "-1";
-        }
-    }
-
-    /** 电量 JSON：{"电量":0~100(-1 未知),"充电中":true/false}。 */
-    private static String batteryStatus() {
-        JsonObject o = new JsonObject();
-        int level = -1; boolean charging = false;
-        if (appContext != null) {
-            try {
-                BatteryManager bm = (BatteryManager) appContext.getSystemService(Context.BATTERY_SERVICE);
-                if (bm != null) level = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY);
-                Intent bi = appContext.registerReceiver(null,
-                        new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
-                if (bi != null) {
-                    int st = bi.getIntExtra(BatteryManager.EXTRA_STATUS, -1);
-                    charging = (st == BatteryManager.BATTERY_STATUS_CHARGING
-                            || st == BatteryManager.BATTERY_STATUS_FULL);
-                }
-            } catch (Throwable ignored) { }
-        }
-        o.addProperty("电量", level);
-        o.addProperty("充电中", charging);
-        return GSON.toJson(o);
-    }
-
-    /** 屏幕常亮开关（0 关 / 非 0 开）：作用于主窗口 FLAG_KEEP_SCREEN_ON。 */
-    private static void keepScreenOn(String flag) {
-        if (sActivity == null || sActivity.getWindow() == null) return;
-        boolean on = !"0".equals(flag);
-        if (on) sActivity.getWindow().addFlags(
-                android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        else sActivity.getWindow().clearFlags(
-                android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-    }
-
-    /** 网络类型："wifi" / "mobile" / "none"。无权限时返回 "none"。 */
-    private static String networkType() {
-        if (appContext == null) return "none";
-        try {
-            ConnectivityManager cm = (ConnectivityManager) appContext
-                    .getSystemService(Context.CONNECTIVITY_SERVICE);
-            if (cm == null) return "none";
-            if (Build.VERSION.SDK_INT >= 23) {
-                Network n = cm.getActiveNetwork();
-                if (n == null) return "none";
-                NetworkCapabilities nc = cm.getNetworkCapabilities(n);
-                if (nc == null) return "none";
-                if (nc.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return "wifi";
-                if (nc.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) return "wifi";
-                if (nc.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) return "mobile";
-                return "none";
-            } else {
-                android.net.NetworkInfo ni = cm.getActiveNetworkInfo();
-                if (ni == null || !ni.isConnected()) return "none";
-                int t = ni.getType();
-                if (t == ConnectivityManager.TYPE_WIFI
-                        || t == ConnectivityManager.TYPE_ETHERNET) return "wifi";
-                if (t == ConnectivityManager.TYPE_MOBILE) return "mobile";
-                return "none";
-            }
-        } catch (Throwable t) {
-            return "none";
-        }
-    }
-
-    /** 发送通知栏通知（Android 13+ 需 POST_NOTIFICATIONS 运行时权限，未授予返回 "需要权限"）。 */
-    private static String sendNotify(String title, String body) {
-        if (appContext == null || title == null || title.isEmpty()) return "-1";
-        try {
-            NotificationManager nm = (NotificationManager) appContext
-                    .getSystemService(Context.NOTIFICATION_SERVICE);
-            if (nm == null) return "-1";
-            if (Build.VERSION.SDK_INT >= 33) {
-                if (appContext.checkSelfPermission("android.permission.POST_NOTIFICATIONS")
-                        == android.content.pm.PackageManager.PERMISSION_DENIED) {
-                    return "需要权限";   // 脚本可提示用户到系统设置开启
-                }
-            }
-            if (Build.VERSION.SDK_INT >= 26) {
-                NotificationChannel ch = new NotificationChannel(
-                        "vus", "VUS 通知", NotificationManager.IMPORTANCE_DEFAULT);
-                nm.createNotificationChannel(ch);
-            }
-            Notification.Builder b = Build.VERSION.SDK_INT >= 26
-                    ? new Notification.Builder(appContext, "vus")
-                    : new Notification.Builder(appContext);
-            b.setSmallIcon(android.R.drawable.ic_dialog_info);
-            b.setContentTitle(title);
-            b.setContentText(body == null ? "" : body);
-            b.setAutoCancel(true);
-            b.setWhen(System.currentTimeMillis());
-            nm.notify((int) (System.currentTimeMillis() & 0x7fffffff), b.build());
-            return "0";
-        } catch (Throwable t) {
-            return "-1";
-        }
     }
 
     /* ---- 主题（浅色/暗色/跟随系统，覆盖页面 .vua 声明并触发重建） ---- */
@@ -591,6 +405,16 @@ public final class VuaBridge {
 
     /** native：按控件 id 派发（走 eventIndex），携带回调变量 JSON。 */
     public static native int vuaTriggerById(String nodeId, String varsJson);
+
+    /**
+     * native：生成当前会话快照 JSON（{"screens":[屏名...],"globals":{变量:值}}）。
+     * 对应 rt/vua.c 的 vua_session_snapshot（Cordis_dc M1 会话对齐）；
+     * 无屏/失败返回 null。调用方负责把结果并入 Java 侧会话快照。
+     */
+    public static native String vuaSessionSnapshot();
+
+    /** native：按快照 JSON 恢复会话（重建屏栈 + 恢复全局变量）。返回 0 成功。 */
+    public static native int vuaSessionRestore(String snapshotJson);
 
     private VuaBridge() { }
 }

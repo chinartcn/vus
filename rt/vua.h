@@ -193,6 +193,10 @@ void vua_trigger_by_id(VuaScreen *screen, const char *node_id, VusDict *vars);
 int vua_control_table_load(const char *control_table_json, VuaError *err);
 int vua_dict_load(const char *dict_json, VuaError *err);
 
+/* 控件表 schema 版本（vua_control_table_load 读取「版本」/ version；未加载/缺失返回 0）。
+ * 协议版本的依据：上层可按版本决定是否接受该控件表（M4/vui schema 化）。 */
+int vua_control_table_version(void);
+
 /* ============ Makefile / Android.mk 聚合用的登记函数 ============ */
 
 /* libvus_rt 约定：用一个函数返回本模块的全部内建运行时函数，便于生成器映射。 */
@@ -213,6 +217,25 @@ VuaSession *vua_global_session(VuaError *err);
  * 供 JNI 把触摸回传的变量 JSON 转成 native 变量字典。失败返回 NULL 并挂 *err。
  */
 VusDict *vua_dict_from_json(const char *vars_json, VuaError *err);
+
+/* ============ 会话快照 / 恢复（Cordis_dc §3.3 native 侧会话对齐，M1） ============ */
+
+/*
+ * 生成会话快照 JSON：{"screens":[屏名(栈底→栈顶)...], "globals":{变量:字符串值}}。
+ * 屏名 = .vua 文件名（无扩展）；globals 值经 vus_object_to_string 序列化（标量原文、
+ * 列表/字典递归 JSON 文本）。返回的 *out_json 为 malloc 字符串，调用方负责 free。
+ * 快照 → 序列化 → 重启 → restore，跨进程状态只走宿主层可序列化数据（红线 §6-6）。
+ * 返回 0 成功；-1 失败（*err 可空）。
+ */
+int vua_session_snapshot(VuaSession *session, char **out_json, VuaError *err);
+
+/*
+ * 按快照 JSON 恢复会话：按 screens 栈序重载同名 .vua 重建屏栈，恢复全局变量。
+ * 屏文件缺失时停在该屏之前已重建的栈上（至少保留底屏）；恢复全程暂挂重绘钩子，
+ * 结束统一触发一次（避免逐屏触 Java 重建）。globals 覆盖同名键，不动既有变量。
+ * 返回 0 成功；-1 失败（快照非法 / screens 为空，均不动原屏栈）。
+ */
+int vua_session_restore(VuaSession *session, const char *snapshot_json, VuaError *err);
 
 #ifdef __cplusplus
 }

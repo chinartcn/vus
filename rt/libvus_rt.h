@@ -395,6 +395,17 @@ VusString* vus_plugin_theme_set(VusString* name);   /* 主题_设置(浅色|暗�
 VusString* vus_plugin_theme_get(void);              /* 主题_查询()：APK 返回当前主题名，桌面 "浅色" */
 VusString* vus_plugin_theme_primary(VusString* color); /* 主题_主色：#RRGGBB/动态/默认：APK 换活力色并重建，桌面 "0" */
 
+/* 媒体播放（APK Java 平台桥；桌面无害降级）
+ * 音乐_播放(源, 循环, 音量) / 音乐_停止 / 音乐_暂停 / 音乐_继续 /
+ * 音乐_跳转(秒) / 音乐_状态() / 视频_播放(源)。源可为本地相对/绝对路径或 http(s):// URL。 */
+VusString* vus_plugin_media_play(VusString* src, VusString* loop, VusString* volume);
+VusString* vus_plugin_media_stop(void);
+VusString* vus_plugin_media_pause(void);
+VusString* vus_plugin_media_resume(void);
+VusString* vus_plugin_media_seek(VusString* pos);
+VusString* vus_plugin_media_status(void);
+VusString* vus_plugin_video_play(VusString* src);
+
 /* shell 命令执行：popen 捕获命令标准输出，返回输出文本(上限 64KB) */
 VusString* vus_plugin_shell_exec(VusString* cmd);
 

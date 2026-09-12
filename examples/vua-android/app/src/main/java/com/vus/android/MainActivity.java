@@ -22,7 +22,7 @@ import java.io.InputStream;
 public class MainActivity extends Activity {
 
     private FrameLayout content;
-    private VuaRenderer renderer;
+    private RenderAdapter renderer;    // M5：宿主侧只依赖渲染适配器接口（Gvui 实现 = VuaRenderer）
 
     /** 从 assets **全部释放**（不限扩展名，含图标/字体/矢量等，见 copyTree）到文件目录
      * （递归保留目录结构），供 native / 图片加载 / 图标/字体 / DEX 插件按需使用。
@@ -85,6 +85,8 @@ public class MainActivity extends Activity {
         VuaBridge.appContext = getApplicationContext();
         VuaBridge.sActivity = this;                    // 屏幕_常亮 等窗口能力
         UpdateManager.init(this);                    // 热更协议初始化（§5.x）
+        VusSession.init();                           // Cordis_dc 会话对象（M1）
+        ReloadManager.init(this);                    // Cordis_dc 事务管理器（M1）
         ImageLoader.get().attach(getApplicationContext());   // 远程图片缓存目录
 
         content = new FrameLayout(this);
@@ -93,6 +95,8 @@ public class MainActivity extends Activity {
         setContentView(content);
 
         renderer = new VuaRenderer(this, content);
+        VusSession s = VusSession.get();        // Cordis_dc：挂载渲染器到会话（会话快照取输入状态）
+        if (s != null) s.attachRenderer(renderer);
 
         // native 换屏（界面_显示/返回）后回调 onNativeRerender；切到主线程重建 View。
         VuaBridge.onRerender = () -> runOnUiThread(this::renderCurrent);
@@ -109,6 +113,7 @@ public class MainActivity extends Activity {
         extractAssets();
         UpdateManager.ensureVersion0();
         UpdateManager.onBoot();
+        ReloadManager.onBoot();                  // 受理上次 Pending_Reload（恢复推迟到 vuaInit 后）
         VuaBridge.vuaSetRootDir(getFilesDir().getAbsolutePath());
         VuaBridge.ensureNative();
 
@@ -120,6 +125,8 @@ public class MainActivity extends Activity {
             content.addView(tv);
             return;
         }
+        // 上次 Pending_Reload 延迟事务：vuaInit 后恢复会话快照（屏栈 + 全局变量 + 输入状态）
+        ReloadManager.applyPendingRestore();
         // 渲染当前屏
         renderCurrent();
     }

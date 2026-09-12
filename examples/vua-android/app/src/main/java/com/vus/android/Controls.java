@@ -11,6 +11,7 @@ import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.os.Build;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
@@ -215,6 +216,46 @@ final class Controls {
         int h = node.intAttr(0, "高");
         parent.addView(sp, new LinearLayout.LayoutParams(
                 w > 0 ? r.dp(w) : 0, h > 0 ? r.dp(h) : r.dp(1)));
+    }
+
+    /* ==================== 播放器控件 ==================== */
+
+    /** 音乐播放器：复用 VusMedia 音频单例。字段：源/循环/音量 + 样式（高度/圆角/背景色/主色）。 */
+    void musicPlayerView(RenderNode node, ViewGroup parent) {
+        boolean dark = r.darkTheme;
+        String src = node.attr("", "源", "src");
+        String lp = node.attr("0", "循环", "loop");
+        boolean loop = "1".equals(lp) || "是".equals(lp) || "true".equalsIgnoreCase(lp);
+        float vol = 1f;
+        try {
+            vol = Float.parseFloat(node.attr("1", "音量", "volume"));
+        } catch (Throwable ignored) { }
+        int height = node.intAttr(56, "高度", "height");
+        int corner = node.intAttr(12, "圆角", "radius", "corner");
+        int bg = Theme.parseColor(node.attr("", "背景色", "bg", "background"), 0);
+        int accent = Theme.parseColor(node.attr("", "主色", "accent"), Theme.accent(dark));
+        MusicPlayerView v = new MusicPlayerView(r.ctx, src, loop, vol,
+                height, corner, bg, accent, dark);
+        parent.addView(v, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        r.rememberInput(node, v, false);
+    }
+
+    /** 视频播放器：页内 VideoView + 控制条。字段：源/自动播放 + 样式（高度/圆角/背景色/主色）。 */
+    void videoPlayerView(RenderNode node, ViewGroup parent) {
+        boolean dark = r.darkTheme;
+        String src = node.attr("", "源", "src");
+        String ap = node.attr("0", "自动播放", "autoplay");
+        boolean autoplay = "1".equals(ap) || "是".equals(ap) || "true".equalsIgnoreCase(ap);
+        int height = node.intAttr(240, "高度", "height");
+        int corner = node.intAttr(12, "圆角", "radius", "corner");
+        int bg = Theme.parseColor(node.attr("", "背景色", "bg", "background"), 0);
+        int accent = Theme.parseColor(node.attr("", "主色", "accent"), Theme.accent(dark));
+        VideoPlayerView v = new VideoPlayerView(r.ctx, src, autoplay,
+                height, corner, bg, accent, dark);
+        parent.addView(v, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        r.rememberInput(node, v, false);
     }
 
     void sliderView(RenderNode node, ViewGroup parent) {

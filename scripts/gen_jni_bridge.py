@@ -198,6 +198,26 @@ BODY_VUA_TRIGGER_BY_ID = """
     return do_trigger(env, nodeId, varsJson, 1);
 """
 
+BODY_VUA_SESSION_SNAPSHOT = """
+    char *json = NULL;
+    if (vua_session_snapshot(vua_global_session(NULL), &json, NULL) != 0 || !json)
+        return NULL;
+    jstring out = (*env)->NewStringUTF(env, json);
+    free(json);
+    return out;
+"""
+
+BODY_VUA_SESSION_RESTORE = """
+    if (!snapshotJson) return -1;
+    const char *c = (*env)->GetStringUTFChars(env, snapshotJson, 0);
+    int rc = -1;
+    if (c) {
+        rc = vua_session_restore(vua_global_session(NULL), c, NULL);
+        (*env)->ReleaseStringUTFChars(env, snapshotJson, c);
+    }
+    return rc;
+"""
+
 KNOWN_BODIES = {
     "vuaInit": BODY_VUA_INIT,
     "vuaSetRootDir": BODY_VUA_SET_ROOT_DIR,
@@ -206,6 +226,8 @@ KNOWN_BODIES = {
     "vuaScreenId": BODY_VUA_SCREEN_ID,
     "vuaTrigger": BODY_VUA_TRIGGER,
     "vuaTriggerById": BODY_VUA_TRIGGER_BY_ID,
+    "vuaSessionSnapshot": BODY_VUA_SESSION_SNAPSHOT,
+    "vuaSessionRestore": BODY_VUA_SESSION_RESTORE,
 }
 
 # ---------------- 固定基础设施（结构不变，只随包名/类名替换） ----------------

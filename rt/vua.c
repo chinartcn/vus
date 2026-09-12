@@ -20,16 +20,21 @@
 #include "yyjson/yyjson.h"
 
 /* ============ 严格校验所需的注册表（模块级） ============ */
-/* 一张控件 + 每控件的合法属性键集合；一张全局词典（中文键 → 内部名）。 */
+/* 一张控件 + 每控件的合法属性键集合 + 字段 schema（类型/默认值）；一张全局词典（中文键 → 内部名）。
+ * M4（vui schema 化）：字段从 `{}` 升级为 `{"类型": "...", "默认值": ...}`；
+ * 类型集合见 schema_type_ok；默认值仅声明（注入留给后续）。 */
 
 typedef struct {
     char  *type;         /* 控件中文 type */
     char **fields;       /* 该控件的合法属性键 */
+    char **field_types;  /* 字段类型（schema；共用 fields 长度，NULL=任意） */
+    char **field_dflts;  /* 字段默认值字符串（schema；无则 NULL） */
     int    field_count;
 } VuaCtrlDef;
 
 static VuaCtrlDef *g_ctrls = NULL;
 static int         g_ctrl_count = 0;
+static int         g_schema_version = 0;   /* 控件表 schema 版本（"版本"键，未提供即 0） */
 static VusDict    *g_dict = NULL;   /* 全局词典：中文键 → 内部名 */
 
 /* ============ 小工具 ============ */
@@ -229,6 +234,126 @@ void vua_session_global_set(VuaSession *s, VusString *key, void *val) {
 }
 void *vua_session_global_get(VuaSession *s, VusString *key) {
     return (s && key) ? vus_dict_get(s->globals, key) : NULL;
+}
+
+/* ============ 会话快照 / 恢复（Cordis_dc §3.3 native 侧会话对齐，M1） ============ */
+
+/* 任意 VUA 值 → 序列化 JSON 字符串 mut 值（标量原文；列表/字典递归为其 JSON 文本）。 */
+static yyjson_mut_val *vua_snap_value_str(yyjson_mut_doc *d, void *val) {
+    if (!val) return yyjson_mut_str(d, "");
+    VusString *s = vus_object_to_string(val);
+    if (!s) return yyjson_mut_str(d, "");
+    yyjson_mut_val *mv;
+    const char *c = vus_string_cstr(s);
+    if (c) mv = yyjson_mut_strcpy(d, c);   /* yyjson 负责 JSON 转义 */
+    else   mv = yyjson_mut_str(d, "");
+    vus_unref(s);
+    return mv;
+}
+
+int vua_session_snapshot(VuaSession *s, char **out_json, VuaError *err) {
+    if (!s || !out_json) { vua_error_set(err, -99, "会话快照: 参数无效"); return -1; }
+    *out_json = NULL;
+    yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
+    if (!d) { vua_error_set(err, -99, "会话快照: 内存不足"); return -1; }
+    yyjson_mut_val *root = yyjson_mut_obj(d);
+    yyjson_mut_doc_set_root(d, root);
+
+    /* screens: 栈底→栈顶 的屏名（.vua 文件名，无扩展） */
+    yyjson_mut_val *scr = yyjson_mut_arr(d);
+    for (int i = 0; i < s->stack_len; i++) {
+        if (s->stack[i] && s->stack[i]->name)
+            yyjson_mut_arr_append(scr, yyjson_mut_strcpy(d, s->stack[i]->name));
+    }
+    yyjson_mut_obj_add_val(d, root, "screens", scr);
+
+    /* globals: 会话级全局变量（值统一序列化为字符串） */
+    yyjson_mut_val *gl = yyjson_mut_obj(d);
+    if (s->globals) {
+        VusList *keys = vus_dict_keys(s->globals);
+        if (keys) {
+            for (int i = 0; i < vus_list_len(keys); i++) {
+                VusString *k = vus_list_get(keys, i);
+                if (!k) continue;
+                const char *kc = vus_string_cstr(k);
+                if (!kc) continue;
+                yyjson_mut_obj_add_val(d, gl, kc,
+                                       vua_snap_value_str(d, vus_dict_get(s->globals, k)));
+            }
+            vus_unref(keys);
+        }
+    }
+    yyjson_mut_obj_add_val(d, root, "globals", gl);
+
+    size_t len = 0;
+    char *buf = yyjson_mut_write(d, 0, &len);
+    yyjson_mut_doc_free(d);
+    if (!buf) { vua_error_set(err, -99, "会话快照: 序列化失败"); return -1; }
+    *out_json = buf;   /* malloc 字符串，调用方负责 free */
+    return 0;
+}
+
+int vua_session_restore(VuaSession *s, const char *snapshot_json, VuaError *err) {
+    if (!s || !snapshot_json || !snapshot_json[0]) {
+        vua_error_set(err, -99, "会话恢复: 参数无效"); return -1;
+    }
+    yyjson_doc *doc = yyjson_read(snapshot_json, strlen(snapshot_json), 0);
+    if (!doc) { vua_error_set(err, VUA_ERR_JSON, "会话恢复: 非法 JSON"); return -1; }
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    if (!root || !yyjson_is_obj(root)) {
+        yyjson_doc_free(doc);
+        vua_error_set(err, VUA_ERR_ROOT, "会话恢复: 顶层必须是对象");
+        return -1;
+    }
+    yyjson_val *scr = yyjson_obj_get(root, "screens");
+    if (!scr || !yyjson_is_arr(scr) || yyjson_arr_size(scr) <= 0) {
+        yyjson_doc_free(doc);
+        vua_error_set(err, -99, "会话恢复: screens 为空，放弃恢复");   /* 不动原屏栈 */
+        return -1;
+    }
+
+    /* 1) 重建屏栈；恢复全程暂挂重绘钩子，结束统一触发一次 */
+    VuaRerenderHook hook = s->rerender_hook;
+    void *ud = s->rerender_ud;
+    s->rerender_hook = NULL;
+    for (int i = 0; i < s->stack_len; i++) {
+        if (s->stack[i]) vua_screen_free(s->stack[i]);
+    }
+    s->stack_len = 0;
+    yyjson_arr_iter it; yyjson_arr_iter_init(scr, &it);
+    yyjson_val *e;
+    while ((e = yyjson_arr_iter_next(&it))) {
+        if (!yyjson_is_str(e)) continue;
+        char path[1024];
+        snprintf(path, sizeof(path), "%s.vua", yyjson_get_str(e));
+        VuaError le = {0};
+        if (!vua_session_show(s, path, &le)) {   /* 屏缺失/损坏 → 停在此前重建的栈上 */
+            fprintf(stderr, "[vua] 会话恢复: 重载屏 %s 失败: %s\n", path,
+                    le.msg[0] ? le.msg : "(无错误)");
+            break;
+        }
+    }
+    s->rerender_hook = hook;
+    s->rerender_ud = ud;
+
+    /* 2) 恢复全局变量（快照值为字符串；覆盖同名，不动既有变量） */
+    yyjson_val *gl = yyjson_obj_get(root, "globals");
+    if (gl && yyjson_is_obj(gl)) {
+        yyjson_obj_iter git; yyjson_obj_iter_init(gl, &git);
+        yyjson_val *k, *v;
+        while ((k = yyjson_obj_iter_next(&git))) {
+            v = yyjson_obj_iter_get_val(k);
+            if (!yyjson_is_str(v)) continue;
+            VusString *key = vus_string_new(yyjson_get_str(k));
+            VusString *val = vus_string_new(yyjson_get_str(v));
+            if (key && val) vus_dict_set(s->globals, key, val);
+            if (key) vus_unref(key);
+            if (val) vus_unref(val);
+        }
+    }
+    yyjson_doc_free(doc);
+    vua_notify_rerender(s);
+    return 0;
 }
 
 /* ============ yyjson 拷贝/渲染树构建 ============ */
@@ -577,6 +702,85 @@ static int ctrl_has_field(const char *type, const char *key) {
     return 0;
 }
 
+/* ---- 字段 schema（M4/vui）：类型 / 默认值 ---- */
+
+/* schema 默认值 → 字符串（供声明记录；数字/bool 归一为文本）。 */
+static char *schema_dflt_str(yyjson_val *dv) {
+    if (!dv) return NULL;
+    if (yyjson_is_str(dv)) return strdup(yyjson_get_str(dv));
+    if (yyjson_is_bool(dv)) return strdup(yyjson_get_bool(dv) ? "1" : "0");
+    if (yyjson_is_int(dv)) {
+        char b[64];
+        snprintf(b, sizeof(b), "%lld", (long long)yyjson_get_sint(dv));
+        return strdup(b);
+    }
+    if (yyjson_is_real(dv)) {
+        char b[64];
+        snprintf(b, sizeof(b), "%g", (double)yyjson_get_real(dv));
+        return strdup(b);
+    }
+    return NULL;
+}
+
+/* 按 schema 类型粗验值；未知/缺少类型/字符串类一律放行；不匹配返回 0（调用方仅告警）。 */
+static int schema_type_ok(const char *t, const yyjson_val *v) {
+    if (!t || !t[0] || !v) return 1;
+    if (streq(t, "整数") || streq(t, "int")) {
+        if (yyjson_is_int(v)) return 1;
+        if (yyjson_is_str(v)) {               /* 数字字符串宽松放行（空串视为缺省） */
+            const char *s = yyjson_get_str(v);
+            if (!s[0]) return 1;
+            for (const char *p = s; *p; p++)
+                if ((*p < '0' || *p > '9') && *p != '-' && *p != '+') return 0;
+            return 1;
+        }
+        return 0;
+    }
+    if (streq(t, "小数") || streq(t, "float") || streq(t, "number")) {
+        if (yyjson_is_int(v) || yyjson_is_real(v)) return 1;
+        if (yyjson_is_str(v)) {
+            const char *s = yyjson_get_str(v);
+            if (!s[0]) return 1;
+            char *e = NULL;
+            (void)strtod(s, &e);
+            return e && *e == '\0';
+        }
+        return 0;
+    }
+    if (streq(t, "布尔") || streq(t, "bool") || streq(t, "boolean")) {
+        if (yyjson_is_bool(v)) return 1;
+        if (yyjson_is_str(v)) {
+            const char *s = yyjson_get_str(v);
+            return streq(s, "0") || streq(s, "1") || streq(s, "真") || streq(s, "假")
+                || strcasecmp(s, "true") == 0 || strcasecmp(s, "false") == 0;
+        }
+        return 0;
+    }
+    if (streq(t, "数组") || streq(t, "array")) return yyjson_is_arr(v);
+    if (streq(t, "对象") || streq(t, "object") || streq(t, "obj")) return yyjson_is_obj(v);
+    if (streq(t, "颜色") || streq(t, "color")) return yyjson_is_str(v) || yyjson_is_null(v);
+    /* "字符串"/"any"/其余（含自定义类别）→ 不拦截 */
+    return 1;
+}
+
+/* 宽松类型校验：字段值不符合 schema 类型时仅 stderr 提示，不拦截（避免旧 .vua 白屏）。 */
+static void schema_check_field(const char *type, const char *key, const yyjson_val *v) {
+    if (!type || !key || g_ctrl_count <= 0 || !v) return;
+    for (int i = 0; i < g_ctrl_count; i++) {
+        if (!streq(g_ctrls[i].type, type)) continue;
+        for (int j = 0; j < g_ctrls[i].field_count; j++) {
+            if (streq(g_ctrls[i].fields[j], key)) {
+                const char *t = g_ctrls[i].field_types[j];
+                if (t && t[0] && !schema_type_ok(t, v))
+                    fprintf(stderr, "[vua] schema 类型不符: %s.%s 期望「%s」（宽松放行，值原样透传）\n",
+                            type, key, t);
+                return;
+            }
+        }
+        return;
+    }
+}
+
 /* 全局词典是否含该键；未加载词典返回 0。 */
 static int dict_has_key(const char *k) {
     if (!g_dict || !k) return 0;
@@ -635,8 +839,8 @@ static int vua_validate_node(const yyjson_val *obj, VuaError *err) {
         }
 
         /* 属性键 ∈ 控件字段词典 ∪ 全局词典。不在时降级跳过（透传给 Java），
-         * 避免未知扩展属性把整屏校验失败 → 白屏。 */
-        if (ctrl_has_field(type, ks)) continue;
+         * 避免未知扩展属性把整屏校验失败 → 白屏。字段值按 schema 类型宽松粗验。 */
+        if (ctrl_has_field(type, ks)) { schema_check_field(type, ks, v); continue; }
         if (dict_has_key(ks)) continue;
         continue;
     }
@@ -999,6 +1203,12 @@ int vua_control_table_load(const char *control_table_json, VuaError *err) {
         vua_error_set(err, -1, "控件表: 需要顶层「控件表」对象");
         return -1;
     }
+    /* schema 版本号（"版本"/"version"，可选；协议版本化的依据，供上层判断兼容） */
+    yyjson_val *verv = yyjson_obj_get(root, "版本");
+    if (!verv) verv = yyjson_obj_get(root, "version");
+    if (verv && yyjson_is_int(verv)) g_schema_version = (int)yyjson_get_sint(verv);
+    else g_schema_version = 0;
+
     yyjson_obj_iter it; yyjson_obj_iter_init(ct, &it);
     yyjson_val *k, *v;
     while ((k = yyjson_obj_iter_next(&it))) {
@@ -1014,15 +1224,34 @@ int vua_control_table_load(const char *control_table_json, VuaError *err) {
             yyjson_obj_iter fi; yyjson_obj_iter_init(fields, &fi);
             yyjson_val *fk, *fv;
             while ((fk = yyjson_obj_iter_next(&fi))) {
-                fv = yyjson_obj_iter_get_val(fk); (void)fv;
+                fv = yyjson_obj_iter_get_val(fk);
                 def->fields = (char **)realloc(def->fields, (size_t)(def->field_count + 1) * sizeof(char *));
-                if (def->fields) def->fields[def->field_count++] = strdup(yyjson_get_str(fk));
+                def->field_types = (char **)realloc(def->field_types,
+                        (size_t)(def->field_count + 1) * sizeof(char *));
+                def->field_dflts = (char **)realloc(def->field_dflts,
+                        (size_t)(def->field_count + 1) * sizeof(char *));
+                int idx = def->field_count;
+                def->fields[idx] = strdup(yyjson_get_str(fk));
+                def->field_types[idx] = NULL;
+                def->field_dflts[idx] = NULL;
+                if (yyjson_is_obj(fv)) {
+                    yyjson_val *tv = yyjson_obj_get(fv, "类型");
+                    if (!tv) tv = yyjson_obj_get(fv, "type");
+                    if (tv && yyjson_is_str(tv)) def->field_types[idx] = strdup(yyjson_get_str(tv));
+                    yyjson_val *dv = yyjson_obj_get(fv, "默认值");
+                    if (!dv) dv = yyjson_obj_get(fv, "default");
+                    def->field_dflts[idx] = schema_dflt_str(dv);
+                }
+                def->field_count++;
             }
         }
     }
     yyjson_doc_free(doc);
     return 0;
 }
+
+/** 当前控件表 schema 版本（未加载/缺失返回 0）。 */
+int vua_control_table_version(void) { return g_schema_version; }
 
 /* ============ 登记（占位） ============ */
 
@@ -1038,10 +1267,17 @@ int vua_rt_init(void) {
 void vua_rt_shutdown(void) {
     for (int i = 0; i < g_ctrl_count; i++) {
         free(g_ctrls[i].type);
-        for (int j = 0; j < g_ctrls[i].field_count; j++) free(g_ctrls[i].fields[j]);
+        for (int j = 0; j < g_ctrls[i].field_count; j++) {
+            free(g_ctrls[i].fields[j]);
+            free(g_ctrls[i].field_types[j]);
+            free(g_ctrls[i].field_dflts[j]);
+        }
         free(g_ctrls[i].fields);
+        free(g_ctrls[i].field_types);
+        free(g_ctrls[i].field_dflts);
     }
     free(g_ctrls); g_ctrls = NULL; g_ctrl_count = 0;
+    g_schema_version = 0;
     if (g_dict) { vus_unref(g_dict); g_dict = NULL; }
     if (g_events) { vus_unref(g_events); g_events = NULL; }
     if (g_vua_session) { vua_session_free(g_vua_session); g_vua_session = NULL; }

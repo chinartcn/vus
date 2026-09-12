@@ -1,0 +1,362 @@
+{
+ "contract": 1,
+ "backend": "c",
+ "files": {
+  "test_arithmetic.vus": {
+   "rc": 0,
+   "sha256": "5fdbe91c6fa4885c9ceef0f874e8af142f6a489487c022f3937d593a2f9dd834"
+  },
+  "test_await.vus": {
+   "rc": 0,
+   "sha256": "ab2c3168b00c17deae702f79f390603834ee92de3bcca5d2a5c94ce4ad6208c1"
+  },
+  "test_await_multi.vus": {
+   "rc": 0,
+   "sha256": "1b78eeb6303a7bf4403463c6b64046f609ecd931b372ed333b515b3c604cac6a"
+  },
+  "test_bitwise.vus": {
+   "rc": 0,
+   "sha256": "93ac65ef7cb578044cc3493be734791385cefbec176ce7ee4e39673a652e8874"
+  },
+  "test_block_scope.vus": {
+   "rc": 0,
+   "sha256": "b3448f6f2b9b1726ea9c0a6c0378dec730f13f77aa4c97964f039f99affd6b12"
+  },
+  "test_break_continue.vus": {
+   "rc": 0,
+   "sha256": "75d4e12e6521519920ffe572d5b8980b519dde01cd7fe39cfed44a54abc4076e"
+  },
+  "test_cast.vus": {
+   "rc": 0,
+   "sha256": "7defc6049d6c730f97082712a0e8390ed1cf906691e47b8aef37da2f5ca6bbdb"
+  },
+  "test_comparison.vus": {
+   "rc": 0,
+   "sha256": "6e958a17733c0a88d3a8fc050b1e1e4da74de4cb09e1d464fec59bf317142de5"
+  },
+  "test_composite_assign.vus": {
+   "rc": 0,
+   "sha256": "a9fd61b5f9cfc13357083e3382fea458a414e0a6a91706d7e2c246b89bfaf062"
+  },
+  "test_comprehensive.vus": {
+   "rc": 0,
+   "sha256": "6667005071472d1007455276fcc1078f9871409a5cebb2b40a18b1a4b019e0a9"
+  },
+  "test_concat.vus": {
+   "rc": 0,
+   "sha256": "b06a9e7ba8062c8982ac251d8d392d1079bb618be61d568c317b27ecf1e4bc14"
+  },
+  "test_container_release.vus": {
+   "rc": 0,
+   "sha256": "4e0694085fdf3239bc0787b888d21194f7f53eb8c48f7f573b9dd3853770255f"
+  },
+  "test_control.vus": {
+   "rc": 0,
+   "sha256": "9011c38a3be68834709e53a2782742114ae35a006bf2b35dc11efb967f56add4"
+  },
+  "test_demo.vus": {
+   "rc": 0,
+   "sha256": "715de580800a151e1a7845c1ee74e42d183147fbf8c0d77d6cb082008b3ec694"
+  },
+  "test_dict_iterate.vus": {
+   "rc": 0,
+   "sha256": "a152ff097f8bd6a4d9f9f2ae0c3a3b0895b7477b4154d0fcc3b8aa9a6de94444"
+  },
+  "test_elif.vus": {
+   "rc": 0,
+   "sha256": "d7918080923044595049635540b7a3f3163b58af627ba4d4b678fba1a29748c5"
+  },
+  "test_error.vus": {
+   "rc": 0,
+   "sha256": "e26563f9ad59b805ac141730a71cd6c26097e3a9bd33d36837c3fa9e214d33cf"
+  },
+  "test_exception.vus": {
+   "rc": 0,
+   "sha256": "011cd16945228294f677facc8ab95ed2458e264d9be78efb8ab7f824074fb264"
+  },
+  "test_exception_types.vus": {
+   "rc": 0,
+   "sha256": "900cda55fdcdcfdbbe72960d0028dce10ed9e50d6f16fbc2674f24141c05597e"
+  },
+  "test_expr_stmt.vus": {
+   "rc": 0,
+   "sha256": "e742e1dd741a774045187cf795b66182d610627ca0adfcabc29facf5a6ffa814"
+  },
+  "test_ext_builtins.vus": {
+   "rc": 0,
+   "sha256": "ad91c3796955ef073805ccd9fd579d90aa44477f1b76532780df4b538b1e83d9"
+  },
+  "test_ext_c.vus": {
+   "rc": 0,
+   "sha256": "647204019b25a199543275687b4086c5044d5e81993d0d513f75a3d7bfdbf3b7"
+  },
+  "test_ext_py.vus": {
+   "rc": 0,
+   "sha256": "5badb2115e238d46da2b052ab03ac6dcd2e8876ca5afd863f20ab0e863a48866"
+  },
+  "test_ext_py_vars.vus": {
+   "rc": 0,
+   "sha256": "5ff6d55d1487f492e5cef42f4cee1538215e3de05a83c54898980803d7cd4b24"
+  },
+  "test_factorial.vus": {
+   "rc": 0,
+   "sha256": "60dbccffeeccea44aa0e209c3278a36c3bc348130f4c2b02393893593109460e"
+  },
+  "test_fibonacci.vus": {
+   "rc": 0,
+   "sha256": "3af845b1853013805241c4dcd3bc5c8f177573d407d542e3a62d9adfcde79970"
+  },
+  "test_file_io.vus": {
+   "rc": 0,
+   "sha256": "461e823495aa44076bdaa82c18a4a321468cb74f07ebcecedc3799ca2f5641ac"
+  },
+  "test_fstring.vus": {
+   "rc": 0,
+   "sha256": "54ec6078ebed74c2944c1059e8acccdbbb3f92f34931fec271012f320d31f341"
+  },
+  "test_function_value.vus": {
+   "rc": 0,
+   "sha256": "7b55f2562f40aac9cf6f0b804c7a9db48ca78a220a8922acffcbdbeb07abeb1f"
+  },
+  "test_functions.vus": {
+   "rc": 0,
+   "sha256": "e41d4cf2b5b8a41bfe342209b4c7a5e0afe15e1d340542d4d6a2f0007b041a29"
+  },
+  "test_generic.vus": {
+   "rc": 0,
+   "sha256": "81dfd8e816b640d630172f981b388e6366ab6686b057b6b69583ae8823e4c278"
+  },
+  "test_generic_call.vus": {
+   "rc": 0,
+   "sha256": "1837b9dc622ddf66b7fed6c97dc6190ef15472bf18f010b8aeae4862b6403f85"
+  },
+  "test_generic_mono.vus": {
+   "rc": 0,
+   "sha256": "c04fb244e7a3705e7647eda30ab7b627e7acf24655ef7b8d1910844a4782ebea"
+  },
+  "test_generic_unused.vus": {
+   "rc": 0,
+   "sha256": "4ef8e2e3e2d0f27d452528dae13ad21e0e1bacf836d407748773dacdc8a3d1fe"
+  },
+  "test_global.vus": {
+   "rc": 0,
+   "sha256": "e3b19d7d7106ade2bb011f56116e1007cf7058f793dd0ccc36bd550989880af0"
+  },
+  "test_global_event.vus": {
+   "rc": 0,
+   "sha256": "7ef4d7cd9091cd56aa0ef7793d832fc0bc91c46ed9f88a214197333c34f194ae"
+  },
+  "test_gui.vus": {
+   "rc": 139,
+   "sha256": "43383eec3abd4e00e103a1663b43ea851dca84c910b6290c503f30daa341d193"
+  },
+  "test_gui_btn.vus": {
+   "rc": 139,
+   "sha256": "47e7671c7d329f39ad2926a4fca4d683b7fac7d1da31730bfb535a48b0e12648"
+  },
+  "test_gui_ctrl.vus": {
+   "rc": 139,
+   "sha256": "0232bbb326177ce1eeec6d4e95c30d0c2a570e5fc1c286e6363873b54f91d19b"
+  },
+  "test_gui_ctrl_adv.vus": {
+   "rc": 139,
+   "sha256": "40b34f1b07643e8f33bbf96a70b78b45d8e2233aea14e8f43b7c9de902e4c3b3"
+  },
+  "test_gui_font.vus": {
+   "rc": 139,
+   "sha256": "857923f26dfa1ddca231b94ba3c8a6c0940e183e73534c74abbbd2a2928ad45b"
+  },
+  "test_gui_md_line_scroll.vus": {
+   "rc": 139,
+   "sha256": "134f1866cb51a926c9b28b04ac9fd28ac0c09a03cacdad62bd62130550e87f79"
+  },
+  "test_gui_media.vus": {
+   "rc": 139,
+   "sha256": "1940ffc59b12884e868b1e4de81df3bdd1101d949bb28336022caec65dd5f00e"
+  },
+  "test_gui_pages.vus": {
+   "rc": 139,
+   "sha256": "1a75568edf664b00a68457305ac4a335e5536cc8d46d5425a3ee8c368486337a"
+  },
+  "test_gui_pages_adv.vus": {
+   "rc": 139,
+   "sha256": "7c1bea0c297afedc50fc43ff10e939b488191d147dd7df4ee71aa07e1e0b90b8"
+  },
+  "test_gui_png.vus": {
+   "rc": 139,
+   "sha256": "28a6ba1cc2600620d7152113a42233d9067b13e101792a2b9f9dc17eff576229"
+  },
+  "test_gui_shape_adv.vus": {
+   "rc": 139,
+   "sha256": "12def0742ec55d8d84e1414935d4c5459e88a4b15bfecb4b12b7d8f5d4cf3f40"
+  },
+  "test_hello.vus": {
+   "rc": 0,
+   "sha256": "984f943663c2187feb702a3b2d7ed0c55fd36fc3a2bbeda64544284cb640703c"
+  },
+  "test_import.vus": {
+   "rc": 0,
+   "sha256": "b5face15c1842e60e32bb0ce06de4d5bbc73b820df5ce958ce61af115a19f6a1"
+  },
+  "test_json_dict.vus": {
+   "rc": 0,
+   "sha256": "1cb526cf10f8411d57c849619a1125494599d3db68859fcc5e64c471ee5f1c79"
+  },
+  "test_legacy_stdlib.vus": {
+   "rc": 0,
+   "sha256": null
+  },
+  "test_literal.vus": {
+   "rc": 0,
+   "sha256": "d701c083e4ba35a958ca4bdc9137421178b547ae6fcea8c8218c8497a2207c89"
+  },
+  "test_local_vars.vus": {
+   "rc": 0,
+   "sha256": "3bab98cf1f8738c9bf028c7ab94f913d9e47f4765571b5fbb074fb6e102bc09f"
+  },
+  "test_logger.vus": {
+   "rc": 0,
+   "sha256": null
+  },
+  "test_logical.vus": {
+   "rc": 0,
+   "sha256": "b7fb3327ec68f76481271505045a54914879d1c2c69fe12506ceba5f473e5bad"
+  },
+  "test_modulo.vus": {
+   "rc": 0,
+   "sha256": "c26fcf65715ef1db821e5b4344648357ce625f648aae1bdd0b453cab44c298e4"
+  },
+  "test_multi_return.vus": {
+   "rc": 0,
+   "sha256": "38c8f27a5cbb635d311840e1d76d6b1e95cb0d7643681fc0f3290193352ad561"
+  },
+  "test_negative.vus": {
+   "rc": 0,
+   "sha256": "ababaa19f74486d278d939c24e532bf763ab59a7e123fc94db2751a142956b6f"
+  },
+  "test_nested_control.vus": {
+   "rc": 0,
+   "sha256": "b7e76a064667deab0700da0120bc0411d656e6e43a24e6ba8a73931d7420a703"
+  },
+  "test_nested_control_2.vus": {
+   "rc": 0,
+   "sha256": "82c9d301fe348c47104c0949efd4e55f420e18d652b9aae31f8aad18c4fafae3"
+  },
+  "test_network.vus": {
+   "rc": 0,
+   "sha256": "e7f14a75b9afae892f677f1ec1a5ed105f25160106f64da19aef640d5e8c7582"
+  },
+  "test_not.vus": {
+   "rc": 0,
+   "sha256": "66cff35317e916fe7372e242bf0021a60722feffa19b86198fed4db8235a67fb"
+  },
+  "test_not_operator.vus": {
+   "rc": 0,
+   "sha256": "447b931132a1033810becb7f8fb041df17c69d0ab68c5450da6016db2bddbe43"
+  },
+  "test_null.vus": {
+   "rc": 0,
+   "sha256": "c63bb3c13b8bfb0b21ef800c1a47e075b1c045d0f858b318c5d3428cfe7687f6"
+  },
+  "test_objtext_json.vus": {
+   "rc": 0,
+   "sha256": "a975fb52a31c5916782cbd5c0f9dbec22ea7647b001a92b192ae01119cd36d1b"
+  },
+  "test_pages_ext.vus": {
+   "rc": 0,
+   "sha256": "d02b57ec4ad273a491c3b1827e6c234a71abe196e7b6accf0633af937e088870"
+  },
+  "test_param_shadow.vus": {
+   "rc": 0,
+   "sha256": "0cba949a7850d8ce1a10c2abc5844783a5a60e45d62073ffbaf0f3479a2c2aad"
+  },
+  "test_platform_light.vus": {
+   "rc": 0,
+   "sha256": "68a1999a7a12fc3e261827d3e52875f26f7e7334b93dd21cf1ac61ebcebd16e5"
+  },
+  "test_plugin_run_json.vus": {
+   "rc": 0,
+   "sha256": "e113d80cae59fc4adc898f44f28ecd7035d5cdd74d637e7e5f239c072da4d0b9"
+  },
+  "test_plugins.vus": {
+   "rc": 0,
+   "sha256": null
+  },
+  "test_r6_forward_chain.vus": {
+   "rc": 0,
+   "sha256": "b3c7905abd0e15ed3d475e9a45de3179bd8dcf74f69dd17be315fe7d1558c8d4"
+  },
+  "test_recursion.vus": {
+   "rc": 0,
+   "sha256": "42e9843979fba346e8e98d94e5e17dce28ff23b5f1c4ec7709cdb33e1d41052f"
+  },
+  "test_sleep.vus": {
+   "rc": 0,
+   "sha256": "774923a90309cbf39d2d3d34261e62f8663a4f76d7412ebaffa4ca46ef8c0cd4"
+  },
+  "test_string.vus": {
+   "rc": 0,
+   "sha256": "619026133ddd46d1e3679ca05b63b60700f80b5ddeac78e511cca0fb5df8ce1c"
+  },
+  "test_struct_basic.vus": {
+   "rc": 0,
+   "sha256": "4b714742c1494d33ef53c66883c6157f71f9a09636cfd3ad857195c731bd4b1c"
+  },
+  "test_struct_chain.vus": {
+   "rc": 0,
+   "sha256": "c4475a3e917564da9c3b373264178da33fa20220bb6623ace33e8a46faf4d30d"
+  },
+  "test_subscript.vus": {
+   "rc": 0,
+   "sha256": "3f5dc2cdc528598c0437eabbc3104d254dc094147ceca078750716fcfb36a889"
+  },
+  "test_thread_coro.vus": {
+   "rc": 0,
+   "sha256": "317a82872082d8428f29d2741571253347de88ea109bbe92e4e57aaaa4983fae"
+  },
+  "test_tonumber_reg.vus": {
+   "rc": 0,
+   "sha256": "e12d17f3e7274dcb6d7736e86eb0f7ee9ca6007c86ddb799aa1333e110df2475"
+  },
+  "test_toplevel_global.vus": {
+   "rc": 0,
+   "sha256": "257bb9579d948a91a0c00e9d6674c311b8d6acd24a74ddb56529d4c578a7bfd2"
+  },
+  "test_tui.vus": {
+   "rc": 0,
+   "sha256": "327ff8642c4702d2cf0dd09f791e028c194afc05a981ebeaa1563a70a07b73d2"
+  },
+  "test_type_annot.vus": {
+   "rc": 0,
+   "sha256": "6c18cef67db69a2f0e16014f38519c62885977d815b5eaacc2abc3d9be2d823f"
+  },
+  "test_variables.vus": {
+   "rc": 0,
+   "sha256": "ccf9266719a4a12a254454b1c9571d37215689951a87082295689c67736d8c2c"
+  },
+  "test_vus_abi.vus": {
+   "rc": 0,
+   "sha256": "f7adcc98376b9b0162537b700c5706c948a6867d50ba8c2c1d28cf2831c1e529"
+  },
+  "test_vus_chart.vus": {
+   "rc": 0,
+   "sha256": "25485951b7848c409d7e9883631e8bb9d82085f87b0b12000bebce33ae23995c"
+  },
+  "test_vus_lang.vus": {
+   "rc": 0,
+   "sha256": "36005c8b712a5e40037188a05ff8eba57ccf71570159d62823fdee0269c896aa"
+  },
+  "test_vus_plugin.vus": {
+   "rc": 0,
+   "sha256": "fc406badaa07bbf0f37e338d9269c4c5fd757ea864d6276316bfac22a553da35"
+  },
+  "test_while_count.vus": {
+   "rc": 0,
+   "sha256": "05a5a7ba9651222a063b60cb51adc4232bf478efb055ba886d76d49cd2cdfdaa"
+  },
+  "test_xyz_basic.vus": {
+   "rc": 0,
+   "sha256": null
+  }
+ }
+}
