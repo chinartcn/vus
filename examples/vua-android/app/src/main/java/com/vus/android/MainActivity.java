@@ -114,8 +114,9 @@ public class MainActivity extends Activity {
         UpdateManager.ensureVersion0();
         UpdateManager.onBoot();
         ReloadManager.onBoot();                  // 受理上次 Pending_Reload（恢复推迟到 vuaInit 后）
-        VuaBridge.vuaSetRootDir(getFilesDir().getAbsolutePath());
+        /* 必须在任何 native 调用之前加载库（单一真源）；vuaSetRootDir / vuaInit 等都依赖 .so */
         VuaBridge.ensureNative();
+        VuaBridge.vuaSetRootDir(getFilesDir().getAbsolutePath());
 
         // 启动 native：建 VuaSession 并运行 .vus（界面_显示 首页 / 界面_绑定 事件）
         int rc = VuaBridge.vuaInit();
