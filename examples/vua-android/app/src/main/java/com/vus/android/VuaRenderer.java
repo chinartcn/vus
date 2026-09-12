@@ -202,6 +202,9 @@ public final class VuaRenderer implements RenderAdapter {
     private void swapPage(PageCache hit, long fp, long sid) {
         root.removeAllViews();
         idCacheSync(sid);                     // 换页：屏内子树复用缓存随屏切换
+        if (hit.view.getParent() != null) {
+            ((ViewGroup) hit.view.getParent()).removeView(hit.view);   // 双保险：缓存页先解绑
+        }
         root.addView(hit.view, matchWrap());
         inputs.clear();
         inputs.putAll(hit.inputs);
@@ -297,6 +300,9 @@ public final class VuaRenderer implements RenderAdapter {
             if (got != null) {
                 idCache.put(id, new IdEntry(idCacheSid, snap, got,
                         diffMap(inB, inputs), diffMap(vtB, varTexts), diffMap(bvB, builtVars)));
+                /* got 可能恰好是"解包出来的复用实例"（其旧 parent = tmp，仍非 null）；
+                 * 挂到外部 parent 前一律解绑，杜绝 already has a parent */
+                if (got.getParent() != null) ((ViewGroup) got.getParent()).removeView(got);
                 parent.addView(got);
             }
             return;
