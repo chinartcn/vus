@@ -36,6 +36,8 @@ typedef struct {
     /* 编译选项 */
     char  optimization[16];    /* "速度" / "体积" / "调试" */
     char  arm_version[16];     /* "ARM64" / "ARM32" */
+    int   dynamic_link;        /* 0/1：优先链接共享库 libvus_rt.so（install 时生成），找不到自动回退静态 */
+    int   strip_syms;          /* 0/1：链接成功后 strip 可执行文件符号 */
 
     /* 不生成 main 入口（vusx 插件等库式编译用，链接进主程序避免符号冲突）*/
     int   omit_main;           /* 0 或 1 */

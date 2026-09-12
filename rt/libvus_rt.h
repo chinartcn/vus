@@ -427,6 +427,35 @@ VusString* vus_plugin_http_request(VusString* method, VusString* url,
 VusString* vus_plugin_http_upload(VusString* url, VusString* path,
                                   VusString* fields_json, VusString* headers_json);
 
+/* AI 聚合模块（vus_ai.c）：统一封装 OpenAI 兼容的多服务商对话调用
+ * AI_api池(配置JSON) / AI_open兼容(服务名,地址) / AI_请求(名称,模型[,消息])
+ * AI_服务列表() / AI_移除(服务名) / AI_模型列表(服务名, GET /models 查询内置服务商)。
+ * 名称 "API_xxx" 前缀自动剥除；内置服务商支持中文别名（智谱/千问/豆包等）。 */
+VusString* vus_ai_pool(VusString* config);
+VusString* vus_ai_open_compat(VusString* name, VusString* base);
+VusString* vus_ai_list(VusString* dummy);
+VusString* vus_ai_del(VusString* name);
+VusString* vus_ai_models(VusString* name);
+VusString* vus_ai_chat(VusString* name, VusString* model, VusString* message);
+VusString* vus_ai_image_gen(VusString* name, VusString* model, VusString* prompt,
+                            VusString* size);
+VusString* vus_ai_image_edit(VusString* name, VusString* model, VusString* imgpath,
+                             VusString* prompt, VusString* strength);
+/* AI 工作流（后台协程 + 进度回调）：AI_启动工作流/推进/返回/完成返回/回调/清空回调/回调_完成/工作流状态 */
+VusString* vus_ai_wf_start(VusString* slot, VusString* fn, VusString* arg);
+VusString* vus_ai_wf_step(VusString* slot);
+VusString* vus_ai_wf_return(VusString* v);
+VusString* vus_ai_wf_done(void);
+VusString* vus_ai_wf_value(VusString* slot);
+VusString* vus_ai_wf_clear(VusString* slot);
+VusString* vus_ai_wf_done_q(VusString* slot);
+VusString* vus_ai_wf_status(VusString* slot);
+
+/* 网页服务（极简 POSIX HTTP 服务器）：网页_服务/网页_服务目录/网页_停止 */
+VusString* vus_web_serve(VusString* port, VusString* content);
+VusString* vus_web_serve_dir(VusString* dir, VusString* port);
+VusString* vus_web_stop(VusString* port);
+
 /* 日期时间 */
 VusString* vus_plugin_date_now(VusString* dummy);
 VusString* vus_plugin_date_format(VusString* fmt);
@@ -500,3 +529,11 @@ VusRTModule *vus_ext_c_module(const char *ns);             /* 按别名取 C 域
 void *vus_ext_c_handle(const char *ns);                    /* 按别名取 C 域 dlopen 句柄 */
 
 #endif // VUS_RT_H
+
+/* Cordis 式运行时上下文元框架（服务容器/DI/effect/事件四模式，路线 A）
+ * 置于文件末尾：全部 VUS 核心类型就绪后展开，生成 C 自动获得 vus_ctx_*。 */
+#include "vus_cordis.h"
+
+/* TUI 画布子系统（帧缓冲 + 差分刷新 + 按键/行编辑输入）
+ * 同样置于末尾：依赖 vus_string_new 等核心类型，生成 C 自动获得 vus_tui_*。 */
+#include "vus_tui.h"

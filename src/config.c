@@ -118,6 +118,54 @@ static int json_parse_bool(JsonCtx *ctx, int *out_val)
     return 0;
 }
 
+/* 跳过整个 JSON 值（json_read_bool_field 引用，先声明） */
+static void json_skip_value(JsonCtx *ctx);
+
+/* 读取嵌套对象内布尔字段（true/false 或 0/1 数字），未找到/解析失败时保持 *out 不变 */
+static void json_read_bool_field(JsonCtx *ctx, const char *key, int *out)
+{
+    if (json_peek(ctx) != '{') return;
+    json_next(ctx); /* 跳过 { */
+
+    /* 逐字段扫描：每轮循环先消费上一字段后的逗号（若无逗号则保持原状） */
+    while (json_peek(ctx) != '}' && ctx->pos < ctx->len && !ctx->error) {
+        if (json_peek(ctx) == ',') json_next(ctx); /* 跳过字段分隔逗号 */
+        /* 解析 key */
+        char field_key[256];
+        if (json_peek(ctx) != '"') {
+            json_skip_value(ctx);
+            continue;
+        }
+        json_parse_string(ctx, field_key, sizeof(field_key));
+
+        /* 跳过冒号 */
+        json_next(ctx);
+
+        if (strcmp(field_key, key) == 0) {
+            /* 匹配到目标 key，解析布尔值 */
+            if (json_parse_bool(ctx, out)) return;
+            /* 尝试数字（兼容 0/1 写法） */
+            char num_buf[16];
+            size_t ni = 0;
+            while (ctx->pos < ctx->len && ni < sizeof(num_buf) - 1) {
+                int c = (unsigned char)ctx->json[ctx->pos];
+                if (c == '0' || c == '1') {
+                    num_buf[ni++] = (char)c;
+                    ctx->pos++;
+                } else {
+                    break;
+                }
+            }
+            num_buf[ni] = '\0';
+            if (ni > 0) *out = atoi(num_buf);
+            return;
+        }
+
+        /* 跳过值 */
+        json_skip_value(ctx);
+    }
+}
+
 /* 跳过整个 JSON 值（用于跳出不关心的字段） */
 static void json_skip_value(JsonCtx *ctx)
 {
@@ -167,7 +215,9 @@ static int json_read_string_field(JsonCtx *ctx, const char *key,
     if (json_peek(ctx) != '{') return 0;
     json_next(ctx); /* 跳过 { */
 
+    /* 逐字段扫描：每轮循环先消费上一字段后的逗号（若无逗号则保持原状） */
     while (json_peek(ctx) != '}' && ctx->pos < ctx->len && !ctx->error) {
+        if (json_peek(ctx) == ',') json_next(ctx); /* 跳过字段分隔逗号 */
         /* 解析 key */
         char field_key[256];
         if (json_peek(ctx) != '"') {
@@ -364,6 +414,11 @@ int vus_config_load(VusConfig *config, const char *project_dir)
                 json_read_string_field(&sub_ctx2, "ARM版本",
                                        config->arm_version,
                                        sizeof(config->arm_version));
+                /* 动态链接 / strip（可选开关，缺省关闭） */
+                JsonCtx sub_ctx3 = ctx;
+                json_read_bool_field(&sub_ctx3, "动态链接", &config->dynamic_link);
+                JsonCtx sub_ctx4 = ctx;
+                json_read_bool_field(&sub_ctx4, "strip", &config->strip_syms);
                 /* 跳过整个对象 */
                 json_skip_value(&ctx);
             } else {

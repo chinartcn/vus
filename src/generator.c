@@ -289,6 +289,15 @@ static int     g_vua_op_count = 0;       /* 界面_* 内建语句表达式临时
 static int     g_uses_vua = 0;           /* 用户代码是否用了 界面_*（决定 include vua.h）*/
 static VusAstProgram *g_vua_prog = NULL; /* 当前生成中的 AST 根（界面_绑定 查事件函数参数用） */
 
+/* ============ Cordis 式上下文（路线 B）：登记/闭包包装 ============
+ * 注册服务/监听事件/挂载效果 需把用户 .vus 函数包装成 C 静态回调
+ * （服务 init/dispose、事件回调、effect undo）。收集到 g_cdis_premain，
+ * 在主函数之前喷出；与 VUA 闭包同机制、独立缓冲，互不干扰。 */
+static GenBuf *g_cdis_premain = NULL;    /* 收集 Cordis 包装函数 */
+static GenBuf *g_cdis_fwd = NULL;        /* 包装函数前向声明（放 include 后） */
+static int     g_cdis_count = 0;          /* 包装序号，唯一命名 */
+static int     g_uses_cordis = 0;         /* 用户代码是否用了 Cordis 内建 */
+
 /* 顶层全局变量名集合：parser 在函数内对任何赋值一律标记 is_local=1，
  * 若不把「顶层已声明的名字」排除出局部收集，函数内对全局变量的赋值会在函数
  * 顶部生成同名局部声明（VusString* vus_x = NULL;），遮蔽文件级全局，
@@ -2034,6 +2043,285 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
         }
         return strdup("(void)-1; /* 界面_显示_JSON: 参数不足 */");
     }
+    /* ============= Cordis 式上下文元框架（路线 B，映射 rt/vus_cordis.c） =============
+     * 注册服务(键, {依赖:[..], 数据:expr, 初始化:fn, 拆卸:fn})
+     *   依赖 驱动 DI 拓扑激活；初始化/拆卸 为用户 .vus 函数（接收 impl 数据为第一参数）
+     * 服务获取(键) → 已激活服务的 impl（borrow，vus_ref 一次转出生份）
+     * 监听事件(事件名, 回调函数, "观察|中间件|并行|顺序") → EMIT/WATERFALL/PARALLEL/SERIAL
+     * 发射事件(事件名, 参数) / 管线事件(事件名, 参数, 模式) / 挂载效果(撤销函数, 参数) */
+    if (strcmp(call->func_name, "注册服务") == 0) {
+        g_uses_cordis = 1;
+        if (call->args && call->args->count >= 1 &&
+            call->args->items[0]->type == VUS_AST_STRING_LITERAL) {
+            VusAstDictLiteral *dl = NULL;
+            if (call->args->count >= 2 && call->args->items[1]->type == VUS_AST_DICT_LITERAL) {
+                dl = (VusAstDictLiteral *)call->args->items[1];
+            }
+            int id = g_cdis_count++;
+            char key_esc[256];
+            gen_string_escape(((VusAstString *)call->args->items[0])->value, key_esc, sizeof(key_esc));
+            /* 解析命名参数：依赖（字符串/标识符列表）、初始化/拆卸（函数标识符）、数据（表达式） */
+            char deps_buf[1024] = "";
+            int has_deps = 0;
+            const char *init_fn = NULL, *disp_fn = NULL;
+            char *data_expr = NULL;
+            if (dl) {
+                size_t dk = dl->keys ? dl->keys->count : 0;
+                size_t dv = dl->values ? dl->values->count : 0;
+                for (size_t i = 0; i < dk && i < dv; i++) {
+                    VusAstNode *kn = dl->keys->items[i];
+                    /* 字典键可为字符串字面量或裸标识符（解析器将未加引号的键
+                     * 解析为 IDENTIFIER 节点），两种均接受以覆盖 {依赖:…} 等写法 */
+                    const char *kd = NULL;
+                    if (kn->type == VUS_AST_STRING_LITERAL) kd = ((VusAstString *)kn)->value;
+                    else if (kn->type == VUS_AST_IDENTIFIER) kd = ((VusAstIdentifier *)kn)->name;
+                    if (!kd) continue;
+                    VusAstNode *vn = dl->values->items[i];
+                    if (strcmp(kd, "依赖") == 0 && vn->type == VUS_AST_LIST_LITERAL) {
+                        VusAstListLiteral *ll = (VusAstListLiteral *)vn;
+                        size_t pos = 0;
+                        for (size_t j = 0; ll->items && j < ll->items->count && pos + 96 < sizeof(deps_buf); j++) {
+                            VusAstNode *en = ll->items->items[j];
+                            const char *dep_name = NULL;
+                            if (en->type == VUS_AST_STRING_LITERAL) dep_name = ((VusAstString *)en)->value;
+                            else if (en->type == VUS_AST_IDENTIFIER) dep_name = ((VusAstIdentifier *)en)->name;
+                            if (!dep_name) continue;
+                            char esc[128];
+                            gen_string_escape(dep_name, esc, sizeof(esc));
+                            pos += (size_t)snprintf(deps_buf + pos, sizeof(deps_buf) - pos,
+                                                    "%s\"%s\",", j > 0 ? " " : "", esc);
+                            has_deps = 1;
+                        }
+                    } else if (strcmp(kd, "初始化") == 0 && vn->type == VUS_AST_IDENTIFIER) {
+                        init_fn = ((VusAstIdentifier *)vn)->name;
+                    } else if (strcmp(kd, "拆卸") == 0 && vn->type == VUS_AST_IDENTIFIER) {
+                        disp_fn = ((VusAstIdentifier *)vn)->name;
+                    } else if (strcmp(kd, "数据") == 0) {
+                        data_expr = gen_expr(buf, vn);
+                    }
+                }
+            }
+            /* 依赖数组（编译期静态）：deps_buf 仅作数组初值，字段指向数组名 */
+            char deps_arr[1100];
+            char deps_ref[32] = "NULL";
+            if (has_deps) {
+                snprintf(deps_arr, sizeof(deps_arr), "static const char* _cd_%d[] = { %s NULL };", id, deps_buf);
+                snprintf(deps_ref, sizeof(deps_ref), "_cd_%d", id);
+            }
+            /* 初始化/拆卸包装（调用用户 .vus 函数，impl 作为第一参数） */
+            char init_wrap[128] = "NULL", disp_wrap[128] = "NULL";
+            if (init_fn) {
+                char hs[256]; gen_sanitize_name(init_fn, hs, sizeof(hs));
+                if (!g_cdis_premain) g_cdis_premain = gen_buf_new();
+                if (!g_cdis_fwd) g_cdis_fwd = gen_buf_new();
+                gen_emit_linef(g_cdis_fwd, "static void _csc_init_%d(void*);", id);
+                gen_emit_linef(g_cdis_premain, "static void _csc_init_%d(void* _impl){", id);
+                /* VUS 函数参数数组约定：槽0=返回值，槽1=首参 */
+                gen_emit_linef(g_cdis_premain, "    VusString* _va[2] = { NULL, (VusString*)_impl };");
+                gen_emit_linef(g_cdis_premain, "    vus_%s(_va);", hs);
+                gen_emit_linef(g_cdis_premain, "}");
+                snprintf(init_wrap, sizeof(init_wrap), "_csc_init_%d", id);
+            }
+            if (disp_fn) {
+                char hs[256]; gen_sanitize_name(disp_fn, hs, sizeof(hs));
+                if (!g_cdis_premain) g_cdis_premain = gen_buf_new();
+                if (!g_cdis_fwd) g_cdis_fwd = gen_buf_new();
+                gen_emit_linef(g_cdis_fwd, "static void _csc_disp_%d(void*);", id);
+                gen_emit_linef(g_cdis_premain, "static void _csc_disp_%d(void* _impl){", id);
+                gen_emit_linef(g_cdis_premain, "    VusString* _va[2] = { NULL, (VusString*)_impl };");
+                gen_emit_linef(g_cdis_premain, "    vus_%s(_va);", hs);
+                gen_emit_linef(g_cdis_premain, "}");
+                snprintf(disp_wrap, sizeof(disp_wrap), "_csc_disp_%d", id);
+            }
+            /* 数据表达式（缺省空串创建即出生份） */
+            const char *data = data_expr ? data_expr : "vus_string_new(\"\")";
+            /* 注册调用：服务描述符用 static（.bss 零初始化）保证唯一存储。
+             * 不能直接把 data 等非编译期常量放进静态初始化（vus_string_new /
+             * 字面量缓存等均为运行期表达式），故拆成字段赋值，逐项填好后注册。
+             * 描述符需存活到 ctx 销毁，static 正是所需生命周期。 */
+            size_t sz = strlen(data) + 768 + (has_deps ? strlen(deps_arr) : 0);
+            char *r = (char *)malloc(sz);
+            snprintf(r, sz,
+                "({%s static VusCtxService _cs_%d; "
+                "_cs_%d.key = \"%s\"; _cs_%d.deps = %s; "
+                "_cs_%d.init = %s; _cs_%d.dispose = %s; "
+                "_cs_%d.impl = (void*)(%s); "
+                "(void)vus_ctx_register(_vus_ctx(), &_cs_%d); })",
+                has_deps ? deps_arr : "", id,
+                id, key_esc, id, deps_ref,
+                id, init_wrap, id, disp_wrap,
+                id, data, id);
+            free(data_expr);
+            return r;
+        }
+        return strdup("(void)0; /* 注册服务: 缺键 */");
+    }
+
+    if (strcmp(call->func_name, "服务获取") == 0) {
+        g_uses_cordis = 1;
+        if (call->args && call->args->count >= 1 &&
+            call->args->items[0]->type == VUS_AST_STRING_LITERAL) {
+            char key_esc[256];
+            gen_string_escape(((VusAstString *)call->args->items[0])->value, key_esc, sizeof(key_esc));
+            size_t sz = strlen(key_esc) + 256;
+            char *r = (char *)malloc(sz);
+            /* 借用转出生份：vus_ref 一次，R6 视 服务获取 为 NEW 收割配平；NIL→空串 */
+            snprintf(r, sz,
+                "({void* _gs_ = vus_ctx_get(_vus_ctx(), \"%s\"); _gs_ ? (VusString*)((vus_ref(_gs_), _gs_)) : vus_string_new(\"\");})",
+                key_esc);
+            return r;
+        }
+        return strdup("vus_string_new(\"\") /* 服务获取: 缺键 */");
+    }
+
+    /* 监听事件(事件名, 回调函数, "观察|中间件|并行|顺序")：VusClosure 包装 + 四模式分发 */
+    if (strcmp(call->func_name, "监听事件") == 0) {
+        g_uses_cordis = 1;
+        if (call->args && call->args->count >= 2 &&
+            call->args->items[1]->type == VUS_AST_IDENTIFIER) {
+            char *ev = gen_expr(buf, call->args->items[0]);
+            VusAstIdentifier *handler = (VusAstIdentifier *)call->args->items[1];
+            char hs[256];
+            gen_sanitize_name(handler->name, hs, sizeof(hs));
+            char *mode_expr = NULL;
+            if (call->args->count >= 3 && call->args->items[2]->type == VUS_AST_STRING_LITERAL) {
+                char mode_esc[128];
+                gen_string_escape(((VusAstString *)call->args->items[2])->value, mode_esc, sizeof(mode_esc));
+                mode_expr = (char *)malloc(strlen(mode_esc) + 32);
+                snprintf(mode_expr, strlen(mode_esc) + 32, "vus_ev_mode(\"%s\")", mode_esc);
+            } else {
+                mode_expr = strdup("VUS_EV_EMIT");
+            }
+            int id = g_cdis_count++;
+            if (!g_cdis_premain) g_cdis_premain = gen_buf_new();
+            if (!g_cdis_fwd) g_cdis_fwd = gen_buf_new();
+            gen_emit_linef(g_cdis_fwd, "static void _cdis_ck_%d(void*, void*);", id);
+            gen_emit_linef(g_cdis_premain, "static void _cdis_ck_%d(void* _env, void* _args){", id);
+            gen_emit_linef(g_cdis_premain, "    (void)_env;");
+            /* 闭包参数数组按回调参数个数开（固定 _va[2] 会在回调参数≥2 时越界
+             * 读栈上垃圾并经 vus_ref 段错误——与 界面_绑定 修复过的同一类缺陷） */
+            {
+                VusAstFunctionDef *hfunc = gen_vua_find_func(handler->name);
+                size_t cbn = hfunc && hfunc->params ? hfunc->params->count : 1;
+                if (cbn > 16) cbn = 16;
+                if (cbn < 1) cbn = 1;
+                gen_emit_linef(g_cdis_premain, "    VusString* _va[%zu]={NULL};", cbn + 1);
+                if (cbn >= 1)
+                    gen_emit_linef(g_cdis_premain, "    _va[1] = (VusString*)_args;");
+                gen_emit_linef(g_cdis_premain, "    vus_%s(_va);", hs);
+                /* 对称归还回调函数入口 ref（函数体入口对参数 vus_ref 一次，与普通调用
+                 * 点 vus_unref(_vus_args[i]) 同型）。仅当回调确实声明参数才归还：
+                 * 零参回调未取引用，无条件 unref 会把发射侧 NEW 出生份提前释放，
+                 * 发射点随后再 unref 即 UAF。 */
+                if (hfunc && hfunc->params && hfunc->params->count >= 1)
+                    gen_emit_linef(g_cdis_premain, "    vus_unref((VusString*)_args);");
+            }
+            gen_emit_linef(g_cdis_premain, "}");
+            size_t sz = strlen(ev) + strlen(mode_expr) + 512;
+            char *r = (char *)malloc(sz);
+            snprintf(r, sz,
+                "({VusClosure* _cl_%d = vus_closure_new(_cdis_ck_%d, NULL); void* _d_%d = vus_ctx_on(_vus_ctx(), vus_string_cstr(%s), %s, _cl_%d); vus_unref(_cl_%d); (void)_d_%d; })",
+                id, id, id, ev, mode_expr, id, id, id);
+            free(ev);
+            free(mode_expr);
+            return r;
+        }
+        return strdup("(void)0; /* 监听事件: 参数不足 */");
+    }
+
+    /* 发射事件(事件名, 参数) → EMIT 广播；管线事件(事件名, 参数, 模式) → SERIAL/WATERFALL。
+     * 事件载荷收割（R6）：vus_ctx_fire/pipeline 只借用参数不持有引用，NEW 出生份
+     * （如 i+1 新建串、缺省 vus_string_new("")）必须当场归还，否则循环发射事件时
+     * RSS 无界增长直至 OOM（tests/test_cordis_leak.vus 复现）；池借用实参不收割。 */
+    if (strcmp(call->func_name, "发射事件") == 0 || strcmp(call->func_name, "管线事件") == 0) {
+        g_uses_cordis = 1;
+        int is_pipeline = strcmp(call->func_name, "管线事件") == 0;
+        if (call->args && call->args->count >= 1) {
+            char *ev = gen_expr(buf, call->args->items[0]);
+            char *args_expr = call->args->count >= 2 ? gen_expr(buf, call->args->items[1]) : NULL;
+            int owned = call->args->count >= 2 ? gen_expr_owned(buf, call->args->items[1]) : GEN_OWNED_NEW;
+            char *mode_expr = NULL;
+            if (is_pipeline) {
+                if (call->args->count >= 3 && call->args->items[2]->type == VUS_AST_STRING_LITERAL) {
+                    char mode_esc[128];
+                    gen_string_escape(((VusAstString *)call->args->items[2])->value, mode_esc, sizeof(mode_esc));
+                    mode_expr = (char *)malloc(strlen(mode_esc) + 32);
+                    snprintf(mode_expr, strlen(mode_esc) + 32, "vus_ev_mode(\"%s\")", mode_esc);
+                } else {
+                    mode_expr = strdup("VUS_EV_WATERFALL");
+                }
+            }
+            const char *arg_src = args_expr ? args_expr : "vus_string_new(\"\")";
+            long long seq = s_call_seq++;
+            size_t sz = strlen(ev) + strlen(arg_src) + (mode_expr ? strlen(mode_expr) : 0) + 512;
+            char *r = (char *)malloc(sz);
+            if (owned == GEN_OWNED_BORROW) {
+                if (is_pipeline) {
+                    snprintf(r, sz,
+                        "({vus_ctx_pipeline(_vus_ctx(), vus_string_cstr(%s), (void*)(%s), %s); });",
+                        ev, arg_src, mode_expr);
+                } else {
+                    snprintf(r, sz,
+                        "({vus_ctx_fire(_vus_ctx(), vus_string_cstr(%s), (void*)(%s)); });",
+                        ev, arg_src);
+                }
+            } else if (owned == GEN_OWNED_NEW) {
+                if (is_pipeline) {
+                    snprintf(r, sz,
+                        "({VusString* _rev%lld=(%s); vus_ctx_pipeline(_vus_ctx(), vus_string_cstr(%s), _rev%lld, %s); vus_unref(_rev%lld); });",
+                        seq, arg_src, ev, seq, mode_expr, seq);
+                } else {
+                    snprintf(r, sz,
+                        "({VusString* _rev%lld=(%s); vus_ctx_fire(_vus_ctx(), vus_string_cstr(%s), _rev%lld); vus_unref(_rev%lld); });",
+                        seq, arg_src, ev, seq, seq);
+                }
+            } else { /* GEN_OWNED_UNKNOWN：运行时容器判定收割（容器初值 ref=0 免收割） */
+                if (is_pipeline) {
+                    snprintf(r, sz,
+                        "({VusString* _rev%lld=(%s); vus_ctx_pipeline(_vus_ctx(), vus_string_cstr(%s), _rev%lld, %s); if (_rev%lld && !vus_is_container(_rev%lld)) vus_unref(_rev%lld); });",
+                        seq, arg_src, ev, seq, mode_expr, seq, seq, seq);
+                } else {
+                    snprintf(r, sz,
+                        "({VusString* _rev%lld=(%s); vus_ctx_fire(_vus_ctx(), vus_string_cstr(%s), _rev%lld); if (_rev%lld && !vus_is_container(_rev%lld)) vus_unref(_rev%lld); });",
+                        seq, arg_src, ev, seq, seq, seq, seq);
+                }
+            }
+            free(ev);
+            free(args_expr);
+            free(mode_expr);
+            return r;
+        }
+        return strdup("(void)0; /* 发射事件: 参数不足 */");
+    }
+
+    /* 挂载效果(撤销函数, 参数)：登记可逆副作用，进程退出时逆序回退 */
+    if (strcmp(call->func_name, "挂载效果") == 0) {
+        g_uses_cordis = 1;
+        if (call->args && call->args->count >= 1 &&
+            call->args->items[0]->type == VUS_AST_IDENTIFIER) {
+            VusAstIdentifier *ufn = (VusAstIdentifier *)call->args->items[0];
+            char hs[256];
+            gen_sanitize_name(ufn->name, hs, sizeof(hs));
+            char *data_expr = call->args->count >= 2 ? gen_expr(buf, call->args->items[1]) : NULL;
+            int id = g_cdis_count++;
+            if (!g_cdis_premain) g_cdis_premain = gen_buf_new();
+            if (!g_cdis_fwd) g_cdis_fwd = gen_buf_new();
+            gen_emit_linef(g_cdis_fwd, "static void _cde_%d(void*);", id);
+            gen_emit_linef(g_cdis_premain, "static void _cde_%d(void* _d){", id);
+            gen_emit_linef(g_cdis_premain, "    VusString* _va[2] = { NULL, (VusString*)_d };");
+            gen_emit_linef(g_cdis_premain, "    vus_%s(_va);", hs);
+            gen_emit_linef(g_cdis_premain, "}");
+            const char *data = data_expr ? data_expr : "vus_string_new(\"\")";
+            size_t sz = strlen(data) + 256;
+            char *r = (char *)malloc(sz);
+            snprintf(r, sz, "({void* _e_%d = vus_ctx_effect(_vus_ctx(), _cde_%d, (void*)(%s)); (void)_e_%d; })",
+                     id, id, data, id);
+            free(data_expr);
+            return r;
+        }
+        return strdup("(void)0; /* 挂载效果: 参数不足 */");
+    }
+
     if (strcmp(call->func_name, "界面_绑定") == 0) {
         g_uses_vua = 1;
         /* 参数：args[0]=事件名字符串，args[1]=处理函数标识符 */
@@ -3378,6 +3666,126 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
         }
     }
 
+    /* ============= TUI 画布子系统（帧缓冲 + 差分刷新 + 输入） =============
+     * 绘制类写入画布（不立即输出），tui_刷新 差分上屏；
+     * 无终端环境（管道/CI/APK）静默缓冲、读取类返回空串。 */
+    if (strcmp(call->func_name, "tui_绘制文本") == 0) {
+        if (call->args && call->args->count >= 3) {
+            char *row = gen_expr(buf, call->args->items[0]);
+            char *col = gen_expr(buf, call->args->items[1]);
+            char *txt = gen_expr(buf, call->args->items[2]);
+            /* 可选：前景/背景/样式（缺省 -1/-1/0，以 VusString* 字面量传递） */
+            char *fg = call->args->count >= 4 ? gen_expr(buf, call->args->items[3]) : gen_static_lit(s_lit_seq++, "-1");
+            char *bg = call->args->count >= 5 ? gen_expr(buf, call->args->items[4]) : gen_static_lit(s_lit_seq++, "-1");
+            char *st = call->args->count >= 6 ? gen_expr(buf, call->args->items[5]) : gen_static_lit(s_lit_seq++, "0");
+            char result[4096];
+            snprintf(result, sizeof(result),
+                     "({vus_tui_canvas_put((int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), vus_string_cstr(%s), "
+                     "(int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err)); vus_string_new(\"\");})",
+                     row, col, txt, fg, bg, st);
+            free(row); free(col); free(txt); free(fg); free(bg); free(st);
+            return strdup(result);
+        }
+        return strdup("vus_string_new(\"\") /* tui_绘制文本: 参数不足 */");
+    }
+    if (strcmp(call->func_name, "tui_刷新") == 0) {
+        return strdup("({vus_tui_flush(); vus_string_new(\"\");})");
+    }
+    if (strcmp(call->func_name, "tui_清画布") == 0) {
+        /* 仅清空帧缓冲（不清终端、不失效差分基准）：逐帧全量重绘后差分上屏 */
+        return strdup("({vus_tui_canvas_clear(); vus_string_new(\"\");})");
+    }
+    if (strcmp(call->func_name, "tui_边框") == 0) {
+        if (call->args && call->args->count >= 4) {
+            char *row = gen_expr(buf, call->args->items[0]);
+            char *col = gen_expr(buf, call->args->items[1]);
+            char *hgt = gen_expr(buf, call->args->items[2]);
+            char *wid = gen_expr(buf, call->args->items[3]);
+            char *title = call->args->count >= 5 ? gen_expr(buf, call->args->items[4]) : NULL;
+            char *title_arg = NULL;
+            if (title) {
+                size_t tlen = strlen(title) + 32;
+                title_arg = (char *)malloc(tlen);
+                snprintf(title_arg, tlen, "vus_string_cstr(%s)", title);
+            } else {
+                title_arg = strdup("NULL");
+            }
+            char result[4096];
+            snprintf(result, sizeof(result),
+                     "({vus_tui_canvas_box((int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err), "
+                     "(int)vus_to_int(%s, &_err), %s); vus_string_new(\"\");})",
+                     row, col, hgt, wid, title_arg);
+            free(row); free(col); free(hgt); free(wid); free(title_arg);
+            if (title) free(title);
+            return strdup(result);
+        }
+        return strdup("vus_string_new(\"\") /* tui_边框: 参数不足 */");
+    }
+    if (strcmp(call->func_name, "tui_画布") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *row = gen_expr(buf, call->args->items[0]);
+            char *col = gen_expr(buf, call->args->items[1]);
+            char result[1024];
+            snprintf(result, sizeof(result),
+                     "({vus_tui_canvas_resize((int)vus_to_int(%s, &_err), (int)vus_to_int(%s, &_err)); vus_string_new(\"\");})",
+                     row, col);
+            free(row); free(col);
+            return strdup(result);
+        }
+        return strdup("vus_string_new(\"\") /* tui_画布: 参数不足 */");
+    }
+    if (strcmp(call->func_name, "tui_清行") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *row = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result),
+                     "({vus_tui_clear_line((int)vus_to_int(%s, &_err)); vus_string_new(\"\");})", row);
+            free(row);
+            return strdup(result);
+        }
+        return strdup("vus_string_new(\"\") /* tui_清行: 参数不足 */");
+    }
+    if (strcmp(call->func_name, "tui_读取按键") == 0) {
+        return strdup("vus_tui_read_key()");
+    }
+    if (strcmp(call->func_name, "tui_输入文本") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *prompt = gen_expr(buf, call->args->items[0]);
+            char *maxlen = call->args->count >= 2 ? gen_expr(buf, call->args->items[1]) : gen_static_lit(s_lit_seq++, "64");
+            char result[2048];
+            snprintf(result, sizeof(result),
+                     "vus_tui_input(vus_string_cstr(%s), (int)vus_to_int(%s, &_err))", prompt, maxlen);
+            free(prompt); free(maxlen);
+            return strdup(result);
+        }
+        return strdup("vus_string_new(\"\") /* tui_输入文本: 参数不足 */");
+    }
+    if (strcmp(call->func_name, "tui_文本样式") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *st = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result),
+                     "({vus_tui_style((int)vus_to_int(%s, &_err)); vus_string_new(\"\");})", st);
+            free(st);
+            return strdup(result);
+        }
+        return strdup("vus_string_new(\"\") /* tui_文本样式: 参数不足 */");
+    }
+    if (strcmp(call->func_name, "tui_光标") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *show = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result),
+                     "({vus_tui_cursor((int)vus_to_int(%s, &_err) != 0); vus_string_new(\"\");})", show);
+            free(show);
+            return strdup(result);
+        }
+        return strdup("vus_string_new(\"\") /* tui_光标: 参数不足 */");
+    }
+    if (strcmp(call->func_name, "tui_终端尺寸") == 0) {
+        return strdup("({char _ts_[32]; snprintf(_ts_, sizeof(_ts_), \"%d,%d\", vus_tui_rows(), vus_tui_cols()); vus_string_new(_ts_);})");
+    }
+
     /* ============= 网络插件内置函数 ============= */
     if (strcmp(call->func_name, "网络_GET") == 0) {
         if (call->args && call->args->count >= 1) {
@@ -3476,6 +3884,212 @@ static char *gen_expr_call(GenBuf *buf, VusAstCall *call) {
             char result[4096];
             snprintf(result, sizeof(result), "vus_plugin_hotupdate_apply(%s)", url);
             free(url);
+            return strdup(result);
+        }
+    }
+
+    /* ============= AI 聚合模块（rt/vus_ai.c） =============
+     * AI_api池(配置JSON)          —— 导入 {服务名: 令牌} 池；无参返回当前池 JSON
+     * AI_open兼容(服务名, 地址)   —— 绑定 OpenAI 兼容端点（覆盖内置默认）
+     * AI_请求(名称, 模型[, 消息]) —— 对话调用；两参时消息缺省 "你好"
+     * AI_服务列表() / AI_移除(服务名)                    */
+    if (strcmp(call->func_name, "AI_请求") == 0) {
+        char *name = call->args && call->args->count >= 1 ? gen_expr(buf, call->args->items[0]) : NULL;
+        char *model = call->args && call->args->count >= 2 ? gen_expr(buf, call->args->items[1]) : NULL;
+        if (name && model) {
+            char *msg = call->args->count >= 3 ? gen_expr(buf, call->args->items[2])
+                                               : strdup("vus_string_new(\"你好\")");
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_ai_chat(%s, %s, %s)", name, model, msg);
+            free(name); free(model); free(msg);
+            return strdup(result);
+        }
+        free(name); free(model);
+    }
+    if (strcmp(call->func_name, "AI_api池") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *cfg = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_ai_pool(%s)", cfg);
+            free(cfg);
+            return strdup(result);
+        }
+        return strdup("vus_ai_pool(vus_string_new(\"\"))");
+    }
+    if (strcmp(call->func_name, "AI_open兼容") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *name = gen_expr(buf, call->args->items[0]);
+            char *base = gen_expr(buf, call->args->items[1]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_ai_open_compat(%s, %s)", name, base);
+            free(name); free(base);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "AI_服务列表") == 0) {
+        return strdup("vus_ai_list(vus_string_new(\"\"))");
+    }
+    if (strcmp(call->func_name, "AI_模型列表") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *name = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_ai_models(%s)", name);
+            free(name);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "AI_移除") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *name = gen_expr(buf, call->args->items[0]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_ai_del(%s)", name);
+            free(name);
+            return strdup(result);
+        }
+    }
+
+    /* AI_文生图(服务商, 模型, 提示词[, 尺寸]) */
+    if (strcmp(call->func_name, "AI_文生图") == 0) {
+        char *name = call->args && call->args->count >= 1 ? gen_expr(buf, call->args->items[0]) : NULL;
+        char *model = call->args && call->args->count >= 2 ? gen_expr(buf, call->args->items[1]) : NULL;
+        char *prompt = call->args && call->args->count >= 3 ? gen_expr(buf, call->args->items[2]) : NULL;
+        if (name && model && prompt) {
+            char *size = call->args->count >= 4 ? gen_expr(buf, call->args->items[3])
+                                                : strdup("vus_string_new(\"\")");
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_ai_image_gen(%s, %s, %s, %s)", name, model, prompt, size);
+            free(name); free(model); free(prompt); free(size);
+            return strdup(result);
+        }
+        free(name); free(model); free(prompt);
+    }
+
+    /* AI_图生图(服务商, 模型, 图片路径, 提示词[, 强度]) */
+    if (strcmp(call->func_name, "AI_图生图") == 0) {
+        char *name = call->args && call->args->count >= 1 ? gen_expr(buf, call->args->items[0]) : NULL;
+        char *model = call->args && call->args->count >= 2 ? gen_expr(buf, call->args->items[1]) : NULL;
+        char *path = call->args && call->args->count >= 3 ? gen_expr(buf, call->args->items[2]) : NULL;
+        char *prompt = call->args && call->args->count >= 4 ? gen_expr(buf, call->args->items[3]) : NULL;
+        if (name && model && path && prompt) {
+            char *str = call->args->count >= 5 ? gen_expr(buf, call->args->items[4])
+                                               : strdup("vus_string_new(\"\")");
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_ai_image_edit(%s, %s, %s, %s, %s)",
+                     name, model, path, prompt, str);
+            free(name); free(model); free(path); free(prompt); free(str);
+            return strdup(result);
+        }
+        free(name); free(model); free(path); free(prompt);
+    }
+
+    /* ============= AI 工作流（后台协程 + 进度回调） =============
+     * AI_启动工作流(槽名, 函数, 参数) / AI_推进(槽名)
+     * AI_返回(值) / AI_完成返回()（工作流体内）
+     * AI_回调(槽名) / AI_清空回调(槽名) / AI_回调_完成(槽名) / AI_工作流状态(槽名) */
+    if (strcmp(call->func_name, "AI_启动工作流") == 0) {
+        char *slot = call->args && call->args->count >= 1 ? gen_expr(buf, call->args->items[0]) : NULL;
+        char *fn   = call->args && call->args->count >= 2 ? gen_expr(buf, call->args->items[1]) : NULL;
+        char *arg  = call->args && call->args->count >= 3 ? gen_expr(buf, call->args->items[2])
+                                                          : strdup("vus_string_new(\"\")");
+        if (slot && fn) {
+            char result[4096];
+            snprintf(result, sizeof(result),
+                "vus_ai_wf_start(%s, (void(*)(void*))(%s), (void*)(%s))",
+                slot, fn, arg);
+            free(slot); free(fn); free(arg);
+            return strdup(result);
+        }
+        free(slot); free(fn); free(arg);
+    }
+    if (strcmp(call->func_name, "AI_推进") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *slot = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result), "vus_ai_wf_step(%s)", slot);
+            free(slot);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "AI_返回") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *v = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result), "vus_ai_wf_return(%s)", v);
+            free(v);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "AI_完成返回") == 0) {
+        return strdup("vus_ai_wf_done()");
+    }
+    if (strcmp(call->func_name, "AI_回调") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *slot = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result), "vus_ai_wf_value(%s)", slot);
+            free(slot);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "AI_清空回调") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *slot = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result), "vus_ai_wf_clear(%s)", slot);
+            free(slot);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "AI_回调_完成") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *slot = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result), "vus_ai_wf_done_q(%s)", slot);
+            free(slot);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "AI_工作流状态") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *slot = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result), "vus_ai_wf_status(%s)", slot);
+            free(slot);
+            return strdup(result);
+        }
+    }
+
+    /* ============= 网页服务（极简 POSIX HTTP 服务器） =============
+     * 网页_服务(端口, 内容)       —— 内容模式：返回该 HTML
+     * 网页_服务目录(目录[, 端口])  —— 目录模式：静态文件服务，网页.json 配置入口/端口
+     * 网页_停止(端口)              —— 停止服务 */
+    if (strcmp(call->func_name, "网页_服务") == 0) {
+        if (call->args && call->args->count >= 2) {
+            char *port = gen_expr(buf, call->args->items[0]);
+            char *content = gen_expr(buf, call->args->items[1]);
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_web_serve(%s, %s)", port, content);
+            free(port); free(content);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "网页_服务目录") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *dir = gen_expr(buf, call->args->items[0]);
+            char *port = call->args->count >= 2 ? gen_expr(buf, call->args->items[1])
+                                                : strdup("vus_string_new(\"\")");
+            char result[4096];
+            snprintf(result, sizeof(result), "vus_web_serve_dir(%s, %s)", dir, port);
+            free(dir); free(port);
+            return strdup(result);
+        }
+    }
+    if (strcmp(call->func_name, "网页_停止") == 0) {
+        if (call->args && call->args->count >= 1) {
+            char *port = gen_expr(buf, call->args->items[0]);
+            char result[1024];
+            snprintf(result, sizeof(result), "vus_web_stop(%s)", port);
+            free(port);
             return strdup(result);
         }
     }
@@ -4616,11 +5230,16 @@ static char *gen_expr_identifier(GenBuf *buf, VusAstIdentifier *ident) {
 
 static char *gen_expr_string(GenBuf *buf, VusAstString *str) {
     (void)buf;
-    char escaped[4096];
-    gen_string_escape(str->value, escaped, sizeof(escaped));
+    /* 动态分配转义缓冲：单行/三引号多行内容均无 4KB 截断（HTML 模板可达数十 KB） */
+    size_t slen = str->value ? strlen(str->value) : 0;
+    size_t cap = slen * 6 + 16;   /* 最坏情形：每个字节转成 \xHH（4 字节）+ 余量 */
+    char *escaped = (char *)malloc(cap);
+    if (!escaped) return NULL;
+    gen_string_escape(str->value ? str->value : "", escaped, cap);
     /* R2：static 缓存字面量指针（首次 vus_literal 一次，热路径仅一次判空）；
      * 静态持有自己的引用，即使池槽被其它字面量换出也不悬垂。 */
     char *result = gen_static_lit(s_lit_seq++, escaped);
+    free(escaped);
     return result;
 }
 
@@ -4870,6 +5489,7 @@ static void gen_line_map(GenBuf *buf, int vus_line) {
 static int gen_expr_owned_builtin(const char *name) {
     if (!name) return 0;
     if (strcmp(name, "转数字") == 0) return 1;    /* vus_to_string(vus_to_int(...)) 新建 */
+    if (strncmp(name, "tui_", 4) == 0) return 1;  /* TUI 内建全部新建返回（空串/按键/输入/尺寸） */
     return 0;   /* 未知/可能借用/void：保守不入名单 */
 }
 
@@ -5025,6 +5645,8 @@ static int gen_expr_owned(GenBuf *buf, const VusAstNode *node) {
         /* 用户函数/泛型实例调用（已登记）：返回动态类型 → 赋值处运行时收割。
          * 内建（含借用返回、结构体构造经专用模板）一律不在此列。 */
         if (gen_is_user_call_name(c->func_name)) return GEN_OWNED_UNKNOWN;
+        /* 服务获取：借用转出生份（vus_ref），视同新建由赋值/RAII 配平 */
+        if (strcmp(c->func_name, "服务获取") == 0) return GEN_OWNED_NEW;
         /* 函数一等公民调用：返回值跟随被调函数，动态类型 → 同样运行时收割 */
         if (strcmp(c->func_name, "调用") == 0 || strcmp(c->func_name, "调用函数") == 0)
             return GEN_OWNED_UNKNOWN;
@@ -6397,9 +7019,65 @@ char *vus_generate_c(VusAstProgram *program, VusConfig *config,
     free(buf->data);
     free(buf);
 
+    /* Cordis 式上下文（路线 B）：运行时基础设施 + 包装函数，同样插在 main 前。
+     * infra 置于 include 区之后（VusCtx 类型依赖 vus_cordis.h 可见）。 */
+    if (g_uses_cordis) {
+        size_t total = strlen(result) + 1024;
+        if (g_cdis_premain && g_cdis_premain->data) total += strlen(g_cdis_premain->data);
+        if (g_cdis_fwd && g_cdis_fwd->data) total += strlen(g_cdis_fwd->data);
+        char *as2 = (char *)malloc(total + 1);
+        if (!as2) {
+            /* 内存不足：保留既有结果（cordis 内建将编译失败，由 GCC 报错） */
+        } else {
+            const char *mk = "int main(void) {";
+            char *at = strstr(result, mk);
+            size_t head = at ? (size_t)(at - result) : strlen(result);
+            /* 声明区锚点：include 区（#include "libvus_rt.h"）之后、用户函数区之前。
+             * 用户函数体内可能直接调用 挂载效果/注册服务 等（生成 _vus_ctx()/
+             * _cde_N 引用），其声明必须先于用户函数出现，否则 GCC 隐式声明报错。 */
+            size_t fwd_head = 0;
+            char *inc = strstr(result, "#include \"libvus_rt.h\"");
+            if (inc) {
+                char *eol = strchr(inc, '\n');
+                if (eol) fwd_head = (size_t)(eol + 1 - result);
+            }
+            size_t pos = 0;
+            const char *infra =
+                "\n/* Cordis 式上下文：惰性单例，atexit 时逆序回退 effect 栈 */\n"
+                "static VusCtx* _g_ctx = NULL;\n"
+                "static int _g_ctx_done = 0;\n"
+                "static void _g_ctx_exit(void){ if (_g_ctx) { vus_ctx_dispose(_g_ctx); _g_ctx = NULL; } }\n"
+                "static VusCtx* _vus_ctx(void){ if (!_g_ctx) { _g_ctx = vus_ctx_create(); "
+                "if (!_g_ctx_done) { _g_ctx_done = 1; atexit(_g_ctx_exit); } } return _g_ctx; }\n";
+            const char *vus_ctx_decl = "static VusCtx* _vus_ctx(void);\n";
+            strncpy(as2 + pos, result, fwd_head); pos += fwd_head;   /* include 区 */
+            snprintf(as2 + pos, total - pos, "\n%s", vus_ctx_decl);  /* _vus_ctx 前置声明 */
+            pos += strlen(as2 + pos);
+            if (g_cdis_fwd && g_cdis_fwd->data) {                   /* 包装函数前向声明 */
+                snprintf(as2 + pos, total - pos, "%s", g_cdis_fwd->data);
+                pos += strlen(as2 + pos);
+            }
+            strncpy(as2 + pos, result + fwd_head, head - fwd_head); /* 用户函数区 */
+            pos += head - fwd_head;
+            snprintf(as2 + pos, total - pos, "%s", infra);          /* _vus_ctx 定义 */
+            pos += strlen(as2 + pos);
+            if (g_cdis_premain && g_cdis_premain->data) {
+                snprintf(as2 + pos, total - pos, "\n%s\n", g_cdis_premain->data);
+                pos += strlen(as2 + pos);
+            }
+            strcpy(as2 + pos, result + head);
+            free(result);
+            result = as2;
+        }
+    }
+
     /* 释放 VUA 绑定包装缓冲（其内容已并入 result，此处仅回收内存） */
     if (g_vua_premain) { free(g_vua_premain->data); free(g_vua_premain); g_vua_premain = NULL; }
     if (g_vua_fwd) { free(g_vua_fwd->data); free(g_vua_fwd); g_vua_fwd = NULL; }
+
+    /* 释放 Cordis 包装缓冲（内容已并入 result） */
+    if (g_cdis_premain) { free(g_cdis_premain->data); free(g_cdis_premain); g_cdis_premain = NULL; }
+    if (g_cdis_fwd) { free(g_cdis_fwd->data); free(g_cdis_fwd); g_cdis_fwd = NULL; }
 
     /* 释放泛型实例缓冲（其内容已并入 buf/result，此处仅回收内存） */
     if (g_inst_fwd) { free(g_inst_fwd->data); free(g_inst_fwd); g_inst_fwd = NULL; }
@@ -6421,6 +7099,16 @@ static int cached_has_curl(void) {
     static int v = -1;
     if (v < 0) {
         FILE *f = popen("curl-config --version >/dev/null 2>&1", "r");
+        v = (f && pclose(f) == 0) ? 1 : 0;
+    }
+    return v;
+}
+
+/* strip 工具可用性（vus.json.strip / VUS_STRIP=1 时用于链接后瘦身；缺工具则跳过） */
+static int cached_has_strip(void) {
+    static int v = -1;
+    if (v < 0) {
+        FILE *f = popen("command -v strip >/dev/null 2>&1", "r");
         v = (f && pclose(f) == 0) ? 1 : 0;
     }
     return v;
@@ -6498,15 +7186,37 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
        用于在低性能设备（如 Termux）上加速编译大型生成 C；否则按配置。 */
     const char *opt_level = "-O2";
     const char *env_opt = getenv("VUS_OPT");
+    /* 体积档裁剪开关：优化=体积 时启用函数级裁剪（依赖运行时库
+       -ffunction-sections/-fdata-sections 预编译，见 Makefile CFLAGS）。
+       -Os -flto：代码密度 + LTO 跨 TU 优化；
+       -Wl,--gc-sections：链接时回收未被引用的运行时函数/数据段；
+       -Wl,--strip-all：删除全部符号表（等效外部 strip）。
+       用户显式 VUS_OPT 覆盖时视为手动接管，不再追加裁剪参数，
+       以免调试（VUS_OPT="-O0 -g"）被误剥符号。 */
+    int size_mode = 0;
+    char size_link_opts[96] = "";
     if (env_opt && env_opt[0]) {
         opt_level = env_opt;
     } else if (config->optimization[0]) {
         if (strcmp(config->optimization, "体积") == 0) {
-            opt_level = "-Os";
+            opt_level = "-Os -flto -ffunction-sections -fdata-sections";
+            snprintf(size_link_opts, sizeof(size_link_opts),
+                     " -Wl,--gc-sections -Wl,--strip-all");
+            size_mode = 1;
         } else if (strcmp(config->optimization, "调试") == 0) {
             opt_level = "-O0 -g";
         }
     }
+
+    /* 动态链接 / strip 开关（均可选，缺省关闭）：环境变量显式覆盖 vus.json，
+       与 VUS_OPT 同风格（如 VUS_DYNAMIC=1 ./vus run … 或 vus.json 编译选项）。
+       动态模式下 .so 缺失/无法生成时自动回退静态链接，见下方 use_dyn_rt。 */
+    int dyn_link = config->dynamic_link;
+    const char *e_dyn = getenv("VUS_DYNAMIC");
+    if (e_dyn && (e_dyn[0] == '1' || e_dyn[0] == '0')) dyn_link = (e_dyn[0] == '1');
+    int do_strip = config->strip_syms;
+    const char *e_strip = getenv("VUS_STRIP");
+    if (e_strip && (e_strip[0] == '1' || e_strip[0] == '0')) do_strip = (e_strip[0] == '1');
 
     /* 将 rt_dir 解析为绝对路径（相对于 project_dir） */
     char abs_rt_dir[2048];
@@ -6558,6 +7268,28 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
     if (config->rt_dir[0]) {
         FILE *lib_check = fopen(static_rt_lib, "r");
         if (lib_check) { use_static_rt = 1; fclose(lib_check); }
+    }
+
+    /* 共享库探测（动态链接可选）：VUS_RT_SO > 项目 build/libvus_rt.so > 安装目录
+       /usr/local/lib/vus/libvus_rt.so。找到则动态链接；找不到/无法生成（安装时
+       make shared 失败）自动回退静态，绝不因缺 .so 编译失败。 */
+    char rt_so[2048] = "";
+    int use_dyn_rt = 0;
+    if (dyn_link && config->rt_dir[0]) {
+        const char *so_env = getenv("VUS_RT_SO");
+        if (so_env && so_env[0]) {
+            snprintf(rt_so, sizeof(rt_so), "%s", so_env);
+        } else {
+            snprintf(rt_so, sizeof(rt_so), "%s/../build/libvus_rt.so", abs_rt_dir);
+        }
+        FILE *so_check = fopen(rt_so, "r");
+        if (!so_check) {
+            /* 未在项目 build 下找到，回退到安装目录 */
+            snprintf(rt_so, sizeof(rt_so), "/usr/local/lib/vus/libvus_rt.so");
+            so_check = fopen(rt_so, "r");
+        }
+        if (so_check) { use_dyn_rt = 1; fclose(so_check); }
+        else rt_so[0] = '\0';
     }
 
     /* 检测系统是否安装了 libcurl 开发头文件（A4：结果进程级缓存） */
@@ -6612,7 +7344,38 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
         if (g_uses_gui) { strcat(gui_lib, " -lpng -lz -lfreetype"); }
     }
 
-    if (use_static_rt) {
+    if (use_dyn_rt) {
+        /* ---- 动态链接路径（可选）：运行时为共享库 libvus_rt.so ----
+           多程序共享一份运行时（升级替换 .so 即全部生效）；curl/X11/python 等
+           外部依赖已由 .so 自行携带，主程序仅需 -lm -lpthread（+GUI 时 -ldl/-rdynamic
+           供 dlsym 反查事件回调）。-Wl,-rpath 指向 .so 所在目录，免 LD_LIBRARY_PATH。 */
+        const char *slash = strrchr(rt_so, '/');
+        char so_dir[2048];
+        if (slash && slash != rt_so) {
+            size_t dlen = (size_t)(slash - rt_so);
+            snprintf(so_dir, sizeof(so_dir), "%.*s", (int)dlen, rt_so);
+        } else {
+            snprintf(so_dir, sizeof(so_dir), "./");
+        }
+        const char *dyn_opts = g_uses_gui ? " -ldl -rdynamic" : "";
+        const char *dyn_gles = "";
+        if (g_uses_gui && getenv("VUS_GUI_GLES") && getenv("VUS_GUI_GLES")[0]) {
+            dyn_gles = " -lEGL -lGLESv2";
+        }
+        n = snprintf(cmd, sizeof(cmd),
+            "gcc %s -I\"%s\" %s \"%s\"%s -L\"%s\" -Wl,-rpath,\"%s\" -lvus_rt -o \"%s\" -lm -lpthread%s %s%s 2>&1",
+            opt_level,
+            abs_rt_dir,
+            xft_inc,
+            c_source_path,
+            extra_objects && extra_objects[0] ? extra_objects : "",
+            so_dir,
+            so_dir,
+            output_path,
+            dyn_opts,
+            gui_def,
+            dyn_gles);
+    } else if (use_static_rt) {
         /* ---- 静态库路径（推荐）：仅编译用户 C，运行时从 build/libvus_rt.a 链接 ----
            libvus_rt.a 已在 make 时以匹配的 PY/GUI flags 编译，故无需再拼 py_inc/gui 源。
            仅 GUI 用例需要追加 X11/Xft/-rdynamic/-ldl 与 -lstdc++（链接 .a 内的 C++ 包装）。 */
@@ -6697,6 +7460,37 @@ int vus_compile_c(const char *c_source_path, const char *output_path,
             snprintf(error_msg, error_size, "Command line too long");
         }
         return -1;
+    }
+
+    /* 体积档：在链接命令尾部注入函数级裁剪参数（--gc-sections 回收未引用段、
+       --strip-all 删符号）。各分支模板统一以 " 2>&1" 结尾，这里在结尾前插入，
+       与下方 strip 的"替换尾部"手法一致；动态链接路径同样受益（主程序瘦身）。 */
+    if (size_mode && size_link_opts[0]) {
+        char *tail = strstr(cmd, " 2>&1");
+        if (tail) {
+            size_t prefix_len = (size_t)(tail - cmd);
+            if (prefix_len + strlen(size_link_opts) + 6 < sizeof(cmd)) {
+                memcpy(tail, size_link_opts, strlen(size_link_opts));
+                memcpy(tail + strlen(size_link_opts), " 2>&1", 6);
+            }
+        }
+    }
+
+    /* strip（可选）：链接成功后瘦身。三个分支模板统一以 " 2>&1" 结尾，这里替换为
+       " && strip --strip-unneeded <输出> 2>&1"——链错即短路，绝不影响原失败诊断；
+       GUI 场景 -rdynamic 的导出符号在 dynsym 中，--strip-unneeded 不会误删。
+       体积档已内置 --strip-all，不再叠加外部 strip。 */
+    if (do_strip && !size_mode && cached_has_strip()) {
+        char *tail = strstr(cmd, " 2>&1");
+        if (tail) {
+            char strip_suffix[1100];
+            snprintf(strip_suffix, sizeof(strip_suffix),
+                     " && strip --strip-unneeded \"%s\" 2>&1", output_path);
+            size_t prefix_len = (size_t)(tail - cmd);
+            if (prefix_len + strlen(strip_suffix) < sizeof(cmd)) {
+                memcpy(tail, strip_suffix, strlen(strip_suffix) + 1);
+            }
+        }
     }
 
     /* 执行编译 */

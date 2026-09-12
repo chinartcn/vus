@@ -48,7 +48,13 @@ for test_file in "${TEST_DIR}/test_"*.vus; do
     # FFI Python 域用例：模块 ext_py.samplemath 位于 ../examples，注入
     # VUS_PLUGIN_DIR 使其进入 sys.path（与 C 单测段 test_plugin_inproc 同风格）
     RUN_ENV=()
-    if [ "$test_name" = "test_ext_py.vus" ] || [ "$test_name" = "test_ext_py_vars.vus" ]; then
+    if [ "$test_name" = "test_ext_py.vus" ] || [ "$test_name" = "test_ext_py_vars.vus" ] \
+       || [ "$test_name" = "test_py_game.vus" ]; then
+        # test_py_game 还需 .vux 插件就位于 ~/.vus/plugins/猜数游戏
+        if [ "$test_name" = "test_py_game.vus" ]; then
+            mkdir -p "$HOME/.vus/plugins"
+            cp -r ../examples/plugins/猜数游戏 "$HOME/.vus/plugins/" 2>/dev/null
+        fi
         RUN_ENV=(env VUS_PLUGIN_DIR="../examples")
     fi
     if output="$("${RUN_ENV[@]}" "$VUS" run "$test_file" 2>&1)"; then
@@ -159,6 +165,23 @@ else
     echo "  ❌ vua_api_ext 编译/运行失败（手工: bash -x run_tests.sh 定位）"
     FAIL=$((FAIL + 1))
     FAILED_FILES="$FAILED_FILES vua_api_ext(C)"
+fi
+
+# ---- TUI 画布子系统回归（test_tui_flush：差分刷新定位 + read_key 16 字节边界）----
+# 需要 util（openpty）；无 pty 环境降级跳过
+echo ""
+echo "运行 TUI 画布回归: test_tui_flush（差分定位/读键边界）"
+if gcc -I../rt -Wall -O0 test_tui_flush.c ../build/libvus_rt.a -o test_tui_flush -lutil 2>/dev/null; then
+    if ./test_tui_flush >/dev/null 2>&1; then
+        echo "  ✅ test_tui_flush 通过"
+        PASS=$((PASS + 1))
+    else
+        echo "  ❌ test_tui_flush 失败（重跑: ./test_tui_flush）"
+        FAIL=$((FAIL + 1))
+        FAILED_FILES="$FAILED_FILES test_tui_flush(C)"
+    fi
+else
+    echo "  ⚠️  test_tui_flush 编译失败，跳过（记录降级）"
 fi
 
 echo ""

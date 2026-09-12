@@ -1,0 +1,145 @@
+// VUS 语法高亮文件（MT 文本编辑器 .mtsx）
+// ------------------------------------------------------------------
+// 高亮内容：注释(# //)、字符串("..."/f"..." 插值串/"""多行模板+插值)、数字、
+// 英文/中文关键字、内建类型、函数调用、内置模块前缀(图形_/界面_/AI_/JSON_ 等)、
+// 运算符、括号配对，以及行背景色（结构/函数定义行、# === / // ---- 分隔注释线）。
+//
+// 安装方式：在 MT 管理器 / MT 文本编辑器中打开本文件，按提示"安装语法"即可；
+//           之后所有 .vus 文件自动应用该高亮（也可在编辑器中手动切换语法为 VUS）。
+//
+// 说明：
+//   - 本文件内勿使用 # 开头的行：MT 把"行首 #"当作预处理指令(#if/#else/#endif)。
+//   - MT 语法引擎使用 Java 正则。`\b` 对中文无效，故中文关键词一律用
+//     \u4E00-\u9FFF 范围 + 前后否定环视做词边界。
+//   - 匹配器按"同一位置写在前面的优先"竞争；字符串/注释类放在最前，避免
+//     后面的匹配器误吞字符串内容。
+{
+    name: ["VUS", ".vus"]
+    ignoreCase: false
+
+    bracketPairs: ["{}", "[]", "()"]
+
+    styles: [
+        // 亮色/暗色透明主题统一使用暗色 IntelliJ 风格配色：
+        // 下面两槽位（日间/夜间）填同一色值，任意主题下颜色一致。
+        // keyword=橙 #CC7832、string=绿 #6A8759、number=蓝 #6897BB、
+        // function=黄 #FFCB6B、method=紫蓝 #8888C6、parameter=红 #CA5936。
+        "func"          #FFCB6B    #FFCB6B    @_
+        "placeholder"   #CA5936    #CA5936    @_
+        // 行背景色：$ 后的颜色为行背景色（非文字背景）
+        "defLine"       #C9B8EC$241A33    #C9B8EC$241A33    @_
+        "sectionLine"   #8FD9A0$122B18    #8FD9A0$122B18    @_
+        // 内置模块前缀（图形_/界面_/AI_/JSON_ 等），method 色
+        "module"        #8888C6    #8888C6    @_
+        // 同名覆盖内置风格（两槽位同色，保证亮色/暗色主题一致）
+        "keyword"       #CC7832    #CC7832    @_
+        "string"        #6A8759    #6A8759    @_
+        "strEscape"     #CC7832    #CC7832    @_
+        "number"        #6897BB    #6897BB    @_
+        "comment"       #808080    #808080    @_
+        "operator"      #508090    #508090    @_
+        "type"          #808000    #808000    @_
+    ]
+
+    contains: [
+        // ---- 1) 三引号多行字符串 """..."""（跨行，含 {插值}） ----
+        {
+            start: {match: /"""/}
+            end: {match: /"""/}
+            childrenStyle: "string"
+            contains: [
+                {match: /\\(?:["'\\abfnrtv]|x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4})/, 0: "strEscape"}
+                {
+                    start: {match: /\{/}
+                    end: {match: /\}/}
+                    childrenStyle: "placeholder"
+                    contains: [
+                        {match: /\d+/, 0: "number"}
+                        {match: /(?:\.\.|<<|>>|<=|>=|==|!=|&&|\|\||[+\-*\/%=<>!&|^~])/, 0: "operator"}
+                    ]
+                }
+            ]
+        }
+
+        // ---- 2) 插值串 f"..."（单行，含 {插值}） ----
+        {
+            start: {match: /f"/}
+            end: {match: /(?<!\\)"/}
+            childrenStyle: "string"
+            contains: [
+                {match: /\\(?:["'\\abfnrtv]|x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4})/, 0: "strEscape"}
+                {
+                    start: {match: /\{/}
+                    end: {match: /\}/}
+                    childrenStyle: "placeholder"
+                    contains: [
+                        {match: /\d+/, 0: "number"}
+                        {match: /(?:\.\.|<<|>>|<=|>=|==|!=|&&|\|\||[+\-*\/%=<>!&|^~])/, 0: "operator"}
+                    ]
+                }
+            ]
+        }
+
+        // ---- 3) 普通字符串 "..."（含转义） ----
+        {
+            start: {match: /"/}
+            end: {match: /(?<!\\)"/}
+            childrenStyle: "string"
+            contains: [
+                {match: /\\(?:["'\\abfnrtv]|x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4})/, 0: "strEscape"}
+            ]
+        }
+
+        // ---- 4) 行背景色：函数/结构定义行（整行着色） ----
+        {
+            style: "defLine"
+            start: {match: /(?m)^[ \t]*(?:定义|def|结构|struct)[ \t]+[A-Za-z_\u4E00-\u9FFF]/}
+            end: {match: /(?m)\n|$/}
+        }
+
+        // ---- 5) 行背景色：分隔注释线（# ==== / // ---- 等） ----
+        {
+            style: "sectionLine"
+            start: {match: /(?m)^[ \t]*(?:#\s*[=]{2,}|#\s*-{2,}|\/\/\s*[=]{2,}|\/\/\s*-{2,}|#\/\/\s*[=]{2,}|#\/\/\s*-{2,})/}
+            end: {match: /(?m)\n|$/}
+        }
+
+        // ---- 6) 注释：# 行注释 与 // 行注释 ----
+        {start: {match: /#/}, end: {match: /(?m)\n|$/}, childrenStyle: "comment"}
+        {start: {match: /\/\//}, end: {match: /(?m)\n|$/}, childrenStyle: "comment"}
+
+        // ---- 7) 数字：二进制/十进制/十六进制/浮点/科学计数 ----
+        {number: "2|10|16|F|E", style: "number"}
+
+        // ---- 8) 英文关键字 ----
+        {match: keywordsToRegex("and break continue def elif else except false for from global if import in not null or return throw true try while"), 0: "keyword"}
+
+        // ---- 9) 中文关键字（\u4E00-\u9FFF 词边界） ----
+        {
+            match: /(?<![\u4E00-\u9FFFA-Za-z0-9_])(?:否则如果|当循环|等待线程|导入外部|导出变量|定义|如果|返回|循环|继续|跳出|导入|尝试|捕获|抛出|全局|线程|睡眠|协程|恢复|让出|等待|否则|从|到|和|或|非|在|真|假|空)(?![\u4E00-\u9FFFA-Za-z0-9_])/
+            0: "keyword"
+        }
+
+        // ---- 10) 内建类型 ----
+        {match: keywordsToRegex("bool dict float int list str"), 0: "type"}
+        {
+            match: /(?<![\u4E00-\u9FFFA-Za-z0-9_])(?:布尔型|整型|浮点型|字符串|结构)(?![\u4E00-\u9FFFA-Za-z0-9_])/
+            0: "type"
+        }
+
+        // ---- 11) 内置模块前缀：图形_/界面_/AI_/JSON_/tui_/网络_ 等（前缀单独着色） ----
+        {
+            match: /(?<![\u4E00-\u9FFFA-Za-z0-9_])(?:AI|JSON|tui|Termux|通知|分享|剪贴板|压缩|命令|屏幕|拓展|插件|传感器|热更|电源|解压|设备|正则|主题|文件|文本|列表|字典|日志|日期|图形|图片|界面|音频|网络|网页)_/
+            0: "module"
+        }
+
+        // ---- 12) 函数调用：任意标识符( （含中文函数名/内建函数） ----
+        {
+            match: /(?<![\u4E00-\u9FFFA-Za-z0-9_])[A-Za-z_\u4E00-\u9FFF][A-Za-z0-9_\u4E00-\u9FFF]*(?=\s*\()/
+            0: "func"
+        }
+
+        // ---- 13) 运算符 ----
+        {match: /(?:\.\.|<<|>>|<=|>=|==|!=|&&|\|\||[+\-*\/%=<>!&|^~])/, 0: "operator"}
+    ]
+}

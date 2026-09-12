@@ -514,6 +514,129 @@ static void lexer_read_fstring(VusLexer *lexer)
 }
 
 /*
+ * 读取三引号多行字符串 """..."""（VUS_TOKEN_FSTRING）。
+ *
+ * 语法："""文本{表达式}文本..."""（等价多行 f-string）
+ *  - 允许换行（换行符原样保留在 value 中，parser 拆段后由生成器转义为 \n）；
+ *  - {..} 插值规则与单行 f-string 完全一致（parser 复用 parse_fstring）；
+ *  - 内部单个/双引号按内容保留，连续三个引号闭合；
+ *  - 文本态支持 \n \r \t \\ \" \{ \} 转义；`\{` 转义字面左花括号。
+ */
+static void lexer_read_triple_string(VusLexer *lexer)
+{
+    int line = lexer->line;
+    int col  = lexer->column;
+
+    /* 跳过三个引号 */
+    lexer_advance(lexer);
+    lexer_advance(lexer);
+    lexer_advance(lexer);
+
+    size_t cap = 256;
+    size_t len = 0;
+    char *buf = malloc(cap);
+    if (!buf) {
+        lexer_set_error(lexer, "内存不足：无法分配三引号字符串缓冲区");
+        return;
+    }
+
+    int interp = 0;   /* 1=处于 {..} 插值态（原样复制） */
+    while (lexer->pos < lexer->source_len) {
+        char c = lexer->source[lexer->pos];
+
+        if (interp) {
+            if (c == '}') {
+                if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
+                buf[len++] = '}';
+                interp = 0;
+                lexer_advance(lexer);
+            } else {
+                /* 插值表达式内换行：原样复制（子解析器按空白处理） */
+                if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
+                buf[len++] = c;
+                lexer_advance(lexer);
+            }
+            continue;
+        }
+
+        if (c == '"') {
+            int nq = 0;
+            while (lexer->pos + nq < lexer->source_len && lexer->source[lexer->pos + nq] == '"')
+                nq++;
+            if (nq >= 3) {
+                /* 连续三个引号：闭合 */
+                lexer_advance(lexer);
+                lexer_advance(lexer);
+                lexer_advance(lexer);
+                buf[len] = '\0';
+                lexer_add_token_value(lexer, VUS_TOKEN_FSTRING, buf, line, col);
+                free(buf);
+                return;
+            }
+            /* 单个/双引号：按内容保留 */
+            for (int i = 0; i < nq; i++) {
+                if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
+                buf[len++] = '"';
+                lexer_advance(lexer);
+            }
+            continue;
+        }
+        if (c == '{') {
+            if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
+            buf[len++] = '{';
+            interp = 1;
+            lexer_advance(lexer);
+            continue;
+        }
+        if (c == '\\') {
+            lexer_advance(lexer);
+            if (lexer->pos >= lexer->source_len) {
+                lexer_set_error(lexer, "三引号字符串中反斜杠后缺少字符");
+                free(buf);
+                return;
+            }
+            char esc = lexer->source[lexer->pos];
+            lexer_advance(lexer);
+            switch (esc) {
+            case 'n':
+                if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
+                buf[len++] = '\n'; break;
+            case 'r':
+                if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
+                buf[len++] = '\r'; break;
+            case 't':
+                if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
+                buf[len++] = '\t'; break;
+            case '\\':
+                if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
+                buf[len++] = '\\'; break;
+            case '"':
+                if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
+                buf[len++] = '"'; break;
+            case '{':
+                if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
+                buf[len++] = '{'; break;
+            case '}':
+                if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
+                buf[len++] = '}'; break;
+            default:
+                /* 未知转义保持原样 */
+                if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
+                buf[len++] = esc;
+                break;
+            }
+        } else {
+            if (len + 1 >= cap) { buf = lexer_buf_grow(buf, &cap, len + 1, lexer); if (!buf) return; }
+            buf[len++] = c;
+            lexer_advance(lexer);
+        }
+    }
+
+    lexer_set_error(lexer, "三引号字符串未闭合（遇到文件末尾）");
+    free(buf);
+}
+
+/*
  * 读取数字字面量。
  * 支持：十进制整数/浮点数、十六进制 (0x)、二进制 (0b)。
  */
@@ -829,6 +952,14 @@ VusToken *vus_lexer_tokenize(VusLexer *lexer, size_t *out_count)
             }
         } else if (vus_is_ident_start((unsigned char)c)) {
             lexer_read_identifier(lexer);
+            continue;
+        }
+
+        /* === 三引号多行字符串 """..."""（支持跨行与 {表达式} 插值） === */
+        if (c == '"' && lexer->pos + 2 < lexer->source_len &&
+            lexer->source[lexer->pos + 1] == '"' &&
+            lexer->source[lexer->pos + 2] == '"') {
+            lexer_read_triple_string(lexer);
             continue;
         }
 

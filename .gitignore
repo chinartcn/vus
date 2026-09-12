@@ -12,6 +12,7 @@ release/
 tests/test_plugin_inproc
 examples/vua-android/jni/
 tests/vua_smoke
+tests/test_tui_flush
 
 # 性能/演示脚手架
 .bench/
